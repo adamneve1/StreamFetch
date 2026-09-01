@@ -1,0 +1,26 @@
+# Secrets / environment
+.env
+.env.*
+credentials/
+
+# Runtime downloads
+downloads/
+*.mp4
+*.mkv
+*.webm
+*.m4a
+*.mp3
+*.part
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.log

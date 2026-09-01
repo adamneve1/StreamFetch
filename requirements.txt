@@ -1,0 +1,5 @@
+python-telegram-bot==22.5
+redis==6.4.0
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
