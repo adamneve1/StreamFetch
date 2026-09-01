@@ -20,7 +20,17 @@ r = redis.Redis(
     host=REDIS_HOST,
     port=6379,
     decode_responses=True,
+    socket_connect_timeout=2,
+    socket_timeout=2,
+    health_check_interval=30,
 )
+
+
+def clear_job_state(job_id, chat_id):
+    if job_id:
+        r.delete(f"stop:{job_id}")
+    if chat_id is not None:
+        r.delete(f"active:{chat_id}")
 
 bot = Bot(token=TOKEN)
 
@@ -167,6 +177,25 @@ async def watch_stop(job_id, process):
     return False
 
 
+async def stop_process(process, job_id, chat_id):
+    if process.returncode is not None:
+        clear_job_state(job_id, chat_id)
+        return
+
+    try:
+        process.send_signal(signal.SIGINT)
+        await asyncio.wait_for(process.wait(), timeout=10)
+    except asyncio.TimeoutError:
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+    finally:
+        clear_job_state(job_id, chat_id)
+
+
 async def run_download(job):
 
     chat_id = job["chat_id"]
@@ -175,6 +204,7 @@ async def run_download(job):
     stop_key = f"stop:{job_id}"
     active_key = f"active:{chat_id}"
 
+    r.delete(stop_key)
     r.set(active_key, job_id, ex=86400)
 
     status = await send(
@@ -322,12 +352,7 @@ async def run_download(job):
                     "🔧 Finalizing recording..."
                 )
 
-                if process.returncode is None:
-                    process.send_signal(signal.SIGINT)
-
-                await process.wait()
-                r.delete(stop_key)
-                r.delete(active_key)
+                await stop_process(process, job_id, chat_id)
                 await edit(
                     chat_id,
                     status.message_id,
@@ -402,7 +427,7 @@ async def run_download(job):
             "❌ Download failed."
         )
 
-        r.delete(active_key)
+        clear_job_state(job_id, chat_id)
         return
 
     await edit(
@@ -439,7 +464,7 @@ async def run_download(job):
         f"📁 {latest.name}\n"
         f"💾 {format_size(latest.stat().st_size)}"
     )
-    r.delete(active_key)
+    clear_job_state(job_id, chat_id)
 
 
 async def main():
@@ -448,10 +473,15 @@ async def main():
 
     while True:
 
-        item = r.blpop(
-            "download_queue",
-            timeout=5,
-        )
+        try:
+            item = r.blpop(
+                "download_queue",
+                timeout=5,
+            )
+        except redis.exceptions.ConnectionError as exc:
+            print("Redis connection error:", exc)
+            await asyncio.sleep(5)
+            continue
 
         if not item:
             continue
@@ -475,6 +505,8 @@ async def main():
                 "Job error:",
                 e,
             )
+            if job.get("job_id"):
+                clear_job_state(job["job_id"], job.get("chat_id"))
         finally:
             job_id = job.get("job_id")
             active_key = f"active:{job['chat_id']}"
