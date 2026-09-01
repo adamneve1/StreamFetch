@@ -8,7 +8,9 @@ import re
 import uuid
 from datetime import datetime
 
+# pyrefly: ignore [missing-import]
 import redis
+# pyrefly: ignore [missing-import]
 from telegram import Bot
 
 
@@ -173,7 +175,7 @@ def probe_media_file(path):
                 "-v",
                 "error",
                 "-show_entries",
-                "format=format_name:stream=codec_type:stream=codec_name",
+                "format=format_name:stream=codec_type:stream=codec_name:stream=pix_fmt",
                 "-of",
                 "json",
                 str(path),
@@ -206,15 +208,38 @@ def probe_media_file(path):
         (stream.get("codec_name", "unknown") for stream in streams if stream.get("codec_type") == "audio"),
         "unknown",
     )
+    pix_fmt = next(
+        (stream.get("pix_fmt", "unknown") for stream in streams if stream.get("codec_type") == "video"),
+        "unknown",
+    )
 
     return {
         "container": format_name,
         "video_codec": video_codec,
         "audio_codec": audio_codec,
+        "pix_fmt": pix_fmt,
     }
 
 
-def remux_to_mp4(path):
+# Video codecs considered compatible with MP4 + Windows Media Player.
+# Everything else triggers an H.264 re-encode.
+_COMPATIBLE_VIDEO_CODECS = {"h264", "avc", "avc1"}
+
+
+def finalize_to_compatible_mp4(path):
+    """Ensure *path* becomes a universally-compatible MP4 file.
+
+    Rules
+    -----
+    * If the file is already MP4 / H.264 / AAC / yuv420p → no work needed.
+    * If the container is wrong → at minimum remux.
+    * If the video codec is not H.264 (VP9, AV1, …) → re-encode video to
+      libx264 with ``-pix_fmt yuv420p``.
+    * If the pixel format is not yuv420p → re-encode video.
+    * If the audio codec is not AAC → re-encode audio to AAC.
+    * Always add ``-movflags +faststart``.
+    * Writes to a temporary file first; only replaces the original on success.
+    """
 
     probe = probe_media_file(path)
     if not probe:
@@ -223,63 +248,104 @@ def remux_to_mp4(path):
     container = (probe["container"] or "unknown").lower()
     video_codec = (probe["video_codec"] or "unknown").lower()
     audio_codec = (probe["audio_codec"] or "unknown").lower()
+    pix_fmt = (probe["pix_fmt"] or "unknown").lower()
 
-    print(f"Actual container: {container}")
-    print(f"Video codec: {video_codec}")
-    print(f"Audio codec: {audio_codec}")
-    print(f"Final file path: {path}")
+    print(f"Probe  – container: {container}")
+    print(f"Probe  – video codec: {video_codec}")
+    print(f"Probe  – audio codec: {audio_codec}")
+    print(f"Probe  – pix_fmt: {pix_fmt}")
+    print(f"Probe  – file: {path}")
 
-    if "mp4" in container:
+    need_video_reencode = video_codec not in _COMPATIBLE_VIDEO_CODECS or pix_fmt != "yuv420p"
+    need_audio_reencode = audio_codec != "aac"
+    is_mp4 = "mp4" in container
+
+    # Fast path: nothing to do at all.
+    if is_mp4 and not need_video_reencode and not need_audio_reencode:
+        print("File is already a compatible MP4 – no processing needed.")
         return path
 
-    temp_path = path.with_name(f"{path.name}.remux.mp4")
-    print(f"Remuxing non-MP4 file: {path} -> {temp_path}")
+    action_parts = []
+    if need_video_reencode:
+        action_parts.append(f"re-encode video ({video_codec}/{pix_fmt} → h264/yuv420p)")
+    if need_audio_reencode:
+        action_parts.append(f"re-encode audio ({audio_codec} → aac)")
+    if not is_mp4:
+        action_parts.append(f"remux container ({container} → mp4)")
+    print(f"Finalize actions: {', '.join(action_parts)}")
+
+    # Build ffmpeg command --------------------------------------------------
+    temp_path = path.with_name(f"{path.stem}.finalize_tmp.mp4")
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", str(path),
+    ]
+
+    if need_video_reencode:
+        cmd += [
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "18",
+            "-pix_fmt", "yuv420p",
+        ]
+    else:
+        cmd += ["-c:v", "copy"]
+
+    if need_audio_reencode:
+        cmd += ["-c:a", "aac", "-b:a", "192k"]
+    else:
+        cmd += ["-c:a", "copy"]
+
+    cmd += ["-movflags", "+faststart", str(temp_path)]
+
+    print(f"Running: {' '.join(cmd)}")
 
     try:
-        result = subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(path),
-                "-c",
-                "copy",
-                str(temp_path),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     except FileNotFoundError:
         print("ffmpeg not found in PATH.")
         return None
 
     if result.returncode != 0:
         stderr = result.stderr.strip() or result.stdout.strip() or "unknown ffmpeg error"
-        print(f"ffmpeg remux failed: {stderr}")
-        return None
-
-    remuxed_probe = probe_media_file(temp_path)
-    if not remuxed_probe:
+        print(f"ffmpeg finalize failed: {stderr}")
         temp_path.unlink(missing_ok=True)
         return None
 
-    remuxed_container = (remuxed_probe["container"] or "unknown").lower()
-    if "mp4" not in remuxed_container:
-        print(f"Remuxed file is still not MP4: {remuxed_container}")
+    # Validate the temp file before committing ------------------------------
+    tmp_probe = probe_media_file(temp_path)
+    if not tmp_probe:
+        print("Could not probe finalized temp file.")
         temp_path.unlink(missing_ok=True)
         return None
 
+    tmp_container = (tmp_probe["container"] or "unknown").lower()
+    tmp_video = (tmp_probe["video_codec"] or "unknown").lower()
+    tmp_audio = (tmp_probe["audio_codec"] or "unknown").lower()
+    tmp_pix = (tmp_probe["pix_fmt"] or "unknown").lower()
+
+    print(f"Temp   – container: {tmp_container}")
+    print(f"Temp   – video codec: {tmp_video}")
+    print(f"Temp   – audio codec: {tmp_audio}")
+    print(f"Temp   – pix_fmt: {tmp_pix}")
+
+    if (
+        "mp4" not in tmp_container
+        or tmp_video not in _COMPATIBLE_VIDEO_CODECS
+        or tmp_audio != "aac"
+        or tmp_pix != "yuv420p"
+    ):
+        print("Finalized temp file does not meet compatibility requirements – aborting.")
+        temp_path.unlink(missing_ok=True)
+        return None
+
+    # Atomically swap -------------------------------------------------------
     path.unlink(missing_ok=True)
     temp_path.replace(path)
 
-    final_probe = probe_media_file(path)
-    if final_probe:
-        print(f"Actual container: {(final_probe['container'] or 'unknown').lower()}")
-        print(f"Video codec: {(final_probe['video_codec'] or 'unknown').lower()}")
-        print(f"Audio codec: {(final_probe['audio_codec'] or 'unknown').lower()}")
-        print(f"Final file path: {path}")
-
+    print(f"Finalized successfully: {path}")
     return path
 
 
@@ -617,7 +683,9 @@ async def run_download(job):
     files = [
         path
         for path in DOWNLOAD_DIR.glob(f"{job_id}-*")
-        if path.is_file() and ".part" not in path.name.lower()
+        if path.is_file()
+        and not path.name.lower().endswith((".part", ".ytdl"))
+        and ".part" not in path.name.lower()
     ]
 
     if not files:
@@ -635,17 +703,18 @@ async def run_download(job):
         files,
         key=lambda p: p.stat().st_mtime,
     )
-    final_path = remux_to_mp4(latest)
+    final_path = finalize_to_compatible_mp4(latest)
 
     if final_path is None:
         await edit(
             chat_id,
             status.message_id,
-            "❌ Downloaded file is not valid MP4 after remux."
+            "❌ Finalization failed – could not produce a compatible MP4."
         )
         r.delete(active_key)
         return
 
+    # --- Strict final validation -------------------------------------------
     final_info = probe_media_file(final_path)
     if not final_info:
         await edit(
@@ -659,17 +728,26 @@ async def run_download(job):
     final_container = (final_info["container"] or "unknown").lower()
     final_video_codec = (final_info["video_codec"] or "unknown").lower()
     final_audio_codec = (final_info["audio_codec"] or "unknown").lower()
+    final_pix_fmt = (final_info["pix_fmt"] or "unknown").lower()
 
-    print(f"Actual container: {final_container}")
-    print(f"Video codec: {final_video_codec}")
-    print(f"Audio codec: {final_audio_codec}")
-    print(f"Final file path: {final_path}")
+    print(f"Final  – container: {final_container}")
+    print(f"Final  – video codec: {final_video_codec}")
+    print(f"Final  – audio codec: {final_audio_codec}")
+    print(f"Final  – pix_fmt: {final_pix_fmt}")
+    print(f"Final  – file: {final_path}")
 
-    if "mp4" not in final_container:
+    if (
+        "mp4" not in final_container
+        or final_video_codec not in _COMPATIBLE_VIDEO_CODECS
+        or final_audio_codec != "aac"
+        or final_pix_fmt != "yuv420p"
+    ):
         await edit(
             chat_id,
             status.message_id,
-            "❌ Final output is not an MP4 container."
+            "❌ Final file does not meet compatibility requirements "
+            f"(container={final_container}, video={final_video_codec}, "
+            f"audio={final_audio_codec}, pix_fmt={final_pix_fmt})."
         )
         r.delete(active_key)
         return
@@ -690,8 +768,7 @@ async def run_download(job):
         f"✅ Download complete!\n\n"
         f"📁 {final_path.name}\n"
         f"💾 {format_size(final_path.stat().st_size)}\n"
-        f"🎞️ {final_video_codec}\n"
-        f"🔊 {final_audio_codec}"
+        f"🎞️ h264 / aac / yuv420p"
     )
     clear_job_state(job_id, chat_id)
 
