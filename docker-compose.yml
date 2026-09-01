@@ -1,7 +1,13 @@
+# Set these to your host values before starting:
+#   export UID=$(id -u)
+#   export GID=$(id -g)
+# or populate them in the local .env file.
+
 services:
   bot:
     build: .
     container_name: yt-bot
+    user: "${UID:-1000}:${GID:-1000}"
     command: python -u app/bot.py
     restart: unless-stopped
     env_file:
@@ -14,6 +20,7 @@ services:
   worker:
     build: .
     container_name: yt-worker
+    user: "${UID:-1000}:${GID:-1000}"
     command: python -u app/worker.py
     restart: unless-stopped
     env_file:

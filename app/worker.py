@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import subprocess
 from pathlib import Path
 import signal
 import re
@@ -20,8 +21,8 @@ r = redis.Redis(
     host=REDIS_HOST,
     port=6379,
     decode_responses=True,
-    socket_connect_timeout=2,
-    socket_timeout=2,
+    socket_connect_timeout=5,
+    socket_timeout=30,
     health_check_interval=30,
 )
 
@@ -109,6 +110,125 @@ def progress_bar(percent):
         "█" * filled
         + "░" * (length - filled)
     )
+
+
+def probe_media_file(path):
+
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=format_name:stream=codec_type:stream=codec_name",
+                "-of",
+                "json",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        print("ffprobe not found in PATH.")
+        return None
+
+    if result.returncode != 0:
+        print(f"ffprobe failed for {path}: {result.stderr.strip()}")
+        return None
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        print(f"Could not parse ffprobe output for {path}: {exc}")
+        return None
+
+    format_name = (data.get("format") or {}).get("format_name", "unknown")
+    streams = data.get("streams", [])
+    video_codec = next(
+        (stream.get("codec_name", "unknown") for stream in streams if stream.get("codec_type") == "video"),
+        "unknown",
+    )
+    audio_codec = next(
+        (stream.get("codec_name", "unknown") for stream in streams if stream.get("codec_type") == "audio"),
+        "unknown",
+    )
+
+    return {
+        "container": format_name,
+        "video_codec": video_codec,
+        "audio_codec": audio_codec,
+    }
+
+
+def remux_to_mp4(path):
+
+    probe = probe_media_file(path)
+    if not probe:
+        return None
+
+    container = (probe["container"] or "unknown").lower()
+    video_codec = (probe["video_codec"] or "unknown").lower()
+    audio_codec = (probe["audio_codec"] or "unknown").lower()
+
+    print(f"Actual container: {container}")
+    print(f"Video codec: {video_codec}")
+    print(f"Audio codec: {audio_codec}")
+    print(f"Final file path: {path}")
+
+    if "mp4" in container:
+        return path
+
+    temp_path = path.with_name(f"{path.name}.remux.mp4")
+    print(f"Remuxing non-MP4 file: {path} -> {temp_path}")
+
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(path),
+                "-c",
+                "copy",
+                str(temp_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        print("ffmpeg not found in PATH.")
+        return None
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip() or "unknown ffmpeg error"
+        print(f"ffmpeg remux failed: {stderr}")
+        return None
+
+    remuxed_probe = probe_media_file(temp_path)
+    if not remuxed_probe:
+        temp_path.unlink(missing_ok=True)
+        return None
+
+    remuxed_container = (remuxed_probe["container"] or "unknown").lower()
+    if "mp4" not in remuxed_container:
+        print(f"Remuxed file is still not MP4: {remuxed_container}")
+        temp_path.unlink(missing_ok=True)
+        return None
+
+    path.unlink(missing_ok=True)
+    temp_path.replace(path)
+
+    final_probe = probe_media_file(path)
+    if final_probe:
+        print(f"Actual container: {(final_probe['container'] or 'unknown').lower()}")
+        print(f"Video codec: {(final_probe['video_codec'] or 'unknown').lower()}")
+        print(f"Audio codec: {(final_probe['audio_codec'] or 'unknown').lower()}")
+        print(f"Final file path: {path}")
+
+    return path
 
 
 def parse_progress(text):
@@ -306,6 +426,9 @@ async def run_download(job):
         "--merge-output-format",
         "mp4",
 
+        "--remux-video",
+        "mp4",
+
         "--no-playlist",
 
         "--newline",
@@ -439,14 +562,18 @@ async def run_download(job):
 
     await asyncio.sleep(1)
 
-    files = list(DOWNLOAD_DIR.glob(f"{job_id}-*.mp4"))
+    files = [
+        path
+        for path in DOWNLOAD_DIR.glob(f"{job_id}-*")
+        if path.is_file() and ".part" not in path.name.lower()
+    ]
 
     if not files:
 
         await edit(
             chat_id,
             status.message_id,
-            "❌ No MP4 found."
+            "❌ No output file found."
         )
 
         r.delete(active_key)
@@ -456,13 +583,53 @@ async def run_download(job):
         files,
         key=lambda p: p.stat().st_mtime,
     )
+    final_path = remux_to_mp4(latest)
+
+    if final_path is None:
+        await edit(
+            chat_id,
+            status.message_id,
+            "❌ Downloaded file is not valid MP4 after remux."
+        )
+        r.delete(active_key)
+        return
+
+    final_info = probe_media_file(final_path)
+    if not final_info:
+        await edit(
+            chat_id,
+            status.message_id,
+            "❌ Could not validate final media file."
+        )
+        r.delete(active_key)
+        return
+
+    final_container = (final_info["container"] or "unknown").lower()
+    final_video_codec = (final_info["video_codec"] or "unknown").lower()
+    final_audio_codec = (final_info["audio_codec"] or "unknown").lower()
+
+    print(f"Actual container: {final_container}")
+    print(f"Video codec: {final_video_codec}")
+    print(f"Audio codec: {final_audio_codec}")
+    print(f"Final file path: {final_path}")
+
+    if "mp4" not in final_container:
+        await edit(
+            chat_id,
+            status.message_id,
+            "❌ Final output is not an MP4 container."
+        )
+        r.delete(active_key)
+        return
 
     await edit(
         chat_id,
         status.message_id,
         f"✅ Download complete!\n\n"
-        f"📁 {latest.name}\n"
-        f"💾 {format_size(latest.stat().st_size)}"
+        f"📁 {final_path.name}\n"
+        f"💾 {format_size(final_path.stat().st_size)}\n"
+        f"🎞️ {final_video_codec}\n"
+        f"🔊 {final_audio_codec}"
     )
     clear_job_state(job_id, chat_id)
 
