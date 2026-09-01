@@ -6,6 +6,7 @@ from pathlib import Path
 import signal
 import re
 import uuid
+from datetime import datetime
 
 import redis
 from telegram import Bot
@@ -96,6 +97,57 @@ def format_size(size):
         size /= 1024
 
     return f"{size:.1f} PB"
+
+
+def sanitize_filename(title):
+    """
+    Sanitize a title to be filesystem-safe while preserving readability.
+    Removes or replaces invalid filesystem characters.
+    """
+    # Replace common problematic characters
+    safe_title = re.sub(r'[<>:"/\\|?*]', '', title)
+    # Remove leading/trailing spaces and dots
+    safe_title = safe_title.strip('. ')
+    # Limit length to prevent filesystem issues (leaving room for date prefix and extension)
+    # DDMMYY- is 7 chars, .mp4 is 4 chars, so 255 - 7 - 4 = 244
+    if len(safe_title) > 200:
+        safe_title = safe_title[:200].rstrip()
+    return safe_title
+
+
+def generate_final_filename(title):
+    """
+    Generate the final filename in DDMMYY-{title}.mp4 format.
+    Handles collision avoidance by adding a numeric suffix if the file already exists.
+    Uses the server's local timezone.
+    """
+    # Get current date in server's local timezone
+    now = datetime.now()
+    date_str = now.strftime("%d%m%y")
+    
+    # Sanitize the title
+    safe_title = sanitize_filename(title)
+    
+    # Generate base filename
+    base_filename = f"{date_str}-{safe_title}.mp4"
+    final_path = DOWNLOAD_DIR / base_filename
+    
+    # If file doesn't exist, return it as-is
+    if not final_path.exists():
+        return final_path
+    
+    # Handle collision: add numeric suffix
+    counter = 1
+    while counter <= 999:  # Limit attempts to prevent infinite loops
+        alt_filename = f"{date_str}-{safe_title}_{counter:03d}.mp4"
+        alt_path = DOWNLOAD_DIR / alt_filename
+        if not alt_path.exists():
+            return alt_path
+        counter += 1
+    
+    # Fallback (should rarely happen): use job_id as last resort
+    fallback_filename = f"{date_str}-{safe_title}_{uuid.uuid4().hex[:8]}.mp4"
+    return DOWNLOAD_DIR / fallback_filename
 
 
 def progress_bar(percent):
@@ -621,6 +673,16 @@ async def run_download(job):
         )
         r.delete(active_key)
         return
+
+    # Rename file to DDMMYY-{title}.mp4 format
+    new_path = generate_final_filename(title)
+    try:
+        final_path.rename(new_path)
+        final_path = new_path
+        print(f"Renamed to final format: {final_path.name}")
+    except Exception as e:
+        print(f"Warning: Could not rename file to final format: {e}")
+        # Continue with current name if rename fails
 
     await edit(
         chat_id,
