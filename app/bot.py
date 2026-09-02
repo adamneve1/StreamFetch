@@ -2,9 +2,12 @@ import os
 import json
 import re
 import uuid
+# pyrefly: ignore [missing-import]
 import redis
 
+# pyrefly: ignore [missing-import]
 from telegram import Update
+# pyrefly: ignore [missing-import]
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -37,9 +40,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "🎬 YouTube Downloader\n\n"
-        "Send a YouTube URL to download/record.\n\n"
-        "Commands:\n"
-        "/stop - stop current recording"
+        "Kirim aja link YouTube-nya buat download atau rekam live.\n\n"
+        "Perintah:\n"
+        "/stop - berentin rekaman yang lagi jalan"
     )
 
 
@@ -50,7 +53,7 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not job_id:
         await update.message.reply_text(
-            "ℹ️ No active download found."
+            "ℹ️ Lagi gak ada download yang jalan nih."
         )
         return
 
@@ -61,8 +64,8 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(
-        "🛑 Stop requested.\n"
-        "Waiting for downloader to finalize..."
+        "🛑 Oke, lagi diberentiin...\n"
+        "Tunggu bentar ya, lagi finalisasi file."
     )
 
 
@@ -73,7 +76,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_youtube_url(url):
 
         await update.message.reply_text(
-            "❌ Please send a YouTube URL."
+            "❌ Itu bukan link YouTube, coba kirim yang bener ya."
         )
 
         return
@@ -90,7 +93,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(
-        "📥 Added to download queue."
+        "📥 Siap, udah masuk antrian download."
     )
 
 

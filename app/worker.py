@@ -378,10 +378,10 @@ def parse_progress(text):
 
 def live_progress(title, progress):
 
-    parts = ["🔴 Recording LIVE", "", f"🎬 {title}"]
+    parts = ["🔴 Lagi Rekam LIVE", "", f"🎬 {title}"]
 
     if progress["size"]:
-        parts.append(f"⏺ {progress['size']} recorded")
+        parts.append(f"⏺ {progress['size']} terekam")
 
     if progress["speed"]:
         parts.append(f"⚡ {progress['speed']}")
@@ -446,7 +446,7 @@ async def run_download(job):
 
     status = await send(
         chat_id,
-        "📥 Starting download..."
+        "📥 Mulai download..."
     )
 
     if not status:
@@ -477,7 +477,7 @@ async def run_download(job):
         await edit(
             chat_id,
             status.message_id,
-            "❌ Could not access YouTube video."
+            "❌ Gagal akses video YouTube-nya nih."
         )
 
         r.delete(active_key)
@@ -494,7 +494,7 @@ async def run_download(job):
         await edit(
             chat_id,
             status.message_id,
-            "❌ Could not read YouTube metadata."
+            "❌ Gagal baca metadata YouTube-nya."
         )
 
         r.delete(active_key)
@@ -515,9 +515,9 @@ async def run_download(job):
         await edit(
             chat_id,
             status.message_id,
-            f"🔴 LIVE detected\n\n"
+            f"🔴 LIVE terdeteksi\n\n"
             f"🎬 {title}\n\n"
-            f"⏺ Recording..."
+            f"⏺ Mulai rekam..."
         )
 
     else:
@@ -525,7 +525,7 @@ async def run_download(job):
         await edit(
             chat_id,
             status.message_id,
-            f"📥 Downloading\n\n"
+            f"📥 Lagi download\n\n"
             f"🎬 {title}"
         )
 
@@ -538,7 +538,7 @@ async def run_download(job):
         "yt-dlp",
 
         "-f",
-        "bestvideo*+bestaudio/best",
+        "bv*[vcodec^=avc1]+ba[acodec^=mp4a]/bv*[vcodec^=avc1]+ba/bv*+ba/b",
 
         "--merge-output-format",
         "mp4",
@@ -588,16 +588,16 @@ async def run_download(job):
                 await edit(
                     chat_id,
                     status.message_id,
-                    "🛑 Stopping...\n\n"
-                    "🔧 Finalizing recording..."
+                    "🛑 Lagi diberentiin...\n\n"
+                    "🔧 Finalisasi rekaman..."
                 )
 
                 await stop_process(process, job_id, chat_id)
                 await edit(
                     chat_id,
                     status.message_id,
-                    "✅ Recording stopped.\n\n"
-                    "File finalized."
+                    "✅ Rekaman udah diberentiin.\n\n"
+                    "File udah siap."
                 )
                 return
 
@@ -636,7 +636,7 @@ async def run_download(job):
 
                 last_percent = percent
                 message = (
-                    f"📥 Downloading\n\n"
+                    f"📥 Lagi download\n\n"
                     f"🎬 {title}\n\n"
                     f"{progress_bar(percent)} {percent:.1f}%"
                 )
@@ -664,7 +664,7 @@ async def run_download(job):
         await edit(
             chat_id,
             status.message_id,
-            "❌ Download failed."
+            "❌ Download gagal."
         )
 
         clear_job_state(job_id, chat_id)
@@ -673,8 +673,8 @@ async def run_download(job):
     await edit(
         chat_id,
         status.message_id,
-        "🔧 Download finished.\n\n"
-        "Finalizing..."
+        "🔧 Download selesai.\n\n"
+        "Lagi finalisasi..."
     )
 
     await asyncio.sleep(1)
@@ -692,7 +692,7 @@ async def run_download(job):
         await edit(
             chat_id,
             status.message_id,
-            "❌ No output file found."
+            "❌ File hasil download gak ketemu."
         )
 
         r.delete(active_key)
@@ -708,7 +708,7 @@ async def run_download(job):
         await edit(
             chat_id,
             status.message_id,
-            "❌ Finalization failed – could not produce a compatible MP4."
+            "❌ Finalisasi gagal – gak bisa bikin MP4 yang kompatibel."
         )
         r.delete(active_key)
         return
@@ -719,7 +719,7 @@ async def run_download(job):
         await edit(
             chat_id,
             status.message_id,
-            "❌ Could not validate final media file."
+            "❌ Gagal validasi file akhir."
         )
         r.delete(active_key)
         return
@@ -744,7 +744,7 @@ async def run_download(job):
         await edit(
             chat_id,
             status.message_id,
-            "❌ Final file does not meet compatibility requirements "
+            "❌ File akhir gak memenuhi syarat kompatibilitas "
             f"(container={final_container}, video={final_video_codec}, "
             f"audio={final_audio_codec}, pix_fmt={final_pix_fmt})."
         )
@@ -764,7 +764,7 @@ async def run_download(job):
     await edit(
         chat_id,
         status.message_id,
-        f"✅ Download complete!\n\n"
+        f"✅ Download selesai!\n\n"
         f"📁 {final_path.name}\n"
         f"💾 {format_size(final_path.stat().st_size)}\n"
         f"🎞️ h264 / aac / yuv420p"
