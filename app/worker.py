@@ -110,10 +110,9 @@ def sanitize_filename(title):
     safe_title = re.sub(r'[<>:"/\\|?*]', '', title)
     # Remove leading/trailing spaces and dots
     safe_title = safe_title.strip('. ')
-    # Limit length to prevent filesystem issues (leaving room for date prefix and extension)
-    # DDMMYY- is 7 chars, .mp4 is 4 chars, so 255 - 7 - 4 = 244
-    if len(safe_title) > 200:
-        safe_title = safe_title[:200].rstrip()
+    # Limit title to 15 chars for clean filenames (DDMMYY-title.mp4)
+    if len(safe_title) > 15:
+        safe_title = safe_title[:15].rstrip()
     return safe_title
 
 
