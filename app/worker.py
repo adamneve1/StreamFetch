@@ -110,7 +110,7 @@ def sanitize_filename(title):
     safe_title = re.sub(r'[<>:"/\\|?*]', '', title)
     # Remove leading/trailing spaces and dots
     safe_title = safe_title.strip('. ')
-    # Limit title to 15 chars for clean filenames (DDMMYY-title.mp4)
+    # Limit title to 15 chars for clean filenames.
     if len(safe_title) > 15:
         safe_title = safe_title[:15].rstrip()
     return safe_title
@@ -118,37 +118,24 @@ def sanitize_filename(title):
 
 def generate_final_filename(title):
     """
-    Generate the final filename in DDMMYY-{title}.mp4 format.
-    Handles collision avoidance by adding a numeric suffix if the file already exists.
+    Generate the final filename in DDMMYYNN.mp4 format, where NN is the
+    download number for that date.
     Uses the server's local timezone.
     """
     # Get current date in server's local timezone
     now = datetime.now()
     date_str = now.strftime("%d%m%y")
-    
-    # Sanitize the title
-    safe_title = sanitize_filename(title)
-    
-    # Generate base filename
-    base_filename = f"{date_str}-{safe_title}.mp4"
-    final_path = DOWNLOAD_DIR / base_filename
-    
-    # If file doesn't exist, return it as-is
-    if not final_path.exists():
-        return final_path
-    
-    # Handle collision: add numeric suffix
-    counter = 1
-    while counter <= 999:  # Limit attempts to prevent infinite loops
-        alt_filename = f"{date_str}-{safe_title}_{counter:03d}.mp4"
-        alt_path = DOWNLOAD_DIR / alt_filename
-        if not alt_path.exists():
-            return alt_path
-        counter += 1
-    
-    # Fallback (should rarely happen): use job_id as last resort
-    fallback_filename = f"{date_str}-{safe_title}_{uuid.uuid4().hex[:8]}.mp4"
-    return DOWNLOAD_DIR / fallback_filename
+
+    pattern = re.compile(rf"^{re.escape(date_str)}(\d+)\.mp4$", re.IGNORECASE)
+    download_numbers = [
+        int(match.group(1))
+        for path in DOWNLOAD_DIR.iterdir()
+        if path.is_file()
+        for match in [pattern.match(path.name)]
+        if match
+    ]
+    next_number = max(download_numbers, default=0) + 1
+    return DOWNLOAD_DIR / f"{date_str}{next_number:02d}.mp4"
 
 
 def progress_bar(percent):
@@ -751,7 +738,7 @@ async def run_download(job):
         r.delete(active_key)
         return
 
-    # Rename file to DDMMYY-{title}.mp4 format
+    # Rename file to DDMMYYNN.mp4 format
     new_path = generate_final_filename(title)
     try:
         final_path.rename(new_path)

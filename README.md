@@ -12,8 +12,7 @@ Tool ini dibuat untuk kebutuhan workflow internal, bukan sebagai layanan downloa
 - Update progress download di chat Telegram.
 - Menghentikan download atau rekaman aktif dengan `/stop`.
 - Finalisasi MP4 otomatis menggunakan FFmpeg.
-- Nama file akhir memakai format `DDMMYY-judul.mp4`.
-- Menghindari overwrite jika nama file sudah digunakan.
+- Nama file akhir memakai format `DDMMYYNN.mp4`, berdasarkan urutan download pada hari itu.
 
 ## Prasyarat
 
@@ -57,7 +56,7 @@ Telegram URL
     -> Redis download_queue
     -> worker.py
     -> yt-dlp + FFmpeg
-    -> downloads/DDMMYY-judul.mp4
+   -> downloads/DDMMYY01.mp4
 ```
 
 Untuk menghentikan job yang sedang berjalan, kirim:
