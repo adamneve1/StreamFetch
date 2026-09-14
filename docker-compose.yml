@@ -8,12 +8,14 @@ services:
     build: .
     container_name: yt-bot
     user: "${UID:-1000}:${GID:-1000}"
+    profiles: [telegram]
     command: python -u app/bot.py
     restart: unless-stopped
     env_file:
       - .env
     volumes:
       - ./downloads:/downloads:rw
+      - ./data:/data:rw
     depends_on:
       - redis
 
@@ -21,12 +23,33 @@ services:
     build: .
     container_name: yt-worker
     user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      DATA_DIR: /data
     command: python -u app/worker.py
     restart: unless-stopped
     env_file:
       - .env
     volumes:
       - ./downloads:/downloads:rw
+      - ./data:/data:rw
+    depends_on:
+      - redis
+
+  web:
+    build: .
+    container_name: capture-web
+    user: "${UID:-1000}:${GID:-1000}"
+    command: ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "4", "--timeout", "30", "app.web:create_app()"]
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /data
+    ports:
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8080}:8080"
+    volumes:
+      - ./downloads:/downloads:rw
+      - ./data:/data:rw
     depends_on:
       - redis
 

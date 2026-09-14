@@ -24,3 +24,5 @@ venv/
 .vscode/
 .idea/
 *.log
+# Persistent web settings and catalogue
+data/

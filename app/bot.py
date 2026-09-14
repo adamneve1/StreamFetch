@@ -2,6 +2,7 @@ import os
 import json
 import re
 import uuid
+import time
 # pyrefly: ignore [missing-import]
 import redis
 
@@ -18,11 +19,27 @@ from telegram.ext import (
 
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+ORYX_STREAM_URL = os.getenv("ORYX_STREAM_URL", "").strip()
+
+# Admission and reservation are atomic with the worker's queue claim. Oryx
+# requests must never wait behind a download or another capture.
+ADMIT_ORYX = """
+if redis.call('EXISTS', 'worker:heartbeat') == 0 then return 'offline' end
+if redis.call('EXISTS', KEYS[1]) == 1 then return 'duplicate' end
+if redis.call('EXISTS', 'capture:owner') == 1 or
+   redis.call('LLEN', 'download_queue') > 0 then return 'busy' end
+redis.call('SET', 'capture:owner', ARGV[1], 'EX', 30)
+redis.call('SET', KEYS[1], ARGV[1], 'EX', 30)
+redis.call('RPUSH', 'download_queue', ARGV[2])
+return 'accepted'
+"""
 
 r = redis.Redis(
     host=REDIS_HOST,
     port=6379,
     decode_responses=True,
+    socket_connect_timeout=5,
+    socket_timeout=5,
 )
 
 
@@ -42,6 +59,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎬 YouTube Downloader\n\n"
         "Kirim aja link YouTube-nya buat download atau rekam live.\n\n"
         "Perintah:\n"
+        "/record - rekam live Oryx yang dikonfigurasi\n"
         "/stop - berentin rekaman yang lagi jalan"
     )
 
@@ -57,6 +75,10 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if r.get(f"state:{job_id}") == "finalizing":
+        await update.message.reply_text("🔧 File sedang difinalisasi. Tunggu hasil validasi.")
+        return
+
     r.set(
         f"stop:{job_id}",
         "1",
@@ -65,8 +87,33 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "🛑 Oke, lagi diberentiin...\n"
-        "Tunggu bentar ya, lagi finalisasi file."
+        "Menunggu capture berhenti, lalu file akan difinalisasi dan divalidasi."
     )
+
+
+async def record(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not ORYX_STREAM_URL:
+        await update.message.reply_text("❌ ORYX_STREAM_URL belum dikonfigurasi.")
+        return
+    job = {
+        "job_id": uuid.uuid4().hex,
+        "chat_id": update.effective_chat.id,
+        "source": "oryx",
+        "requested_at": time.time(),
+    }
+    try:
+        result = r.eval(ADMIT_ORYX, 1, f"active:{job['chat_id']}",
+                        job["job_id"], json.dumps(job))
+    except redis.exceptions.RedisError:
+        await update.message.reply_text("❌ Antrean tidak tersedia. Coba lagi nanti.")
+        return
+    messages = {
+        "accepted": "⏳ Starting: menyiapkan rekaman Oryx. Tunggu status recording.",
+        "duplicate": "❌ Chat ini masih punya proses aktif. Tunggu selesai sebelum /record lagi.",
+        "busy": "❌ Worker sedang sibuk. /record ditolak, tidak dimasukkan antrean.",
+        "offline": "❌ Worker tidak tersedia. /record tidak dimasukkan antrean.",
+    }
+    await update.message.reply_text(messages[result])
 
 
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -85,6 +132,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "job_id": uuid.uuid4().hex,
         "chat_id": update.effective_chat.id,
         "url": url,
+        "source": "youtube",
     }
 
     r.rpush(
@@ -112,6 +160,7 @@ def main():
     app.add_handler(
         CommandHandler("stop", stop)
     )
+    app.add_handler(CommandHandler("record", record))
 
     app.add_handler(
         MessageHandler(
