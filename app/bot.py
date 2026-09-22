@@ -3,6 +3,10 @@ import json
 import re
 import uuid
 import time
+try:
+    from . import storage
+except ImportError:
+    import storage
 # pyrefly: ignore [missing-import]
 import redis
 
@@ -57,7 +61,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "🎬 YouTube Downloader\n\n"
-        "Kirim aja link YouTube-nya buat download atau rekam live.\n\n"
+        "Kirim link YouTube atau TikTok Live (@username/live) untuk merekam.\n\n"
         "Perintah:\n"
         "/record - rekam live Oryx yang dikonfigurasi\n"
         "/stop - berentin rekaman yang lagi jalan"
@@ -120,20 +124,35 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     url = update.message.text.strip()
 
-    if not is_youtube_url(url):
-
-        await update.message.reply_text(
-            "❌ Itu bukan link YouTube, coba kirim yang bener ya."
-        )
-
-        return
+    source = 'youtube'
+    try:
+        url = storage.validate_url(url, youtube=True)
+    except ValueError:
+        try:
+            url = storage.validate_tiktok_url(url)
+            source = 'tiktok'
+        except ValueError:
+            await update.message.reply_text('❌ Kirim URL YouTube atau https://www.tiktok.com/@username/live')
+            return
 
     job = {
         "job_id": uuid.uuid4().hex,
         "chat_id": update.effective_chat.id,
         "url": url,
-        "source": "youtube",
+        "source": source,
+        "source_name": "TikTok Live" if source == "tiktok" else "YouTube",
     }
+
+    if source == 'tiktok':
+        job['requested_at'] = time.time()
+        try:
+            result = r.eval(ADMIT_ORYX, 1, f"active:{job['chat_id']}", job['job_id'], json.dumps(job))
+        except redis.exceptions.RedisError:
+            await update.message.reply_text('❌ Antrean tidak tersedia. Coba lagi nanti.')
+            return
+        await update.message.reply_text('⏳ Menyiapkan rekaman TikTok Live.' if result == 'accepted'
+                                        else '❌ Worker sibuk atau offline. Coba lagi setelah siap.')
+        return
 
     r.rpush(
         "download_queue",

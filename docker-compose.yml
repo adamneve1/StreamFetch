@@ -32,6 +32,7 @@ services:
     volumes:
       - ./downloads:/downloads:rw
       - ./data:/data:rw
+      - "${ARCHIVE_HOST_PATH:-./archive}:/archive:rw"
     depends_on:
       - redis
 

@@ -39,7 +39,7 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
 
     def job(self, source='oryx'):
         job = dict(job_id='test-job', chat_id=123, source=source,
-                   requested_at=time.time(), url='https://youtube.com/watch?v=test')
+                   requested_at=time.time(), url='https://www.tiktok.com/@tester/live' if source == 'tiktok' else 'https://youtube.com/watch?v=test')
         self.redis.set('capture:owner', job['job_id'], ex=30)
         self.redis.set('active:123', job['job_id'], ex=30)
         return job
@@ -87,13 +87,13 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn('Starting', update.message.reply_text.call_args.args[0])
 
     async def test_stop_enters_shared_finalization_for_both_sources(self):
-        for source in ('oryx', 'youtube'):
+        for source in ('oryx', 'youtube', 'tiktok'):
             with self.subTest(source=source):
                 job = self.job(source)
                 target = self.root / '14092601.mp4'
                 target.write_bytes(b'valid-media-placeholder')
                 with patch.object(worker, 'capture', AsyncMock(return_value='operator_stop')), \
-                     patch.object(worker, 'inspect_youtube', AsyncMock(return_value={'title': 'test'})), \
+                     patch.object(worker, 'inspect_youtube', AsyncMock(return_value={'title': 'test', 'is_live': True})), \
                      patch.object(worker, 'complete_recording', return_value=target) as complete:
                     await worker.run_download(job)
                 complete.assert_called_once_with(job)
@@ -181,6 +181,45 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
             await worker.run_download(job)
         capture.assert_not_called()
         self.assertEqual(self.redis.get('state:test-job'), 'failed')
+
+    def test_inspection_diagnostics_prefer_error_and_hide_credentials(self):
+        error = worker.inspection_error(
+            b'WARNING: impersonation target unavailable\n'
+            b'ERROR: channel is not currently live https://example.test/?token=secret')
+        self.assertEqual(error.code, 'not_live')
+        self.assertNotIn('secret', error.detail)
+        self.assertNotIn('example.test', error.detail)
+        self.assertEqual(worker.inspection_error(b'ERROR: HTTP Error 400: Bad Request').code, 'http_400')
+
+    async def test_inspection_error_reaches_status(self):
+        job = self.job('tiktok')
+        error = worker.inspection_error(b'ERROR: HTTP Error 403: Forbidden')
+        with patch.object(worker, 'inspect_youtube', AsyncMock(side_effect=error)), \
+             patch.object(worker, 'capture', AsyncMock()) as capture:
+            await worker.run_download(job)
+        capture.assert_not_called()
+        public = json.loads(self.redis.get('web:job:test-job'))
+        self.assertEqual(public['detail'], error.detail)
+        self.assertEqual(public['state'], 'failed')
+        self.assertIsNone(self.redis.get('capture:owner'))
+
+    async def test_tiktok_offline_does_not_capture(self):
+        job = self.job('tiktok')
+        with patch.object(worker, 'inspect_youtube', AsyncMock(return_value={'is_live': False})), \
+             patch.object(worker, 'capture', AsyncMock()) as capture:
+            await worker.run_download(job)
+        capture.assert_not_called()
+        self.assertEqual(self.redis.get('state:test-job'), 'failed')
+        self.assertIsNone(self.redis.get('capture:owner'))
+
+    async def test_tiktok_bot_admission(self):
+        self.redis.set('worker:heartbeat', '1')
+        update = self.update()
+        update.message.text = 'https://www.tiktok.com/@tester/live'
+        await bot.handle_url(update, None)
+        await bot.handle_url(update, None)
+        self.assertEqual(self.redis.llen('download_queue'), 1)
+        self.assertEqual(json.loads(self.redis.lindex('download_queue', 0))['source'], 'tiktok')
 
     def test_filename_generation_unchanged(self):
         from datetime import datetime

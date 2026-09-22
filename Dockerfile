@@ -13,7 +13,7 @@ RUN curl -fsSL https://deno.land/install.sh | sh
 
 ENV PATH="/root/.deno/bin:${PATH}"
 
-RUN pip install --no-cache-dir --upgrade yt-dlp
+RUN pip install --no-cache-dir --upgrade "yt-dlp[default,curl-cffi]"
 
 WORKDIR /app
 

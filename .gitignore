@@ -1,6 +1,7 @@
 # Secrets / environment
 .env
 .env.*
+!.env.example
 credentials/
 
 # Runtime downloads
@@ -26,3 +27,4 @@ venv/
 *.log
 # Persistent web settings and catalogue
 data/
+archive/

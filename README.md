@@ -156,9 +156,55 @@ CAPTURE_IDLE_TIMEOUT=60
 CAPTURE_STOP_TIMEOUT=10
 FINALIZE_TIMEOUT=600
 PROBE_TIMEOUT=20
+
+# Optional verified archive (disabled by default)
+ARCHIVE_ENABLED=false
+ARCHIVE_HOST_PATH=./archive
+ARCHIVE_PATH=/archive
+ARCHIVE_LOCAL_RETENTION_HOURS=24
+ARCHIVE_MAX_RETRIES=3
+ARCHIVE_RETRY_BASE_SECONDS=60
 ```
 
 Jangan commit `.env`, token, password, URL bertoken, atau credential lainnya ke repository.
+
+### Arsip sekunder opsional
+
+Capture selalu ditulis dan difinalisasi di `/downloads`. Setelah status producer
+menjadi `ready`, worker dapat menyalin file final secara asynchronous ke storage
+sekunder. Kegagalan arsip tidak mengubah status producer dan file lokal tetap
+dipertahankan.
+
+Mount SMB, NFS, NAS, atau disk lokal pada host terlebih dahulu; StreamFetch tidak
+melakukan mount dan tidak menerima credential storage. Atur `ARCHIVE_HOST_PATH`
+ke mount host tersebut. Sebelum mengaktifkan arsip, buat marker di filesystem
+tujuan (bukan di direktori mountpoint saat storage sedang tidak ter-mount):
+
+```bash
+touch /path/to/mounted/archive/.streamfetch-archive
+```
+
+Lalu isi `.env`, misalnya:
+
+```env
+ARCHIVE_ENABLED=true
+ARCHIVE_HOST_PATH=/path/to/mounted/archive
+ARCHIVE_PATH=/archive
+```
+
+Worker adalah satu-satunya service yang menerima mount `/archive`. File disalin
+secara streaming ke `nama.ext.part`, SHA-256 sumber dan tujuan diverifikasi, lalu
+dipublikasikan dengan rename atomik. Tujuan yang sudah ada dan cocok dianggap
+sukses; isi yang berbeda menjadi `archive_conflict` dan tidak ditimpa. Kegagalan
+sementara dicoba ulang dengan exponential backoff.
+
+Validasi storage memeriksa bahwa `/archive` tercatat sebagai mount pada Linux,
+marker `.streamfetch-archive` tersedia, dan direktori dapat ditulis. Marker
+mencegah penulisan ke direktori lokal kosong ketika network mount host hilang.
+Docker sendiri tidak dapat membedakan bind mount ke disk lokal dengan bind mount
+ke network filesystem, sehingga marker harus dibuat ketika storage yang benar
+sedang mounted. Retensi dicatat sebagai `local_cleanup_after`, tetapi versi ini
+tidak menghapus file lokal secara otomatis.
 
 ## Menjalankan StreamFetch
 
@@ -241,6 +287,30 @@ stopping → finalizing → ready
 ```
 
 Status `ready` hanya diberikan setelah MP4 berhasil divalidasi.
+
+### RRI / stream langsung
+
+Pada tab **Oryx / RRI**, gunakan **Tambah sumber**, isi nama dan link player RRI, lalu **Simpan**. Aplikasi mengubah link `https://public-streaming.rri.go.id/playersite_<UUID>.html` menjadi stream HLS `/memfs/<UUID>.m3u8`, sesuai format player publik RRI. Halaman player dari situs lain belum didukung.
+
+Contoh PRO 2 RRI BATAM:
+
+```text
+https://public-streaming.rri.go.id/playersite_238787d3-6705-4849-88aa-47cdf58dda1b.html
+```
+
+Pilih sumber tersebut, gunakan **Tes sumber**, lalu **Mulai rekam**. **Stop** memfinalisasi hasil ke MP4 melalui pipeline FFmpeg yang sama dengan Oryx. Sumber dikelompokkan pada filter **Oryx / RRI / Stream**.
+
+### TikTok Live
+
+Pilih tab **TikTok Live**, masukkan `https://www.tiktok.com/@username/live`, lalu klik **Mulai rekam**. Link yang sama bisa dikirim ke Telegram. Akun harus sedang live dan dapat diakses dari server. Link video biasa dan link pendek belum didukung.
+
+Tekan **Stop** untuk finalisasi MP4. Penanda momen, katalog, dan filter sumber juga mendukung TikTok. Rekaman dimulai saat terhubung, tanpa mengambil bagian sebelum capture dimulai.
+
+Dukungan memakai extractor TikTok Live dari `yt-dlp` yang diinstal dalam Docker. Jika TikTok mengubah aksesnya, rebuild image dengan `docker compose build --no-cache worker` lalu `docker compose up -d --build`. CAPTCHA, pembatasan wilayah, atau siaran yang memerlukan login dapat membuat capture gagal.
+
+Jika gagal sebelum status `recording`, log worker menampilkan `stage=inspection` dan kategori `reason`, misalnya `not_live`, `http_400`, atau `access_denied`. Panel menampilkan penjelasan yang sama tanpa URL playback atau credential. `not_live` berarti respons extractor; kondisi ini juga dapat terjadi saat informasi room tidak dapat dibaca.
+
+Image menyertakan `yt-dlp[default,curl-cffi]` untuk dukungan koneksi browser yang diminta extractor TikTok. Setelah memperbarui aplikasi, tunggu rekaman aktif selesai sebelum menjalankan `docker compose up -d --build worker web`.
 
 ### YouTube
 

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import redis
 from flask import Flask, jsonify, request, session, send_from_directory
+from werkzeug.exceptions import HTTPException
 try:
     from . import storage
 except ImportError:
@@ -48,10 +49,10 @@ def create_app(client=None):
         if not request.path.startswith('/api/'):
             return
         if request.path != '/api/login' and not session.get('operator'):
-            return jsonify(error='Silakan login.'), 401
+            return jsonify(error='Silakan masuk untuk melanjutkan.'), 401
         if request.method != 'GET' and request.path != '/api/login':
             if not hmac.compare_digest(request.headers.get('X-CSRF-Token', ''), session.get('csrf', 'missing')):
-                return jsonify(error='Sesi tidak valid. Login ulang.'), 403
+                return jsonify(error='Sesi kamu sudah berakhir. Silakan masuk lagi.'), 403
 
     @app.after_request
     def headers(response):
@@ -63,11 +64,24 @@ def create_app(client=None):
 
     @app.errorhandler(redis.exceptions.RedisError)
     def redis_error(_):
-        return jsonify(error='Redis tidak tersedia. Coba lagi nanti.'), 503
+        return jsonify(error='Layanan sedang tidak tersedia. Coba lagi sebentar.'), 503
 
     @app.errorhandler(ValueError)
     def validation_error(exc):
         return jsonify(error=str(exc)), 400
+
+    @app.errorhandler(HTTPException)
+    def http_error(exc):
+        if request.path.startswith('/api/'):
+            return jsonify(error=exc.description), exc.code
+        return exc
+
+    @app.errorhandler(Exception)
+    def unexpected_error(exc):
+        app.logger.exception('Unhandled web error')
+        if request.path.startswith('/api/'):
+            return jsonify(error='Terjadi kesalahan saat memproses permintaan. Coba lagi atau hubungi admin.'), 500
+        return 'Internal server error', 500
 
     @app.get('/')
     def index():
@@ -77,16 +91,16 @@ def create_app(client=None):
     def login():
         password = os.getenv('WEB_PASSWORD', '')
         if not password:
-            return jsonify(error='WEB_PASSWORD belum dikonfigurasi pada server.'), 503
+            return jsonify(error='Password operator belum diatur. Hubungi admin.'), 503
         key = 'web:login:' + (request.remote_addr or 'unknown')
         attempts = r.incr(key)
         if attempts == 1:
             r.expire(key, 300)
         if attempts > 10:
-            return jsonify(error='Terlalu banyak percobaan. Tunggu 5 menit.'), 429
+            return jsonify(error='Terlalu banyak percobaan. Coba lagi dalam 5 menit.'), 429
         data = request.get_json() or {}
         if not hmac.compare_digest(str(data.get('password', '')).encode(), password.encode()):
-            return jsonify(error='Password salah.'), 401
+            return jsonify(error='Password belum tepat. Silakan coba lagi.'), 401
         r.delete(key)
         session.clear()
         session.update(operator=True, csrf=secrets.token_hex(32))
@@ -119,17 +133,17 @@ def create_app(client=None):
         # One bounded probe at a time; diagnostics can contain private tokens.
         token = uuid.uuid4().hex
         if not r.set('web:probe', token, nx=True, ex=20):
-            return jsonify(error='Pemeriksaan lain sedang berjalan.'), 409
+            return jsonify(error='Sumber lain sedang diperiksa. Tunggu sebentar lalu coba lagi.'), 409
         try:
             result = subprocess.run(['ffprobe', '-v', 'error', '-rw_timeout', '8000000',
                                      '-show_entries', 'stream=codec_type,codec_name', '-of', 'json', url],
                                     capture_output=True, timeout=10)
             streams = json.loads(result.stdout).get('streams', []) if result.returncode == 0 else []
             if not any(s.get('codec_type') == 'video' for s in streams):
-                return jsonify(error='Feed tidak tersedia atau video tidak ditemukan.'), 422
+                return jsonify(error='Sumber belum bisa diakses atau tidak mengirim video.'), 422
             return jsonify(ok=True, codecs=[s.get('codec_name', '?') for s in streams])
         except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
-            return jsonify(error='Tidak bisa membaca feed dalam 10 detik.'), 422
+            return jsonify(error='Sumber belum merespons. Periksa alamat dan koneksi jaringan.'), 422
         finally:
             r.eval("if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0", 1, 'web:probe', token)
 
@@ -142,24 +156,26 @@ def create_app(client=None):
         if source == 'oryx':
             selected = next((s for s in storage.sources() if s['id'] == data.get('source_id')), None)
             if not selected:
-                raise ValueError('Pilih sumber Oryx yang tersimpan.')
+                raise ValueError('Pilih sumber live terlebih dahulu.')
             job.update(stream_url=storage.validate_url(selected['url']), source_name=selected['name'])
+        elif source == 'tiktok':
+            job.update(url=storage.validate_tiktok_url(data.get('url', '').strip()), source_name='TikTok Live')
         elif source == 'youtube':
             job.update(url=storage.validate_url(data.get('url', '').strip(), youtube=True), source_name='YouTube')
         else:
-            raise ValueError('Sumber tidak dikenal.')
+            raise ValueError('Pilih sumber rekaman yang tersedia.')
         if not storage.disk_status()['can_record']:
-            return jsonify(error='Ruang disk downloads terlalu rendah atau tidak tersedia. Kosongkan ruang sebelum Record.'), 507
+            return jsonify(error='Ruang penyimpanan tidak cukup. Kosongkan ruang sebelum mulai merekam.'), 507
         result = r.eval(ADMIT, 0, job['job_id'], json.dumps(job))
         if result != 'accepted':
-            return jsonify(error='Worker sedang sibuk. Tunggu job selesai.' if result == 'busy' else 'Worker offline. Jalankan service worker.'), 409
+            return jsonify(error='Masih ada rekaman yang berjalan. Tunggu sampai selesai.' if result == 'busy' else 'Sistem perekam belum siap. Coba lagi sebentar atau hubungi admin.'), 409
         return jsonify(job_id=job['job_id']), 202
 
     @app.post('/api/stop')
     def stop():
         job_id = str((request.get_json() or {}).get('job_id', ''))
         if not r.eval(STOP, 0, job_id):
-            return jsonify(error='Job sudah berubah atau sedang finalisasi. Muat ulang status.'), 409
+            return jsonify(error='Rekaman sudah berhenti atau sedang menyiapkan file. Tunggu status berikutnya.'), 409
         return jsonify(ok=True)
 
     @app.get('/api/status')
@@ -183,10 +199,10 @@ if redis.call('EXISTS', 'stop:' .. ARGV[1]) == 1 then return nil end
 return redis.call('GET', 'web:job:' .. ARGV[1])
 """, 0, job_id)
         if not snapshot:
-            return jsonify(error='Penanda hanya bisa ditambahkan saat job ini sedang recording.'), 409
+            return jsonify(error='Tanda momen hanya bisa disimpan saat rekaman berjalan.'), 409
         active = json.loads(snapshot)
         if not active.get('started_at'):
-            return jsonify(error='Waktu mulai belum tersedia.'), 409
+            return jsonify(error='Rekaman belum benar-benar dimulai. Tunggu sebentar lalu coba lagi.'), 409
         seconds = time.time() - active['started_at']
         storage.add_marker(job_id, seconds, str(data.get('note', '')).strip() or 'Momen penting')
         return jsonify(markers=storage.markers(job_id)), 201
@@ -197,7 +213,7 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
         owner = r.get('capture:owner')
         for row in rows:
             if row['state'] not in {'ready', 'failed'} and row['job_id'] != owner:
-                row.update(state='interrupted', detail='Worker berhenti atau reservasi kedaluwarsa; file belum dinyatakan siap.')
+                row.update(state='interrupted', detail='Proses rekaman terputus sebelum file dinyatakan siap.')
         query = request.args.get('q', '').casefold().strip()
         source = request.args.get('source', '')
         state = request.args.get('state', '')
@@ -218,7 +234,7 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
     @app.get('/api/files/<filename>')
     def download(filename):
         if not any(row.get('filename') == filename and row['state'] == 'ready' for row in storage.recordings()):
-            return jsonify(error='File tidak ditemukan.'), 404
+            return jsonify(error='File rekaman tidak ditemukan atau belum siap.'), 404
         return send_from_directory(Path(os.getenv('DOWNLOAD_DIR', '/downloads')), filename, as_attachment=True)
 
     return app

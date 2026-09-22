@@ -16,8 +16,9 @@ import redis
 # pyrefly: ignore [missing-import]
 from telegram import Bot
 try:
-    from . import storage
+    from . import archive, storage
 except ImportError:
+    import archive
     import storage
 
 
@@ -27,6 +28,11 @@ IDLE_TIMEOUT = float(os.getenv("CAPTURE_IDLE_TIMEOUT", "60"))
 STOP_TIMEOUT = float(os.getenv("CAPTURE_STOP_TIMEOUT", "10"))
 FINALIZE_TIMEOUT = float(os.getenv("FINALIZE_TIMEOUT", "600"))
 PROBE_TIMEOUT = float(os.getenv("PROBE_TIMEOUT", "20"))
+ARCHIVE_ENABLED = os.getenv("ARCHIVE_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+ARCHIVE_PATH = Path(os.getenv("ARCHIVE_PATH", "/archive"))
+ARCHIVE_MAX_RETRIES = max(0, int(os.getenv("ARCHIVE_MAX_RETRIES", "3")))
+ARCHIVE_RETRY_BASE_SECONDS = max(1, int(os.getenv("ARCHIVE_RETRY_BASE_SECONDS", "60")))
+ARCHIVE_LOCAL_RETENTION_HOURS = max(0, float(os.getenv("ARCHIVE_LOCAL_RETENTION_HOURS", "24")))
 ORYX_STREAM_URL = os.getenv("ORYX_STREAM_URL", "").strip()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -445,6 +451,92 @@ async def set_state(job, status, state, detail=''):
                    labels[state] + ('\n' + detail if detail else ''))
 
 
+def set_archive_state(job_id, state, **fields):
+    payload = {"archive_status": state, **fields}
+    r.set(f"archive:state:{job_id}", json.dumps(payload), ex=604800)
+    if not os.getenv('DATA_DIR'):
+        return
+    try:
+        storage.save_archive_state(job_id, state, **fields)
+    except Exception:
+        log.error("job=%s archive catalogue_write=failed", job_id)
+
+
+def enqueue_archive(job, final_path):
+    """Queue the shared archive pipeline only after producer success."""
+    if not ARCHIVE_ENABLED:
+        set_archive_state(job["job_id"], "local")
+        return False
+    payload = {"job_id": job["job_id"], "source": job["source"],
+               "path": str(final_path), "attempt": 1}
+    r.rpush("archive_queue", json.dumps(payload))
+    set_archive_state(job["job_id"], "archive_pending", archive_attempt=0)
+    log.info("ARCHIVE QUEUED job=%s file=%s attempt=1 bytes=%s",
+             job["job_id"], final_path.name, final_path.stat().st_size)
+    return True
+
+
+async def run_archive(job):
+    attempt = int(job.get("attempt", 1))
+    source = Path(job["path"])
+    set_archive_state(job["job_id"], "archiving", archive_attempt=attempt)
+    log.info("ARCHIVE STARTED job=%s file=%s attempt=%s", job["job_id"], source.name, attempt)
+    try:
+        result = await asyncio.to_thread(
+            archive.archive_file, source, DOWNLOAD_DIR, ARCHIVE_PATH)
+        log.info("ARCHIVE COPY COMPLETED job=%s file=%s attempt=%s bytes=%s",
+                 job["job_id"], source.name, attempt, result["bytes"])
+        log.info("ARCHIVE VERIFY SUCCESS job=%s file=%s attempt=%s sha256=%s",
+                 job["job_id"], source.name, attempt, result["sha256"])
+        archived_at = time.time()
+        set_archive_state(
+            job["job_id"], "archived", archive_path=result["path"],
+            archive_attempt=attempt, archive_sha256=result["sha256"],
+            archived_at=archived_at,
+            local_cleanup_after=archived_at + ARCHIVE_LOCAL_RETENTION_HOURS * 3600)
+        log.info("ARCHIVE COMPLETED job=%s file=%s attempt=%s bytes=%s",
+                 job["job_id"], source.name, attempt, result["bytes"])
+    except archive.ArchiveConflict as exc:
+        set_archive_state(job["job_id"], "archive_conflict",
+                          archive_attempt=attempt, archive_error=str(exc))
+        log.error("ARCHIVE FAILED job=%s file=%s attempt=%s error=%s conflict=true",
+                  job["job_id"], source.name, attempt, exc)
+    except Exception as exc:
+        set_archive_state(job["job_id"], "archive_failed",
+                          archive_attempt=attempt, archive_error=str(exc))
+        log.error("ARCHIVE FAILED job=%s file=%s attempt=%s error_type=%s error=%s",
+                  job["job_id"], source.name, attempt, type(exc).__name__, exc)
+        if attempt <= ARCHIVE_MAX_RETRIES:
+            retry = dict(job, attempt=attempt + 1)
+            delay = ARCHIVE_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+            r.zadd("archive_delayed", {json.dumps(retry): time.time() + delay})
+            set_archive_state(job["job_id"], "archive_pending",
+                              archive_attempt=attempt, archive_error=str(exc))
+            log.info("ARCHIVE RETRY job=%s file=%s attempt=%s delay_seconds=%s",
+                     job["job_id"], source.name, attempt + 1, delay)
+
+
+async def archive_worker():
+    """Single conservative archive consumer, independent of capture jobs."""
+    while True:
+        try:
+            now = time.time()
+            for payload in r.zrangebyscore("archive_delayed", 0, now):
+                if r.zrem("archive_delayed", payload):
+                    r.rpush("archive_queue", payload)
+            payload = r.lpop("archive_queue")
+            if payload:
+                await run_archive(json.loads(payload))
+            else:
+                await asyncio.sleep(1)
+        except redis.exceptions.RedisError:
+            log.error("Archive worker: Redis unavailable")
+            await asyncio.sleep(3)
+        except Exception:
+            log.exception("Archive worker recovered from unexpected error")
+            await asyncio.sleep(1)
+
+
 def signal_group(process, sig):
     try:
         if os.name == 'posix':
@@ -488,10 +580,47 @@ async def spawn(command):
         start_new_session=(os.name == 'posix'))
 
 
+class SourceInspectionError(RuntimeError):
+    """Only fixed, credential-free diagnostics may reach logs or the UI."""
+    def __init__(self, code, detail):
+        self.code = code
+        self.detail = detail
+        super().__init__(code)
+
+
+def inspection_error(output):
+    lines = output.decode(errors='replace').lower().splitlines()
+    # Prefer fatal errors so unrelated warnings do not hide the actual cause.
+    text = '\n'.join(line for line in lines if line.startswith('error:')) or '\n'.join(lines)
+    cases = [
+        (('impersonation target', 'impersonate'), 'browser_support',
+         'Extractor membutuhkan dukungan browser impersonation. Rebuild image dengan dependensi curl-cffi.'),
+        (('captcha', 'challenge'), 'challenge',
+         'TikTok meminta verifikasi browser. Akses dari server belum berhasil.'),
+        (('not currently live', 'livestream has ended'), 'not_live',
+         'TikTok melaporkan akun tidak live atau room live tidak terbaca. Pastikan akun sedang live; pembatasan akses juga dapat menyebabkan respons ini.'),
+        (('login required', 'log in', 'sign in', 'requiring login'), 'login_required',
+         'Sumber meminta login. Sesi browser diperlukan untuk mengakses siaran ini.'),
+        (('http error 403', 'http error 429'), 'access_denied',
+         'Akses sumber ditolak atau dibatasi (HTTP 403/429). Coba lagi setelah beberapa saat.'),
+        (('http error 400',), 'http_400',
+         'API sumber menolak permintaan (HTTP 400). Extractor mungkin perlu diperbarui.'),
+        (('timed out', 'timeout'), 'timeout', 'Koneksi ke sumber melewati batas waktu.'),
+        (('unable to download', 'name resolution', 'connection refused'), 'network',
+         'Worker gagal mengunduh informasi sumber. Periksa koneksi jaringan server.'),
+        (('unable to extract', 'no video formats', 'requested format is not available'), 'extractor',
+         'Extractor tidak menemukan informasi atau format siaran. Periksa akses sumber dan versi yt-dlp.'),
+    ]
+    for needles, code, detail in cases:
+        if any(needle in text for needle in needles):
+            return SourceInspectionError(code, detail)
+    return SourceInspectionError('unknown', 'yt-dlp gagal membaca informasi sumber sebelum capture dimulai. Perlu diagnosis extractor dari worker.')
+
+
 async def inspect_youtube(job):
     process = await spawn(['yt-dlp', '--dump-single-json', '--skip-download',
-                           '--no-warnings', '--no-playlist', job['url']])
-    log.info('job=%s source=youtube inspect_pid=%s', job['job_id'], process.pid)
+                           '--no-playlist', job['url']])
+    log.info('job=%s source=%s inspect_pid=%s', job['job_id'], job['source'], process.pid)
     communication = asyncio.create_task(process.communicate())
     deadline = time.monotonic() + STARTUP_TIMEOUT
     try:
@@ -503,7 +632,7 @@ async def inspect_youtube(job):
             await asyncio.sleep(0.25)
         stdout, _ = communication.result()
         if process.returncode:
-            raise RuntimeError('Source inspection failed')
+            raise inspection_error(stdout)
         # stderr is merged, so find the JSON line without logging diagnostics.
         for line in stdout.decode(errors='replace').splitlines():
             if line.startswith('{'):
@@ -519,7 +648,7 @@ async def inspect_youtube(job):
 def capture_command(job):
     job_id = job['job_id']
     if job['source'] == 'oryx':
-        stream_url = job.get('stream_url', ORYX_STREAM_URL)
+        stream_url = storage.validate_url(job.get('stream_url', ORYX_STREAM_URL))
         if not stream_url or urlsplit(stream_url).scheme not in {
             'http', 'https', 'rtmp', 'rtmps', 'srt'
         }:
@@ -558,7 +687,7 @@ async def capture(job, status, lease):
             if not line:
                 return
             text = line.decode(errors='replace').strip()
-            if job['source'] == 'youtube':
+            if job['source'] in {'youtube', 'tiktok'}:
                 progress = parse_progress(text)
                 if progress:
                     activity['percent'] = progress['percent']
@@ -693,6 +822,7 @@ async def run_download(job):
     job.setdefault('origin', 'telegram')
     lease = asyncio.create_task(heartbeat(job))
     status = None
+    stage = 'starting'
     try:
         DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
         if job.get('origin') != 'web':
@@ -701,31 +831,48 @@ async def run_download(job):
         if not storage.disk_status(DOWNLOAD_DIR)['can_record']:
             await set_state(job, status, 'failed', 'Ruang disk downloads terlalu rendah atau tidak bisa diperiksa. Kosongkan ruang sebelum merekam.')
             return
-        if job['source'] not in {'youtube', 'oryx'}:
+        if job['source'] not in {'youtube', 'oryx', 'tiktok'}:
             raise ValueError('Unsupported source type')
-        if job['source'] == 'oryx' and time.time() - job.get('requested_at', 0) > 10:
+        if job['source'] in {'oryx', 'tiktok'} and time.time() - job.get('requested_at', 0) > 10:
             raise RuntimeError('Record request expired; please send /record again')
         if r.exists(f"stop:{job['job_id']}"):
             raise RuntimeError('Stopped before capture started')
-        if job['source'] == 'youtube':
+        if job['source'] in {'youtube', 'tiktok'}:
+            if job['source'] == 'tiktok':
+                job['url'] = storage.validate_tiktok_url(job['url'])
+            stage = 'inspection'
             info = await inspect_youtube(job)
+            if job['source'] == 'tiktok' and info.get('is_live') is not True:
+                await set_state(job, status, 'failed', 'Akun TikTok belum live atau siaran tidak dapat diakses. Coba lagi saat akun sedang live.')
+                return
             job['title'] = info.get('title', 'Unknown')
+        stage = 'capture'
         reason = await capture(job, status, lease)
         job['stop_reason'] = reason
         if job.get('started_at'):
             job['elapsed'] = round(time.time() - job['started_at'], 1)
         await set_state(job, status, 'finalizing')
+        stage = 'finalization'
         final_path = await asyncio.to_thread(complete_recording, job)
         job.update(filename=final_path.name, size=final_path.stat().st_size)
         detail = f"📁 {final_path.name}\n💾 {format_size(final_path.stat().st_size)}"
         if reason not in {'completed', 'operator_stop'}:
             detail += '\n⚠️ Sumber terputus/timeout; hanya media yang berhasil direkam disimpan.'
         await set_state(job, status, 'ready', detail)
+        # Producer success is committed first. Archive failures are isolated.
+        try:
+            enqueue_archive(job, final_path)
+        except Exception as exc:
+            set_archive_state(job['job_id'], 'archive_failed', archive_error=str(exc))
+            log.error('ARCHIVE FAILED job=%s file=%s attempt=0 error_type=%s',
+                      job['job_id'], final_path.name, type(exc).__name__)
     except Exception as exc:
         # Exception text can include a command/URL; only log its class.
-        log.error('job=%s source=%s finalization=failed error_type=%s',
-                  job['job_id'], job['source'], type(exc).__name__)
+        log.error('job=%s source=%s stage=%s error_type=%s reason=%s',
+                  job['job_id'], job['source'], stage, type(exc).__name__,
+                  exc.code if isinstance(exc, SourceInspectionError) else 'unknown')
         await set_state(job, status, 'failed',
+                        exc.detail if isinstance(exc, SourceInspectionError) else
                         'Sumber tidak tersedia, capture berhenti sebelum ada media, atau '
                         'finalisasi gagal. File sementara yang ada tetap disimpan; '
                         'cek log dan coba lagi.')
@@ -737,17 +884,22 @@ async def run_download(job):
 
 async def main():
     log.info('Worker running')
-    while True:
-        try:
-            r.set('worker:heartbeat', '1', ex=15)
-            payload = r.eval(CLAIM_JOB, 0)
-            if payload:
-                await run_download(json.loads(payload))
-            else:
-                await asyncio.sleep(0.25)
-        except redis.exceptions.RedisError:
-            log.error('Redis unavailable')
-            await asyncio.sleep(3)
+    archival = asyncio.create_task(archive_worker())
+    try:
+        while True:
+            try:
+                r.set('worker:heartbeat', '1', ex=15)
+                payload = r.eval(CLAIM_JOB, 0)
+                if payload:
+                    await run_download(json.loads(payload))
+                else:
+                    await asyncio.sleep(0.25)
+            except redis.exceptions.RedisError:
+                log.error('Redis unavailable')
+                await asyncio.sleep(3)
+    finally:
+        archival.cancel()
+        await asyncio.gather(archival, return_exceptions=True)
 
 
 if __name__ == '__main__':

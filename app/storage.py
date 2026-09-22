@@ -5,6 +5,7 @@ import sqlite3
 import time
 import shutil
 import math
+import re
 from pathlib import Path
 from contextlib import contextmanager
 from urllib.parse import urlsplit
@@ -34,9 +35,29 @@ def validate_url(url, youtube=False):
         raise ValueError('Gunakan URL playback HTTP, HTTPS, RTMP, RTMPS, atau SRT.')
     if youtube and parsed.hostname.lower() not in {'youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be'}:
         raise ValueError('Masukkan URL YouTube yang valid.')
+    # Public RRI Restreamer players use the channel UUID for their HLS path.
+    # Restrict conversion to the observed player route on the official host.
+    if not youtube and parsed.hostname.lower() == 'public-streaming.rri.go.id':
+        match = re.fullmatch(r'/playersite_([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\.html', parsed.path)
+        if match:
+            if parsed.username or parsed.password or parsed.port not in {None, 80, 443}:
+                raise ValueError('Gunakan link player publik RRI tanpa credential atau port tambahan.')
+            return f'https://public-streaming.rri.go.id/memfs/{match.group(1)}.m3u8'
     if not youtube and parsed.path.endswith('.html'):
         raise ValueError('Gunakan URL stream, bukan halaman player.')
     return url
+
+
+def validate_tiktok_url(url):
+    if not isinstance(url, str) or len(url) > 4096 or any(c.isspace() for c in url):
+        raise ValueError('Masukkan link TikTok Live: https://www.tiktok.com/@username/live')
+    parsed = urlsplit(url)
+    if (parsed.scheme not in {'http', 'https'}
+            or parsed.hostname not in {'tiktok.com', 'www.tiktok.com', 'm.tiktok.com'}
+            or parsed.username or parsed.password or parsed.port not in {None, 80, 443}
+            or not re.fullmatch(r'/@[A-Za-z0-9_.]+/live/?', parsed.path)):
+        raise ValueError('Masukkan link TikTok Live: https://www.tiktok.com/@username/live')
+    return 'https://www.tiktok.com' + parsed.path.rstrip('/')
 
 
 def sources():
@@ -52,7 +73,7 @@ def sources():
 
 
 def save_source(source_id, name, url):
-    validate_url(url)
+    url = validate_url(url)
     name = str(name).strip()
     if not name or len(name) > 80:
         raise ValueError('Nama sumber wajib diisi, maksimal 80 karakter.')
@@ -66,6 +87,21 @@ def save_recording(job, state, detail=''):
     data.update(state=state, detail=detail)
     with connection() as db:
         db.execute('INSERT INTO recordings VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET updated=excluded.updated, data=excluded.data', (job['job_id'], time.time(), json.dumps(data)))
+
+
+def save_archive_state(job_id, archive_status, **fields):
+    """Update archive metadata without changing the producer's state."""
+    allowed = {'archive_path', 'archive_error', 'archive_attempt',
+               'archived_at', 'local_cleanup_after', 'archive_sha256'}
+    with connection() as db:
+        row = db.execute('SELECT data FROM recordings WHERE id=?', (job_id,)).fetchone()
+        if not row:
+            return
+        data = json.loads(row['data'])
+        data['archive_status'] = archive_status
+        data.update({key: value for key, value in fields.items() if key in allowed})
+        db.execute('UPDATE recordings SET updated=?, data=? WHERE id=?',
+                   (time.time(), json.dumps(data), job_id))
 
 
 def recordings():
