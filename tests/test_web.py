@@ -158,6 +158,44 @@ class WebTests(unittest.TestCase):
         self.assertEqual(queued.status_code, 202)
         self.assertEqual(json.loads(self.redis.lindex('download_queue', 0))['quality'], '720')
 
+    def test_youtube_mp3_estimate_and_job_snapshot(self):
+        from types import SimpleNamespace
+        metadata = {
+            'is_live': False,
+            'duration': 60,
+            'filesize_approx': 1_000_000,
+            'tbr': 128,
+        }
+        result = SimpleNamespace(returncode=0, stdout=json.dumps(metadata).encode())
+        with patch.object(web.subprocess, 'run', return_value=result) as run:
+            response = self.post('estimate', {'source': 'youtube',
+                                              'url': 'https://youtu.be/test',
+                                              'quality': '1080',
+                                              'format': 'mp3'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json['format'], 'mp3')
+        self.assertEqual(response.json['quality'], 'best')
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index('-f') + 1], 'ba/b')
+
+        self.redis.set('worker:heartbeat', 1)
+        queued = self.post('record', {'source': 'youtube',
+                                      'url': 'https://youtu.be/test',
+                                      'quality': '1080',
+                                      'format': 'mp3'})
+        self.assertEqual(queued.status_code, 202)
+        job = json.loads(self.redis.lindex('download_queue', 0))
+        self.assertEqual(job['output_format'], 'mp3')
+        self.assertEqual(job['quality'], 'best')
+
+    def test_mp3_is_rejected_for_live_sources(self):
+        source = self.client.get('/api/sources').json['sources'][0]
+        self.redis.set('worker:heartbeat', 1)
+        response = self.post('record', {'source': 'oryx', 'source_id': source['id'],
+                                        'format': 'mp3'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.redis.llen('download_queue'), 0)
+
     def test_direct_stream_only_accepts_original_quality(self):
         source = self.client.get('/api/sources').json['sources'][0]
         self.redis.set('worker:heartbeat', 1)

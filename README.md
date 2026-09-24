@@ -1,10 +1,10 @@
-# Grabby
+# StreamFetch
 
-**Grabby** adalah tool internal untuk merekam, mengelola, dan mengambil klip video dari beberapa sumber melalui satu workflow terpusat.
+**StreamFetch** adalah aplikasi sederhana untuk merekam stream langsung serta mengunduh video atau audio YouTube.
 
-Sistem dapat merekam live stream dari **Oryx/SRS** menggunakan FFmpeg serta mengambil video atau live stream YouTube menggunakan `yt-dlp`. Semua pekerjaan diproses melalui antrean Redis dan worker yang sama, kemudian divalidasi dan difinalisasi menjadi MP4 yang kompatibel dengan editor.
+Stream langsung diproses dengan FFmpeg, sedangkan YouTube diproses dengan `yt-dlp`. Hasil akhirnya disimpan sebagai MP4 atau MP3.
 
-Grabby menyediakan **web control room** sebagai antarmuka utama untuk operator. Telegram tetap tersedia sebagai kontrol opsional.
+Panel web menjadi antarmuka utama. Telegram tersedia sebagai kontrol opsional.
 
 Project ini dibuat untuk kebutuhan workflow produksi dan broadcast internal, bukan sebagai layanan downloader publik.
 
@@ -12,9 +12,9 @@ Project ini dibuat untuk kebutuhan workflow produksi dan broadcast internal, buk
 
 ```text
                        ┌─────────────────────┐
-vMix ── SRT ──► Oryx ─►│                     │
+vMix ── SRT ──► Stream ►│                     │
                        │                     │
-YouTube ───────────────►│       Grabby        │
+YouTube ───────────────►│     StreamFetch      │
                        │                     │
                        │ Web Control Room    │
                        │ Telegram (optional) │
@@ -27,28 +27,28 @@ YouTube ───────────────►│       Grabby        
                        FFmpeg / yt-dlp
                                   │
                                   ▼
-                       downloads/*.mp4
+                     downloads/*.{mp4,mp3}
 ```
 
 Untuk capture broadcast:
 
 ```text
-vMix → SRT → Oryx/SRS → Grabby → FFmpeg → MP4 → Editor
+vMix → server stream → StreamFetch → FFmpeg → MP4
 ```
 
 Untuk YouTube:
 
 ```text
-YouTube → Grabby → yt-dlp → FFmpeg → MP4
+YouTube → StreamFetch → yt-dlp → MP4 / MP3
 ```
 
 ## Fitur
 
 ### Capture
 
-- Rekam live stream dari Oryx/SRS.
-- Download video dan live stream YouTube.
-- Capture langsung menggunakan FFmpeg tanpa melewati `yt-dlp` untuk sumber Oryx.
+- Rekam dari sumber stream langsung.
+- Download video MP4 atau audio MP3 dari YouTube.
+- Capture stream langsung menggunakan FFmpeg.
 - Stop recording secara manual melalui web atau Telegram.
 - Deteksi startup timeout dan stream yang berhenti mengirim media.
 - Recovery parsial ketika sumber terputus.
@@ -57,7 +57,7 @@ YouTube → Grabby → yt-dlp → FFmpeg → MP4
 ### Web Control Room
 
 - Login operator.
-- Mengelola beberapa sumber Oryx.
+- Mengelola beberapa sumber stream.
 - Cek koneksi sumber sebelum recording.
 - Mulai dan hentikan recording.
 - Monitoring status, durasi, dan ukuran capture.
@@ -66,7 +66,7 @@ YouTube → Grabby → yt-dlp → FFmpeg → MP4
 - Membuat penanda momen selama recording.
 - Katalog hasil recording.
 - Pencarian dan filter berdasarkan sumber, status, dan tanggal.
-- Download MP4 langsung melalui panel.
+- Download MP4 atau MP3 langsung melalui panel.
 - Monitoring kapasitas disk.
 
 ### Telegram
@@ -86,7 +86,7 @@ Telegram dan web menggunakan Redis serta worker yang sama sehingga tidak menjala
 
 ## Format Output
 
-File akhir menggunakan MP4 dengan target kompatibilitas:
+Rekaman video menggunakan MP4 dengan target kompatibilitas:
 
 ```text
 Video : H.264
@@ -97,23 +97,28 @@ Pixel : yuv420p
 Nama default:
 
 ```text
-DDMMYYNN.mp4
+DDMMYYNN - Judul video.mp4
 ```
 
 Contoh:
 
 ```text
-14092601.mp4
-14092602.mp4
+14092601 - Berita pagi.mp4
+14092602 - Wawancara.mp4
 ```
 
-Jika judul klip diberikan:
+Untuk audio:
 
 ```text
-Batam Menyapa -14092603.mp4
+14092603 - Berita pagi.mp3
 ```
 
-Nomor urut dihitung berdasarkan hasil recording pada hari yang sama.
+Judul asli YouTube dipakai secara otomatis. Jika kolom judul diisi, judul manual
+akan dipakai. Nomor urut dihitung berdasarkan hasil pada hari yang sama.
+
+Untuk download audio YouTube, pilih **Audio (MP3)** pada panel. StreamFetch mengambil
+audio terbaik yang tersedia dan menyimpannya sebagai `.mp3`; pilihan resolusi
+video otomatis dinonaktifkan.
 
 ## Prasyarat
 
@@ -122,7 +127,7 @@ Nomor urut dihitung berdasarkan hasil recording pada hari yang sama.
 - FFmpeg
 - FFprobe
 - Redis
-- Oryx/SRS untuk live capture
+- Server stream untuk live capture
 - Bot Telegram jika interface Telegram digunakan
 
 Pastikan Anda memiliki hak untuk merekam atau mengunduh konten yang diproses.
@@ -175,7 +180,7 @@ menjadi `ready`, worker dapat menyalin file final secara asynchronous ke storage
 sekunder. Kegagalan arsip tidak mengubah status producer dan file lokal tetap
 dipertahankan.
 
-Mount SMB, NFS, NAS, atau disk lokal pada host terlebih dahulu; Grabby tidak
+Mount SMB, NFS, NAS, atau disk lokal pada host terlebih dahulu; StreamFetch tidak
 melakukan mount dan tidak menerima credential storage. Atur `ARCHIVE_HOST_PATH`
 ke mount host tersebut. Sebelum mengaktifkan arsip, buat marker di filesystem
 tujuan (bukan di direktori mountpoint saat storage sedang tidak ter-mount):
@@ -206,7 +211,7 @@ ke network filesystem, sehingga marker harus dibuat ketika storage yang benar
 sedang mounted. Retensi dicatat sebagai `local_cleanup_after`, tetapi versi ini
 tidak menghapus file lokal secara otomatis.
 
-## Menjalankan Grabby
+## Menjalankan StreamFetch
 
 Buat direktori persistent:
 
@@ -270,10 +275,10 @@ Jangan aktifkan secure cookie jika panel masih menggunakan HTTP biasa.
 
 ## Workflow Recording
 
-### Oryx
+### Stream langsung
 
-1. Pastikan feed dari vMix sudah masuk ke Oryx/SRS.
-2. Pilih sumber pada Grabby.
+1. Pastikan sumber stream sudah aktif.
+2. Pilih sumber pada StreamFetch.
 3. Gunakan **Cek koneksi**.
 4. Isi judul dan catatan jika diperlukan.
 5. Klik **Mulai rekam**.
@@ -287,18 +292,6 @@ stopping → finalizing → ready
 ```
 
 Status `ready` hanya diberikan setelah MP4 berhasil divalidasi.
-
-### RRI / stream langsung
-
-Pada tab **Oryx / RRI**, gunakan **Tambah sumber**, isi nama dan link player RRI, lalu **Simpan**. Aplikasi mengubah link `https://public-streaming.rri.go.id/playersite_<UUID>.html` menjadi stream HLS `/memfs/<UUID>.m3u8`, sesuai format player publik RRI. Halaman player dari situs lain belum didukung.
-
-Contoh PRO 2 RRI BATAM:
-
-```text
-https://public-streaming.rri.go.id/playersite_238787d3-6705-4849-88aa-47cdf58dda1b.html
-```
-
-Pilih sumber tersebut, gunakan **Tes sumber**, lalu **Mulai rekam**. **Stop** memfinalisasi hasil ke MP4 melalui pipeline FFmpeg yang sama dengan Oryx. Sumber dikelompokkan pada filter **Oryx / RRI / Stream**.
 
 ### TikTok Live
 
@@ -314,7 +307,8 @@ Image menyertakan `yt-dlp[default,curl-cffi]` untuk dukungan koneksi browser yan
 
 ### YouTube
 
-Masukkan URL YouTube melalui web atau kirim URL ke Telegram.
+Masukkan URL YouTube melalui web, lalu pilih **Video (MP4)** atau **Audio (MP3)**.
+URL yang dikirim melalui Telegram tetap memakai format MP4.
 
 Workflow:
 
@@ -327,22 +321,20 @@ Worker
  ↓
 yt-dlp
  ↓
-FFmpeg
- ↓
 Validation
  ↓
-MP4
+MP4 / MP3
 ```
 
 ## Finalisasi Recording
 
-Capture Oryx pertama kali ditulis sebagai:
+Capture stream langsung pertama kali ditulis sebagai:
 
 ```text
 <job-id>-capture.ts
 ```
 
-Setelah recording dihentikan, Grabby melakukan probe terhadap media.
+Setelah recording dihentikan, StreamFetch memeriksa media.
 
 Jika stream sudah:
 
@@ -394,7 +386,7 @@ FFprobe
 ready
 ```
 
-Jika proses tidak berhenti, Grabby dapat meningkatkan penghentian menjadi:
+Jika proses tidak berhenti, StreamFetch dapat meningkatkan penghentian menjadi:
 
 ```text
 SIGINT → SIGTERM → SIGKILL
@@ -412,7 +404,7 @@ failed
 
 File sementara dipertahankan untuk pemeriksaan manual.
 
-Grabby tidak melakukan reconnect otomatis lintas protokol.
+StreamFetch tidak melakukan reconnect otomatis lintas protokol.
 
 ## Penanda Momen
 
@@ -451,7 +443,7 @@ data/capture.sqlite3
 
 Direktori tersebut menggunakan persistent bind mount.
 
-Grabby menolak recording baru jika free space berada di bawah:
+StreamFetch menolak recording baru jika free space berada di bawah:
 
 ```env
 MIN_FREE_DISK_GB=2
@@ -524,7 +516,7 @@ Test mencakup antara lain:
 - Stop dan shared finalization;
 - TS → MP4 tanpa encode ulang;
 - real FFmpeg capture + SIGINT;
-- unavailable Oryx endpoint;
+- unavailable stream endpoint;
 - startup timeout;
 - finalization timeout;
 - filename generation;
@@ -565,7 +557,7 @@ docker compose --profile telegram up -d --build
 
 ## Batasan
 
-Grabby saat ini dirancang sebagai tool internal dengan satu worker.
+StreamFetch saat ini dirancang sebagai tool internal dengan satu worker.
 
 Beberapa batasan:
 
@@ -610,9 +602,9 @@ Untuk akses di luar localhost, gunakan HTTPS dan kontrol akses jaringan yang ses
 
 ## Tujuan Project
 
-Grabby dibuat untuk menyederhanakan workflow pengambilan klip dari live broadcast.
+StreamFetch dibuat untuk menyederhanakan workflow pengambilan klip dari live broadcast.
 
-Daripada operator harus menjalankan FFmpeg secara manual, mencari file sementara, melakukan remux, mengganti nama file, dan memeriksa hasil satu per satu, Grabby menggabungkan proses tersebut menjadi:
+Daripada operator menjalankan FFmpeg dan mengelola file secara manual, StreamFetch menggabungkan proses tersebut menjadi:
 
 ```text
 Source

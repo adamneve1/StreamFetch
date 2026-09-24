@@ -53,9 +53,11 @@ class ClipFeatures(unittest.TestCase):
             Path(self.tmp.name, '14092601.mp4').touch()
             Path(self.tmp.name, 'Other title -14092602.mp4').touch()
             target = worker.generate_final_filename(note='Batam menyapa')
-            self.assertEqual(target.name, 'Batam menyapa -14092603.mp4')
+            self.assertEqual(target.name, '14092603 - Batam menyapa.mp4')
             target.touch()
             self.assertEqual(worker.generate_final_filename().name, '14092604.mp4')
+            self.assertEqual(worker.generate_final_filename(title='Judul asli').name,
+                             '14092604 - Judul asli.mp4')
             unsafe = worker.generate_final_filename(note='../Bad: /title\\ name\x00')
             self.assertEqual(unsafe.parent, Path(self.tmp.name))
             self.assertNotIn(':', unsafe.name)

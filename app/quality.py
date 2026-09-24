@@ -7,6 +7,8 @@ QUALITY_HEIGHTS = {
     "480": 480,
 }
 
+OUTPUT_FORMATS = {"mp4", "mp3"}
+
 
 def validate(value):
     value = str(value or "best")
@@ -15,9 +17,19 @@ def validate(value):
     return value
 
 
-def ytdlp_selector(value):
-    """Prefer editor-friendly AVC/AAC while respecting the height ceiling."""
+def validate_format(value):
+    value = str(value or "mp4").lower()
+    if value not in OUTPUT_FORMATS:
+        raise ValueError("Pilih format file yang tersedia.")
+    return value
+
+
+def ytdlp_selector(value, output_format="mp4"):
+    """Select the best audio, or editor-friendly video within the height cap."""
     value = validate(value)
+    output_format = validate_format(output_format)
+    if output_format == "mp3":
+        return "ba/b"
     height = QUALITY_HEIGHTS[value]
     cap = f"[height<={height}]" if height else ""
     return (

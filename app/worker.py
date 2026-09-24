@@ -140,29 +140,40 @@ def sanitize_filename(title):
     return safe_title
 
 
-def generate_final_filename(title="", note=""):
+def generate_final_filename(title="", note="", extension="mp4"):
     """
-    Generate the final filename in DDMMYYNN.mp4 format, where NN is the
-    download number for that date.
+    Generate DDMMYYNN - Title.ext, using a manual title when supplied and
+    otherwise the source title. NN is the download number for that date.
     Uses the server's local timezone.
     """
     # Get current date in server's local timezone
     now = datetime.now()
     date_str = now.strftime("%d%m%y")
 
-    pattern = re.compile(rf"^(?:.* -)?{re.escape(date_str)}(\d+)\.mp4$", re.IGNORECASE)
-    download_numbers = [
-        int(match.group(1))
-        for path in DOWNLOAD_DIR.iterdir()
-        if path.is_file()
-        for match in [pattern.match(path.name)]
-        if match
-    ]
+    extension = quality.validate_format(extension)
+    patterns = (
+        re.compile(rf"^{re.escape(date_str)}(\d+)(?: - .+)?\.(?:mp4|mp3)$", re.IGNORECASE),
+        # Keep counting files created with the previous Title - DDMMYYNN format.
+        re.compile(rf"^.+ -{re.escape(date_str)}(\d+)\.(?:mp4|mp3)$", re.IGNORECASE),
+    )
+    download_numbers = []
+    for path in DOWNLOAD_DIR.iterdir():
+        if not path.is_file():
+            continue
+        match = None
+        for candidate in patterns:
+            match = candidate.match(path.name)
+            if match:
+                break
+        if match:
+            download_numbers.append(int(match.group(1)))
     next_number = max(download_numbers, default=0) + 1
-    prefix = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', ' ', str(note))
-    prefix = ' '.join(prefix.split()).strip('. ')
-    prefix = prefix.encode('utf-8')[:160].decode('utf-8', errors='ignore').rstrip('. ')
-    return DOWNLOAD_DIR / f"{prefix + ' -' if prefix else ''}{date_str}{next_number:02d}.mp4"
+    label = str(note).strip() or str(title).strip()
+    label = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', ' ', label)
+    label = ' '.join(label.split()).strip('. ')
+    label = label.encode('utf-8')[:160].decode('utf-8', errors='ignore').rstrip('. ')
+    stem = f"{date_str}{next_number:02d}" + (f" - {label}" if label else "")
+    return DOWNLOAD_DIR / f"{stem}.{extension}"
 
 
 def progress_bar(percent):
@@ -430,7 +441,7 @@ async def heartbeat(job=None):
 
 async def set_state(job, status, state, detail=''):
     r.set(f"state:{job['job_id']}", state, ex=86400)
-    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'quality', 'is_live', 'started_at', 'elapsed', 'size', 'filename') if key in job}
+    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'quality', 'output_format', 'is_live', 'started_at', 'elapsed', 'size', 'filename') if key in job}
     public.update(state=state, detail=detail)
     r.set('web:job:' + job['job_id'], json.dumps(public), ex=86400)
     if os.getenv('DATA_DIR'):
@@ -444,7 +455,7 @@ async def set_state(job, status, state, detail=''):
             'starting': '⏳ Starting: menghubungkan sumber...',
             'recording': '🔴 Recording: capture sedang berjalan.',
             'stopping': '🛑 Stopping: menunggu capture berhenti...',
-            'finalizing': '🔧 Finalizing: menyiapkan dan memvalidasi MP4...',
+            'finalizing': '🔧 Finalizing: menyiapkan dan memvalidasi file...',
             'ready': '✅ Ready: file siap digunakan.',
             'failed': '❌ Failed: file belum siap.',
         }
@@ -662,13 +673,20 @@ def capture_command(job):
             '-c', 'copy', '-f', 'mpegts', '-flush_packets', '1',
             '-progress', 'pipe:1', '-nostats', str(path),
         ], path
-    return [
-        'yt-dlp', '-f', quality.ytdlp_selector(job.get('quality', 'best')),
-        '--merge-output-format', 'mp4', '--remux-video', 'mp4',
+    output_format = quality.validate_format(job.get('output_format', 'mp4'))
+    if output_format == 'mp3' and job['source'] != 'youtube':
+        raise ValueError('MP3 is only supported for YouTube downloads')
+    command = [
+        'yt-dlp', '-f', quality.ytdlp_selector(job.get('quality', 'best'), output_format),
         '--no-playlist', '--newline', '--retries', '10',
         '--fragment-retries', '10', '--continue',
-        '-o', str(DOWNLOAD_DIR / f'{job_id}-%(title).200B.%(ext)s'), job['url'],
-    ], None
+    ]
+    if output_format == 'mp3':
+        command += ['--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0']
+    else:
+        command += ['--merge-output-format', 'mp4', '--remux-video', 'mp4']
+    command += ['-o', str(DOWNLOAD_DIR / f'{job_id}-%(title).200B.%(ext)s'), job['url']]
+    return command, None
 
 
 async def capture(job, status, lease):
@@ -761,6 +779,37 @@ def compatible_media(info):
         return False
 
 
+def compatible_mp3(info):
+    try:
+        return bool(info and 'mp3' in info['container']
+                    and info['audio_codec'] == 'mp3'
+                    and float(info.get('duration') or 0) > 0)
+    except (ValueError, TypeError):
+        return False
+
+
+def finalize_to_mp3(path):
+    """Create a verified MP3 from an audio-bearing download."""
+    info = probe_media_file(path)
+    if not info or info['audio_codec'] == 'unknown':
+        return None
+    if compatible_mp3(info):
+        return path
+    target = path.with_name(f"{path.stem}.finalize_tmp.mp3")
+    try:
+        result = subprocess.run([
+            'ffmpeg', '-v', 'error', '-y', '-i', str(path), '-map', '0:a:0',
+            '-vn', '-c:a', 'libmp3lame', '-q:a', '2', str(target),
+        ], capture_output=True, timeout=FINALIZE_TIMEOUT, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        target.unlink(missing_ok=True)
+        return None
+    if result.returncode or not compatible_mp3(probe_media_file(target)):
+        target.unlink(missing_ok=True)
+        return None
+    return target
+
+
 def complete_recording(job):
     # Interrupted yt-dlp files can still contain usable media, including .part.
     # Prefer an already merged A/V file; never publish a video-only fragment.
@@ -769,6 +818,20 @@ def complete_recording(job):
          if p.is_file() and p.stat().st_size > 0
          and not p.name.endswith('.ytdl') and '.finalize_tmp.' not in p.name),
         key=lambda p: (p.suffix != '.part', p.stat().st_mtime), reverse=True)
+    output_format = quality.validate_format(job.get('output_format', 'mp4'))
+    if output_format == 'mp3':
+        for path in candidates:
+            final_path = finalize_to_mp3(path)
+            if final_path is None:
+                continue
+            target = generate_final_filename(job.get('title', ''),
+                                             note=job.get('note', ''),
+                                             extension='mp3')
+            final_path.rename(target)
+            log.info('job=%s source=%s finalization=passed final=%s',
+                     job['job_id'], job['source'], target)
+            return target
+        raise RuntimeError('No usable audio file; temporary media retained')
     separate_video = separate_audio = None
     for path in candidates:
         info = probe_media_file(path)
@@ -819,6 +882,11 @@ async def run_download(job):
     job.setdefault('source', 'youtube')
     job.setdefault('is_live', job['source'] in {'oryx', 'tiktok'})
     job['quality'] = quality.validate(job.get('quality', 'best'))
+    job['output_format'] = quality.validate_format(job.get('output_format', 'mp4'))
+    if job['output_format'] == 'mp3':
+        if job['source'] != 'youtube':
+            raise ValueError('MP3 is only supported for YouTube downloads')
+        job['quality'] = 'best'
     job.setdefault('job_id', uuid.uuid4().hex)
     job.setdefault('requested_at', time.time())
     job.setdefault('origin', 'telegram')
@@ -848,7 +916,7 @@ async def run_download(job):
             if job['source'] == 'tiktok' and info.get('is_live') is not True:
                 await set_state(job, status, 'failed', 'Akun TikTok belum live atau siaran tidak dapat diakses. Coba lagi saat akun sedang live.')
                 return
-            job['title'] = info.get('title', 'Unknown')
+            job['title'] = info.get('title') or ''
         stage = 'capture'
         reason = await capture(job, status, lease)
         job['stop_reason'] = reason

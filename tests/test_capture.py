@@ -221,15 +221,17 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.redis.llen('download_queue'), 1)
         self.assertEqual(json.loads(self.redis.lindex('download_queue', 0))['source'], 'tiktok')
 
-    def test_filename_generation_unchanged(self):
+    def test_filename_uses_source_title_and_daily_sequence(self):
         from datetime import datetime
         with patch.object(worker, 'datetime') as clock:
             clock.now.return_value = datetime(2026, 9, 14)
-            self.assertEqual(worker.generate_final_filename('ignored').name, '14092601.mp4')
-            (self.root / '14092601.mp4').touch()
+            self.assertEqual(worker.generate_final_filename('Judul asli').name,
+                             '14092601 - Judul asli.mp4')
+            (self.root / '14092601 - Judul asli.mp4').touch()
             (self.root / '14092609.mp4').touch()
             (self.root / '13092699.mp4').touch()
-            self.assertEqual(worker.generate_final_filename('another').name, '14092610.mp4')
+            self.assertEqual(worker.generate_final_filename('Judul berikutnya').name,
+                             '14092610 - Judul berikutnya.mp4')
 
     def test_quality_selector_caps_video_without_forcing_upscale(self):
         best = quality.ytdlp_selector('best')
@@ -241,6 +243,25 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(command[command.index('-f') + 1], capped)
         with self.assertRaises(ValueError):
             quality.ytdlp_selector('2160')
+
+    def test_mp3_command_uses_best_audio_and_audio_extraction(self):
+        command, _ = worker.capture_command(dict(
+            job_id='audio-job', source='youtube', quality='1080',
+            output_format='mp3', url='https://youtu.be/test'))
+        self.assertEqual(command[command.index('-f') + 1], 'ba/b')
+        self.assertIn('--extract-audio', command)
+        self.assertEqual(command[command.index('--audio-format') + 1], 'mp3')
+        self.assertNotIn('--merge-output-format', command)
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'FFmpeg required')
+    def test_mp3_finalization_creates_named_audio_file(self):
+        source = self.root / 'test-job-source.ts'
+        self.media(source)
+        target = worker.complete_recording(dict(
+            job_id='test-job', source='youtube', output_format='mp3',
+            note='Audio pilihan'))
+        self.assertEqual(target.suffix, '.mp3')
+        self.assertTrue(worker.compatible_mp3(worker.probe_media_file(target)))
 
     def test_probe_timeout_returns_failure(self):
         with patch.object(worker.subprocess, 'run', side_effect=subprocess.TimeoutExpired('ffprobe', 1)):
