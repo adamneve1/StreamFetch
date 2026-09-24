@@ -1,10 +1,10 @@
-# StreamFetch
+# Grabby
 
-**StreamFetch** adalah tool internal untuk merekam, mengelola, dan mengambil klip video dari beberapa sumber melalui satu workflow terpusat.
+**Grabby** adalah tool internal untuk merekam, mengelola, dan mengambil klip video dari beberapa sumber melalui satu workflow terpusat.
 
 Sistem dapat merekam live stream dari **Oryx/SRS** menggunakan FFmpeg serta mengambil video atau live stream YouTube menggunakan `yt-dlp`. Semua pekerjaan diproses melalui antrean Redis dan worker yang sama, kemudian divalidasi dan difinalisasi menjadi MP4 yang kompatibel dengan editor.
 
-StreamFetch menyediakan **web control room** sebagai antarmuka utama untuk operator. Telegram tetap tersedia sebagai kontrol opsional.
+Grabby menyediakan **web control room** sebagai antarmuka utama untuk operator. Telegram tetap tersedia sebagai kontrol opsional.
 
 Project ini dibuat untuk kebutuhan workflow produksi dan broadcast internal, bukan sebagai layanan downloader publik.
 
@@ -14,7 +14,7 @@ Project ini dibuat untuk kebutuhan workflow produksi dan broadcast internal, buk
                        ┌─────────────────────┐
 vMix ── SRT ──► Oryx ─►│                     │
                        │                     │
-YouTube ───────────────►│     StreamFetch     │
+YouTube ───────────────►│       Grabby        │
                        │                     │
                        │ Web Control Room    │
                        │ Telegram (optional) │
@@ -33,13 +33,13 @@ YouTube ───────────────►│     StreamFetch     
 Untuk capture broadcast:
 
 ```text
-vMix → SRT → Oryx/SRS → StreamFetch → FFmpeg → MP4 → Editor
+vMix → SRT → Oryx/SRS → Grabby → FFmpeg → MP4 → Editor
 ```
 
 Untuk YouTube:
 
 ```text
-YouTube → StreamFetch → yt-dlp → FFmpeg → MP4
+YouTube → Grabby → yt-dlp → FFmpeg → MP4
 ```
 
 ## Fitur
@@ -175,7 +175,7 @@ menjadi `ready`, worker dapat menyalin file final secara asynchronous ke storage
 sekunder. Kegagalan arsip tidak mengubah status producer dan file lokal tetap
 dipertahankan.
 
-Mount SMB, NFS, NAS, atau disk lokal pada host terlebih dahulu; StreamFetch tidak
+Mount SMB, NFS, NAS, atau disk lokal pada host terlebih dahulu; Grabby tidak
 melakukan mount dan tidak menerima credential storage. Atur `ARCHIVE_HOST_PATH`
 ke mount host tersebut. Sebelum mengaktifkan arsip, buat marker di filesystem
 tujuan (bukan di direktori mountpoint saat storage sedang tidak ter-mount):
@@ -206,7 +206,7 @@ ke network filesystem, sehingga marker harus dibuat ketika storage yang benar
 sedang mounted. Retensi dicatat sebagai `local_cleanup_after`, tetapi versi ini
 tidak menghapus file lokal secara otomatis.
 
-## Menjalankan StreamFetch
+## Menjalankan Grabby
 
 Buat direktori persistent:
 
@@ -273,7 +273,7 @@ Jangan aktifkan secure cookie jika panel masih menggunakan HTTP biasa.
 ### Oryx
 
 1. Pastikan feed dari vMix sudah masuk ke Oryx/SRS.
-2. Pilih sumber pada StreamFetch.
+2. Pilih sumber pada Grabby.
 3. Gunakan **Cek koneksi**.
 4. Isi judul dan catatan jika diperlukan.
 5. Klik **Mulai rekam**.
@@ -342,7 +342,7 @@ Capture Oryx pertama kali ditulis sebagai:
 <job-id>-capture.ts
 ```
 
-Setelah recording dihentikan, StreamFetch melakukan probe terhadap media.
+Setelah recording dihentikan, Grabby melakukan probe terhadap media.
 
 Jika stream sudah:
 
@@ -394,7 +394,7 @@ FFprobe
 ready
 ```
 
-Jika proses tidak berhenti, StreamFetch dapat meningkatkan penghentian menjadi:
+Jika proses tidak berhenti, Grabby dapat meningkatkan penghentian menjadi:
 
 ```text
 SIGINT → SIGTERM → SIGKILL
@@ -412,7 +412,7 @@ failed
 
 File sementara dipertahankan untuk pemeriksaan manual.
 
-StreamFetch tidak melakukan reconnect otomatis lintas protokol.
+Grabby tidak melakukan reconnect otomatis lintas protokol.
 
 ## Penanda Momen
 
@@ -451,7 +451,7 @@ data/capture.sqlite3
 
 Direktori tersebut menggunakan persistent bind mount.
 
-StreamFetch menolak recording baru jika free space berada di bawah:
+Grabby menolak recording baru jika free space berada di bawah:
 
 ```env
 MIN_FREE_DISK_GB=2
@@ -565,7 +565,7 @@ docker compose --profile telegram up -d --build
 
 ## Batasan
 
-StreamFetch saat ini dirancang sebagai tool internal dengan satu worker.
+Grabby saat ini dirancang sebagai tool internal dengan satu worker.
 
 Beberapa batasan:
 
@@ -610,9 +610,9 @@ Untuk akses di luar localhost, gunakan HTTPS dan kontrol akses jaringan yang ses
 
 ## Tujuan Project
 
-StreamFetch dibuat untuk menyederhanakan workflow pengambilan klip dari live broadcast.
+Grabby dibuat untuk menyederhanakan workflow pengambilan klip dari live broadcast.
 
-Daripada operator harus menjalankan FFmpeg secara manual, mencari file sementara, melakukan remux, mengganti nama file, dan memeriksa hasil satu per satu, StreamFetch menggabungkan proses tersebut menjadi:
+Daripada operator harus menjalankan FFmpeg secara manual, mencari file sementara, melakukan remux, mengganti nama file, dan memeriksa hasil satu per satu, Grabby menggabungkan proses tersebut menjadi:
 
 ```text
 Source
