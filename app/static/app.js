@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-let csrf='', mode='oryx', sources=[], editing='', active=null, online=false, queued=0, pending=false, disk=null, refreshId=0;
+let csrf='', mode='oryx', sources=[], editing='', active=null, online=false, queued=0, pending=false, disk=null, archiveEnabled=false, refreshId=0;
 async function api(path, data){
  const response=await fetch('/api/'+path,{method:data===undefined?'GET':'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:data===undefined?undefined:JSON.stringify(data)});
  const contentType=response.headers.get('content-type')||'';
@@ -12,6 +12,7 @@ async function api(path, data){
  }
  if(response.status===401 && path!=='login'){showLogin();throw Error('Sesi kamu sudah berakhir. Silakan masuk lagi.');}
  if(!response.ok)throw Error(result.error || 'Belum berhasil. Silakan coba lagi.');
+ if(path==='status'){archiveEnabled=!!result.archive_enabled;$('storage-archive').disabled=!archiveEnabled;if(!archiveEnabled&&$('storage-target').value==='archive')$('storage-target').value='local';updateStorageHint();}
  return result;
 }
 function notice(text){$('notice').textContent=text;$('notice').hidden=!text;}
@@ -20,6 +21,7 @@ function controls(){ $('mark').disabled=pending||!active||active.state!=='record
 function bytes(n=0){return n>=1e9?(n/1e9).toFixed(2)+' GB':(n/1e6).toFixed(1)+' MB';}
 function stateName(state){return ({starting:'Menghubungkan',recording:'Sedang merekam',stopping:'Menghentikan',finalizing:'Menyiapkan file',ready:'Siap',failed:'Gagal',interrupted:'Terputus'})[state]||state||'Siap';}
 function duration(n=0){return [Math.floor(n/3600),Math.floor(n/60)%60,Math.floor(n)%60].map(x=>String(x).padStart(2,'0')).join(':');}
+function updateStorageHint(){$('storage-hint').textContent=$('storage-target').value==='archive'?'File tetap disimpan lokal, lalu disalin ke arsip.':archiveEnabled?'File hanya disimpan di folder downloads.':'File disimpan di folder downloads. Arsip belum diaktifkan.';}
 function editSource(id){editing=id;const s=sources.find(x=>x.id===id);$('source-name').value=s?.name||'';$('source-url').value=s?.url||'';$('source-feedback').textContent='';}
 async function loadSources(){const previous=$('source').value; sources=(await api('sources')).sources;$('source').replaceChildren();for(const s of sources){const o=document.createElement('option');o.value=s.id;o.textContent=s.name;$('source').append(o);}if(!sources.length){const o=document.createElement('option');o.value='';o.textContent='Belum ada sumber — tambahkan dulu';$('source').append(o);}if(sources.some(x=>x.id===previous))$('source').value=previous;editSource($('source').value);controls();}
 function setMode(value){mode=value;$('tiktok-fields').hidden=mode!=='tiktok';$('tab-tiktok').classList.toggle('selected',mode==='tiktok');$('oryx-fields').hidden=mode!=='oryx';$('youtube-fields').hidden=mode!=='youtube';$('tab-oryx').classList.toggle('selected',mode==='oryx');$('tab-youtube').classList.toggle('selected',mode==='youtube');controls();}
@@ -30,7 +32,8 @@ $('logout').onclick=async()=>{try{await api('logout',{});showLogin();}catch(e){n
 $('tab-tiktok').onclick=()=>setMode('tiktok');$('tab-oryx').onclick=()=>setMode('oryx');$('tab-youtube').onclick=()=>setMode('youtube');$('source').onchange=()=>{editSource($('source').value);controls();};$('new-source').onclick=()=>{editSource('');$('source-name').focus();};
 $('source-form').onsubmit=async e=>{e.preventDefault();try{const saved=await api('sources',{id:editing,name:$('source-name').value,url:$('source-url').value});await loadSources();$('source').value=saved.id;editSource(saved.id);$('source-feedback').textContent='Sumber berhasil disimpan dan siap dipakai.';controls();}catch(err){$('source-feedback').textContent=err.message;}};
 $('check').onclick=async()=>{$('check').disabled=true;$('source-feedback').textContent='Sedang mencoba terhubung…';try{const result=await api('check',{url:$('source-url').value});$('source-feedback').textContent='Sumber tersambung · '+result.codecs.join(' / ');}catch(e){$('source-feedback').textContent=e.message;}finally{$('check').disabled=false;}};
-$('record').onclick=async()=>{pending=true;controls();notice('');try{await api('record',{source:mode,source_id:$('source').value,url:mode==='tiktok'?$('tiktok-url').value:$('youtube-url').value,note:$('note').value});await refresh();}catch(e){notice(e.message);}finally{pending=false;controls();}};
+$('record').onclick=async()=>{pending=true;controls();notice('');try{await api('record',{source:mode,source_id:$('source').value,url:mode==='tiktok'?$('tiktok-url').value:$('youtube-url').value,note:$('note').value,storage:$('storage-target').value});await refresh();}catch(e){notice(e.message);}finally{pending=false;controls();}};
+$('storage-target').onchange=updateStorageHint;
 $('stop').onclick=async()=>{pending=true;controls();try{await api('stop',{job_id:active.job_id});notice('Rekaman sedang dihentikan. File akan muncul setelah selesai diproses.');await refresh();}catch(e){notice(e.message);}finally{pending=false;controls();}};
 setInterval(()=>{$('duration').textContent=duration(active?.state==='recording'&&active.started_at?Math.max(0,Date.now()/1000-active.started_at):active?.elapsed||0);},1000);
 (async()=>{try{csrf=(await api('session')).csrf;await enter();}catch{showLogin();}})();
@@ -41,3 +44,6 @@ let searchTimer;
 $('filter-q').oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(refresh,250);};
 for(const id of ['filter-source','filter-state','filter-date'])$(id).onchange=refresh;
 $('filter-reset').onclick=()=>{for(const id of ['filter-q','filter-source','filter-state','filter-date'])$(id).value='';refresh();};
+
+function addDeleteButtons(){for(const cell of $('results').querySelectorAll('td:last-child')){if(cell.querySelector('.delete-file'))continue;const link=cell.querySelector('a[href^="/api/files/"]');if(!link)continue;const filename=decodeURIComponent(link.getAttribute('href').slice('/api/files/'.length));const button=document.createElement('button');button.type='button';button.className='stop delete-file';button.textContent='Hapus';button.onclick=async()=>{if(!confirm('Hapus file ini dari penyimpanan lokal dan riwayat?'))return;button.disabled=true;try{await api('files/'+encodeURIComponent(filename)+'/delete',{});notice('File dan riwayat sudah dihapus.');await refresh();}catch(e){notice(e.message);button.disabled=false;}};cell.append(document.createTextNode(' '),button);}}
+new MutationObserver(addDeleteButtons).observe($('results'),{childList:true});

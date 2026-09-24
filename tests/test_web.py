@@ -72,6 +72,28 @@ class WebTests(unittest.TestCase):
         self.redis.set('state:' + job_id, 'finalizing')
         self.assertEqual(self.post('stop', {'job_id': job_id}).status_code, 409)
 
+    def test_operator_can_choose_local_or_configured_archive(self):
+        self.redis.set('worker:heartbeat', 1)
+        local = self.post('record', {'source': 'youtube',
+                                     'url': 'https://youtu.be/test', 'storage': 'local'})
+        self.assertEqual(local.status_code, 202)
+        job = json.loads(self.redis.lindex('download_queue', 0))
+        self.assertEqual(job['storage'], 'local')
+        self.assertFalse(job['archive'])
+
+        self.redis.flushall()
+        self.redis.set('worker:heartbeat', 1)
+        unavailable = self.post('record', {'source': 'youtube',
+                                           'url': 'https://youtu.be/test', 'storage': 'archive'})
+        self.assertEqual(unavailable.status_code, 400)
+        with patch.dict(os.environ, ARCHIVE_ENABLED='true'):
+            archived = self.post('record', {'source': 'youtube',
+                                             'url': 'https://youtu.be/test', 'storage': 'archive'})
+            self.assertEqual(archived.status_code, 202)
+            job = json.loads(self.redis.lindex('download_queue', 0))
+            self.assertEqual(job['storage'], 'archive')
+            self.assertTrue(job['archive'])
+
     def test_url_validation_and_private_data_not_in_history(self):
         self.assertEqual(self.post('sources', {'name': 'bad', 'url': 'file:///etc/passwd'}).status_code, 400)
         self.assertEqual(self.post('record', {'source': 'youtube', 'url': 'https://youtube.com.evil.test/video'}).status_code, 400)
@@ -126,6 +148,28 @@ class WebTests(unittest.TestCase):
             response.close()
             self.assertEqual(self.app.test_client().get('/api/files/' + path.name).status_code, 401)
             self.assertEqual(self.client.get('/api/files/unknown.mp4').status_code, 404)
+
+    def test_delete_download_removes_local_file_history_and_markers(self):
+        path = Path(self.tmp.name) / 'file dengan spasi.mp4'
+        path.write_bytes(b'fixture')
+        storage.save_recording({'job_id': 'delete-job', 'filename': path.name,
+                                'source': 'youtube', 'storage': 'local'}, 'ready')
+        storage.add_marker('delete-job', 1, 'test')
+        response = self.post('files/' + path.name + '/delete', {})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(path.exists())
+        self.assertFalse(any(row['job_id'] == 'delete-job' for row in storage.recordings()))
+
+    def test_delete_refuses_unfinished_archive_and_keeps_local_file(self):
+        path = Path(self.tmp.name) / 'pending.mp4'
+        path.write_bytes(b'fixture')
+        storage.save_recording({'job_id': 'pending-job', 'filename': path.name,
+                                'source': 'youtube', 'storage': 'archive'}, 'ready')
+        storage.save_archive_state('pending-job', 'archive_pending')
+        response = self.post('files/' + path.name + '/delete', {})
+        self.assertEqual(response.status_code, 409)
+        self.assertTrue(path.exists())
+        self.assertTrue(any(row['job_id'] == 'pending-job' for row in storage.recordings()))
 
 
 class WebWorkerTests(unittest.IsolatedAsyncioTestCase):

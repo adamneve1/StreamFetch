@@ -151,8 +151,15 @@ def create_app(client=None):
     def record():
         data = request.get_json() or {}
         source = data.get('source')
+        storage_target = data.get('storage', 'local')
+        if storage_target not in {'local', 'archive'}:
+            raise ValueError('Pilih lokasi penyimpanan yang tersedia.')
+        archive_enabled = os.getenv('ARCHIVE_ENABLED', 'false').lower() in {'1', 'true', 'yes', 'on'}
+        if storage_target == 'archive' and not archive_enabled:
+            raise ValueError('Penyimpanan arsip belum diaktifkan oleh admin.')
         job = dict(job_id=uuid.uuid4().hex, source=source, origin='web', chat_id='web',
-                   requested_at=time.time(), note=str(data.get('note', '')).strip()[:500])
+                   requested_at=time.time(), note=str(data.get('note', '')).strip()[:500],
+                   storage=storage_target, archive=storage_target == 'archive')
         if source == 'oryx':
             selected = next((s for s in storage.sources() if s['id'] == data.get('source_id')), None)
             if not selected:
@@ -186,7 +193,10 @@ def create_app(client=None):
             info = dict(job_id=owner, state=r.get('state:' + owner) or 'starting')
         if info:
             info['markers'] = storage.markers(owner)
-        return jsonify(active=info, online=bool(r.exists('worker:heartbeat')), queued=r.llen('download_queue'), disk=storage.disk_status())
+        archive_enabled = os.getenv('ARCHIVE_ENABLED', 'false').lower() in {'1', 'true', 'yes', 'on'}
+        return jsonify(active=info, online=bool(r.exists('worker:heartbeat')),
+                       queued=r.llen('download_queue'), disk=storage.disk_status(),
+                       archive_enabled=archive_enabled)
 
     @app.post('/api/markers')
     def mark():
@@ -236,6 +246,31 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
         if not any(row.get('filename') == filename and row['state'] == 'ready' for row in storage.recordings()):
             return jsonify(error='File rekaman tidak ditemukan atau belum siap.'), 404
         return send_from_directory(Path(os.getenv('DOWNLOAD_DIR', '/downloads')), filename, as_attachment=True)
+
+    @app.post('/api/files/<filename>/delete')
+    def delete_download(filename):
+        row = next((item for item in storage.recordings()
+                    if item.get('filename') == filename and item.get('state') == 'ready'), None)
+        if not row:
+            return jsonify(error='File rekaman tidak ditemukan atau belum siap.'), 404
+        if r.get('capture:owner') == row['job_id']:
+            return jsonify(error='Rekaman yang masih aktif tidak bisa dihapus.'), 409
+        if (row.get('storage') == 'archive'
+                and row.get('archive_status') != 'archived'):
+            return jsonify(error='File belum berhasil diarsipkan, jadi file lokal tidak dihapus.'), 409
+
+        root = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve()
+        path = root / filename
+        if Path(filename).name != filename or path.parent.resolve() != root or path.is_symlink():
+            raise ValueError('Nama file tidak valid.')
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            return jsonify(error='File tidak bisa dihapus. Periksa izin folder downloads.'), 500
+        storage.delete_recording(row['job_id'])
+        r.delete('state:' + row['job_id'], 'web:job:' + row['job_id'],
+                 'archive:state:' + row['job_id'])
+        return jsonify(ok=True)
 
     return app
 

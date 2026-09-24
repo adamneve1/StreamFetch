@@ -464,7 +464,7 @@ def set_archive_state(job_id, state, **fields):
 
 def enqueue_archive(job, final_path):
     """Queue the shared archive pipeline only after producer success."""
-    if not ARCHIVE_ENABLED:
+    if not ARCHIVE_ENABLED or job.get("archive") is False:
         set_archive_state(job["job_id"], "local")
         return False
     payload = {"job_id": job["job_id"], "source": job["source"],
