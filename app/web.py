@@ -13,8 +13,9 @@ import redis
 from flask import Flask, jsonify, request, session, send_from_directory
 from werkzeug.exceptions import HTTPException
 try:
-    from . import storage
+    from . import quality, storage
 except ImportError:
+    import quality
     import storage
 
 ADMIT = """
@@ -33,6 +34,13 @@ if state == 'finalizing' or state == 'ready' or state == 'failed' then return 0 
 redis.call('SET', 'stop:' .. ARGV[1], '1', 'EX', 300)
 return 1
 """
+
+
+def positive_int(value):
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def create_app(client=None):
@@ -147,10 +155,69 @@ def create_app(client=None):
         finally:
             r.eval("if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0", 1, 'web:probe', token)
 
+    @app.post('/api/estimate')
+    def estimate():
+        data = request.get_json() or {}
+        source = data.get('source')
+        selected_quality = quality.validate(data.get('quality', 'best'))
+        token = uuid.uuid4().hex
+        if not r.set('web:estimate', token, nx=True, ex=35):
+            return jsonify(error='Estimasi lain sedang berjalan. Tunggu sebentar.'), 409
+        try:
+            if source == 'oryx':
+                if selected_quality != 'best':
+                    raise ValueError('Stream langsung memakai kualitas asli dari sumber.')
+                selected = next((item for item in storage.sources()
+                                 if item['id'] == data.get('source_id')), None)
+                if not selected:
+                    raise ValueError('Pilih sumber live terlebih dahulu.')
+                url = storage.validate_url(selected['url'])
+                result = subprocess.run([
+                    'ffprobe', '-v', 'error', '-rw_timeout', '8000000',
+                    '-show_entries', 'format=bit_rate:stream=codec_type,width,height,bit_rate',
+                    '-of', 'json', url,
+                ], capture_output=True, timeout=10)
+                metadata = json.loads(result.stdout) if result.returncode == 0 else {}
+                streams = metadata.get('streams', [])
+                if not any(item.get('codec_type') == 'video' for item in streams):
+                    return jsonify(error='Bitrate sumber belum bisa diperiksa.'), 422
+                format_rate = positive_int((metadata.get('format') or {}).get('bit_rate'))
+                stream_rate = sum(positive_int(item.get('bit_rate')) for item in streams)
+                bits_per_second = format_rate or stream_rate
+                heights = [positive_int(item.get('height')) for item in streams]
+                return jsonify(estimated_bytes=None,
+                               bytes_per_hour=int(bits_per_second / 8 * 3600) if bits_per_second else None,
+                               height=max(heights, default=None), is_live=True,
+                               quality='best')
+
+            if source == 'youtube':
+                url = storage.validate_url(str(data.get('url', '')).strip(), youtube=True)
+            elif source == 'tiktok':
+                url = storage.validate_tiktok_url(str(data.get('url', '')).strip())
+            else:
+                raise ValueError('Pilih sumber yang ingin diperiksa.')
+            result = subprocess.run([
+                'yt-dlp', '--dump-single-json', '--skip-download', '--no-playlist',
+                '--no-warnings', '-f', quality.ytdlp_selector(selected_quality), url,
+            ], capture_output=True, timeout=25)
+            if result.returncode:
+                return jsonify(error='Ukuran belum bisa diperkirakan dari sumber ini.'), 422
+            metadata = json.loads(result.stdout)
+            return jsonify(**quality.selected_media_info(metadata), quality=selected_quality)
+        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            return jsonify(error='Ukuran belum bisa diperkirakan dari sumber ini.'), 422
+        except ValueError:
+            raise
+        finally:
+            r.eval("if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0", 1, 'web:estimate', token)
+
     @app.post('/api/record')
     def record():
         data = request.get_json() or {}
         source = data.get('source')
+        selected_quality = quality.validate(data.get('quality', 'best'))
+        if source == 'oryx' and selected_quality != 'best':
+            raise ValueError('Stream langsung direkam dengan kualitas asli dari sumber.')
         storage_target = data.get('storage', 'local')
         if storage_target not in {'local', 'archive'}:
             raise ValueError('Pilih lokasi penyimpanan yang tersedia.')
@@ -159,7 +226,8 @@ def create_app(client=None):
             raise ValueError('Penyimpanan arsip belum diaktifkan oleh admin.')
         job = dict(job_id=uuid.uuid4().hex, source=source, origin='web', chat_id='web',
                    requested_at=time.time(), note=str(data.get('note', '')).strip()[:500],
-                   storage=storage_target, archive=storage_target == 'archive')
+                   storage=storage_target, archive=storage_target == 'archive',
+                   quality=selected_quality)
         if source == 'oryx':
             selected = next((s for s in storage.sources() if s['id'] == data.get('source_id')), None)
             if not selected:
@@ -296,6 +364,51 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
             else:
                 skipped.append(dict(job_id=job_id, reason=reason))
         return jsonify(deleted=deleted, skipped=skipped)
+
+    @app.post('/api/recordings/<job_id>/rename')
+    def rename_recording(job_id):
+        row = next((item for item in storage.recordings()
+                    if item.get('job_id') == job_id and item.get('state') == 'ready'), None)
+        if not row or not row.get('filename'):
+            return jsonify(error='File rekaman tidak ditemukan atau belum siap.'), 404
+        if r.get('capture:owner') == job_id:
+            return jsonify(error='Proses yang masih aktif tidak bisa diubah namanya.'), 409
+        if (row.get('storage') == 'archive'
+                and row.get('archive_status') != 'archived'):
+            return jsonify(error='Tunggu proses arsip selesai sebelum mengubah nama.'), 409
+
+        old_name = row['filename']
+        new_name = str((request.get_json() or {}).get('filename', '')).strip()
+        if new_name and not Path(new_name).suffix:
+            new_name += Path(old_name).suffix
+        if (not new_name or len(new_name.encode('utf-8')) > 240
+                or Path(new_name).name != new_name
+                or any(ord(char) < 32 or char == '\x7f' for char in new_name)
+                or Path(new_name).suffix.lower() != Path(old_name).suffix.lower()):
+            raise ValueError('Nama file tidak valid. Gunakan nama biasa tanpa folder dan jangan ubah ekstensi.')
+
+        root = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve()
+        source = root / old_name
+        destination = root / new_name
+        if (source.parent.resolve() != root or destination.parent.resolve() != root
+                or source.is_symlink() or destination.is_symlink()):
+            raise ValueError('Nama file tidak valid.')
+        if not source.is_file():
+            return jsonify(error='File lokal sudah tidak ada. Hapus riwayat jika tidak diperlukan.'), 404
+        if destination != source and destination.exists():
+            return jsonify(error='Nama tersebut sudah digunakan file lain.'), 409
+        if destination == source:
+            return jsonify(filename=new_name)
+        try:
+            source.rename(destination)
+            try:
+                storage.rename_recording(job_id, new_name)
+            except Exception:
+                destination.rename(source)
+                raise
+        except OSError:
+            return jsonify(error='Nama file tidak bisa diubah. Periksa izin folder downloads.'), 500
+        return jsonify(filename=new_name)
 
     @app.post('/api/files/<filename>/delete')
     def delete_download(filename):

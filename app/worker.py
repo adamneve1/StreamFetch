@@ -16,9 +16,10 @@ import redis
 # pyrefly: ignore [missing-import]
 from telegram import Bot
 try:
-    from . import archive, storage
+    from . import archive, quality, storage
 except ImportError:
     import archive
+    import quality
     import storage
 
 
@@ -429,7 +430,7 @@ async def heartbeat(job=None):
 
 async def set_state(job, status, state, detail=''):
     r.set(f"state:{job['job_id']}", state, ex=86400)
-    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'is_live', 'started_at', 'elapsed', 'size', 'filename') if key in job}
+    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'quality', 'is_live', 'started_at', 'elapsed', 'size', 'filename') if key in job}
     public.update(state=state, detail=detail)
     r.set('web:job:' + job['job_id'], json.dumps(public), ex=86400)
     if os.getenv('DATA_DIR'):
@@ -662,8 +663,7 @@ def capture_command(job):
             '-progress', 'pipe:1', '-nostats', str(path),
         ], path
     return [
-        'yt-dlp', '-f',
-        'bv*[vcodec^=avc1]+ba[acodec^=mp4a]/bv*[vcodec^=avc1]+ba/bv*+ba/b',
+        'yt-dlp', '-f', quality.ytdlp_selector(job.get('quality', 'best')),
         '--merge-output-format', 'mp4', '--remux-video', 'mp4',
         '--no-playlist', '--newline', '--retries', '10',
         '--fragment-retries', '10', '--continue',
@@ -818,6 +818,7 @@ def complete_recording(job):
 async def run_download(job):
     job.setdefault('source', 'youtube')
     job.setdefault('is_live', job['source'] in {'oryx', 'tiktok'})
+    job['quality'] = quality.validate(job.get('quality', 'best'))
     job.setdefault('job_id', uuid.uuid4().hex)
     job.setdefault('requested_at', time.time())
     job.setdefault('origin', 'telegram')

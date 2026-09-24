@@ -83,7 +83,7 @@ def save_source(source_id, name, url):
 
 def save_recording(job, state, detail=''):
     # Never store playback URLs/credentials in catalogue or browser status.
-    data = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'storage', 'is_live', 'requested_at', 'started_at', 'elapsed', 'size', 'filename', 'stop_reason') if key in job}
+    data = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'storage', 'quality', 'is_live', 'requested_at', 'started_at', 'elapsed', 'size', 'filename', 'stop_reason') if key in job}
     data.update(state=state, detail=detail)
     with connection() as db:
         db.execute('INSERT INTO recordings VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET updated=excluded.updated, data=excluded.data', (job['job_id'], time.time(), json.dumps(data)))
@@ -121,6 +121,19 @@ def delete_recording(job_id):
         db.execute('DELETE FROM markers WHERE job_id=?', (job_id,))
         deleted = db.execute('DELETE FROM recordings WHERE id=?', (job_id,)).rowcount
         return bool(deleted)
+
+
+def rename_recording(job_id, filename):
+    """Update the final local filename without replacing other metadata."""
+    with connection() as db:
+        row = db.execute('SELECT data FROM recordings WHERE id=?', (job_id,)).fetchone()
+        if not row:
+            return False
+        data = json.loads(row['data'])
+        data['filename'] = filename
+        db.execute('UPDATE recordings SET updated=?, data=? WHERE id=?',
+                   (time.time(), json.dumps(data), job_id))
+        return True
 
 
 def disk_status(path=None):

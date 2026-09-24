@@ -130,6 +130,42 @@ class WebTests(unittest.TestCase):
             self.assertEqual(self.post('check', {'url': 'http://oryx/live.flv'}).status_code, 422)
         self.assertFalse(self.redis.exists('web:probe'))
 
+    def test_youtube_size_estimate_and_quality_snapshot(self):
+        from types import SimpleNamespace
+        metadata = {
+            'is_live': False,
+            'duration': 60,
+            'requested_formats': [
+                {'height': 720, 'filesize': 10_000_000, 'tbr': 1500},
+                {'filesize_approx': 1_000_000, 'tbr': 128},
+            ],
+        }
+        result = SimpleNamespace(returncode=0, stdout=json.dumps(metadata).encode())
+        with patch.object(web.subprocess, 'run', return_value=result) as run:
+            response = self.post('estimate', {'source': 'youtube',
+                                              'url': 'https://youtu.be/test',
+                                              'quality': '720'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json['estimated_bytes'], 11_000_000)
+        self.assertEqual(response.json['height'], 720)
+        command = run.call_args.args[0]
+        self.assertIn('[height<=720]', command[command.index('-f') + 1])
+
+        self.redis.set('worker:heartbeat', 1)
+        queued = self.post('record', {'source': 'youtube',
+                                      'url': 'https://youtu.be/test',
+                                      'quality': '720'})
+        self.assertEqual(queued.status_code, 202)
+        self.assertEqual(json.loads(self.redis.lindex('download_queue', 0))['quality'], '720')
+
+    def test_direct_stream_only_accepts_original_quality(self):
+        source = self.client.get('/api/sources').json['sources'][0]
+        self.redis.set('worker:heartbeat', 1)
+        response = self.post('record', {'source': 'oryx', 'source_id': source['id'],
+                                        'quality': '720'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.redis.llen('download_queue'), 0)
+
     def test_panel_assets_and_authenticated_download(self):
         response = self.client.get('/')
         self.assertEqual(response.status_code, 200)
@@ -181,6 +217,32 @@ class WebTests(unittest.TestCase):
         self.assertEqual(set(response.json['deleted']), {'failed-job', 'missing-job'})
         self.assertEqual(response.json['skipped'], [])
         self.assertFalse(storage.recordings())
+
+    def test_rename_download_preserves_extension_and_catalogue(self):
+        path = Path(self.tmp.name) / 'old name.mp4'
+        path.write_bytes(b'fixture')
+        storage.save_recording({'job_id': 'rename-job', 'source': 'youtube',
+                                'filename': path.name, 'storage': 'local'}, 'ready')
+        response = self.post('recordings/rename-job/rename', {'filename': 'Nama baru'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json['filename'], 'Nama baru.mp4')
+        self.assertFalse(path.exists())
+        self.assertTrue((Path(self.tmp.name) / 'Nama baru.mp4').exists())
+        self.assertEqual(storage.recordings()[0]['filename'], 'Nama baru.mp4')
+
+    def test_rename_rejects_traversal_and_pending_archive(self):
+        path = Path(self.tmp.name) / 'safe.mp4'
+        path.write_bytes(b'fixture')
+        storage.save_recording({'job_id': 'safe-job', 'source': 'youtube',
+                                'filename': path.name, 'storage': 'local'}, 'ready')
+        self.assertEqual(self.post('recordings/safe-job/rename',
+                                   {'filename': '../escape.mp4'}).status_code, 400)
+        storage.save_recording({'job_id': 'archive-job', 'source': 'youtube',
+                                'filename': path.name, 'storage': 'archive'}, 'ready')
+        storage.save_archive_state('archive-job', 'archive_pending')
+        self.assertEqual(self.post('recordings/archive-job/rename',
+                                   {'filename': 'later.mp4'}).status_code, 409)
+        self.assertTrue(path.exists())
 
 
 class WebWorkerTests(unittest.IsolatedAsyncioTestCase):

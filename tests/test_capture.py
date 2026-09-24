@@ -19,7 +19,7 @@ from types import SimpleNamespace
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', '123456:TEST_TOKEN')
 
 import fakeredis
-from app import bot, worker
+from app import bot, quality, worker
 
 
 class CaptureTests(unittest.IsolatedAsyncioTestCase):
@@ -230,6 +230,17 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
             (self.root / '14092609.mp4').touch()
             (self.root / '13092699.mp4').touch()
             self.assertEqual(worker.generate_final_filename('another').name, '14092610.mp4')
+
+    def test_quality_selector_caps_video_without_forcing_upscale(self):
+        best = quality.ytdlp_selector('best')
+        capped = quality.ytdlp_selector('720')
+        self.assertNotIn('height<=', best)
+        self.assertIn('[height<=720]', capped)
+        command, _ = worker.capture_command(dict(job_id='quality-job', source='youtube',
+                                                 quality='720', url='https://youtu.be/test'))
+        self.assertEqual(command[command.index('-f') + 1], capped)
+        with self.assertRaises(ValueError):
+            quality.ytdlp_selector('2160')
 
     def test_probe_timeout_returns_failure(self):
         with patch.object(worker.subprocess, 'run', side_effect=subprocess.TimeoutExpired('ffprobe', 1)):
