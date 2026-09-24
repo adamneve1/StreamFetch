@@ -83,7 +83,7 @@ def save_source(source_id, name, url):
 
 def save_recording(job, state, detail=''):
     # Never store playback URLs/credentials in catalogue or browser status.
-    data = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'storage', 'requested_at', 'started_at', 'elapsed', 'size', 'filename', 'stop_reason') if key in job}
+    data = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'storage', 'is_live', 'requested_at', 'started_at', 'elapsed', 'size', 'filename', 'stop_reason') if key in job}
     data.update(state=state, detail=detail)
     with connection() as db:
         db.execute('INSERT INTO recordings VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET updated=excluded.updated, data=excluded.data', (job['job_id'], time.time(), json.dumps(data)))

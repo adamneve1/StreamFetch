@@ -171,6 +171,17 @@ class WebTests(unittest.TestCase):
         self.assertTrue(path.exists())
         self.assertTrue(any(row['job_id'] == 'pending-job' for row in storage.recordings()))
 
+    def test_batch_delete_cleans_failed_and_missing_file_history(self):
+        storage.save_recording({'job_id': 'failed-job', 'source': 'youtube'}, 'failed')
+        storage.save_recording({'job_id': 'missing-job', 'source': 'youtube',
+                                'filename': 'already-gone.mp4'}, 'ready')
+        response = self.post('recordings/delete',
+                             {'job_ids': ['failed-job', 'missing-job']})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(response.json['deleted']), {'failed-job', 'missing-job'})
+        self.assertEqual(response.json['skipped'], [])
+        self.assertFalse(storage.recordings())
+
 
 class WebWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_web_job_finishes_without_telegram_and_records_catalogue(self):

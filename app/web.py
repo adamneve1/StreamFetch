@@ -247,6 +247,56 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
             return jsonify(error='File rekaman tidak ditemukan atau belum siap.'), 404
         return send_from_directory(Path(os.getenv('DOWNLOAD_DIR', '/downloads')), filename, as_attachment=True)
 
+    def remove_recording(row):
+        """Delete a local final file and its catalogue row, never its archive."""
+        filename = row.get('filename')
+        path = None
+        if filename:
+            root = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve()
+            path = root / filename
+            if Path(filename).name != filename or path.parent.resolve() != root or path.is_symlink():
+                raise ValueError('Nama file tidak valid.')
+        file_exists = bool(path and path.is_file())
+        if (file_exists and row.get('storage') == 'archive'
+                and row.get('archive_status') != 'archived'):
+            return False, 'File belum berhasil diarsipkan.'
+        if path:
+            path.unlink(missing_ok=True)
+        storage.delete_recording(row['job_id'])
+        r.delete('state:' + row['job_id'], 'web:job:' + row['job_id'],
+                 'archive:state:' + row['job_id'])
+        return True, ''
+
+    @app.post('/api/recordings/delete')
+    def delete_recordings():
+        job_ids = (request.get_json() or {}).get('job_ids', [])
+        if (not isinstance(job_ids, list) or not job_ids or len(job_ids) > 200
+                or any(not isinstance(value, str) or not value or len(value) > 128
+                       for value in job_ids)):
+            raise ValueError('Pilih riwayat yang ingin dihapus.')
+        rows = {row['job_id']: row for row in storage.recordings()
+                if row['job_id'] in set(job_ids)}
+        owner = r.get('capture:owner')
+        deleted = []
+        skipped = []
+        for job_id in dict.fromkeys(job_ids):
+            row = rows.get(job_id)
+            if not row:
+                skipped.append(dict(job_id=job_id, reason='Riwayat tidak ditemukan.'))
+                continue
+            if job_id == owner:
+                skipped.append(dict(job_id=job_id, reason='Proses masih aktif.'))
+                continue
+            try:
+                removed, reason = remove_recording(row)
+            except OSError:
+                removed, reason = False, 'File tidak bisa dihapus.'
+            if removed:
+                deleted.append(job_id)
+            else:
+                skipped.append(dict(job_id=job_id, reason=reason))
+        return jsonify(deleted=deleted, skipped=skipped)
+
     @app.post('/api/files/<filename>/delete')
     def delete_download(filename):
         row = next((item for item in storage.recordings()
@@ -255,21 +305,12 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
             return jsonify(error='File rekaman tidak ditemukan atau belum siap.'), 404
         if r.get('capture:owner') == row['job_id']:
             return jsonify(error='Rekaman yang masih aktif tidak bisa dihapus.'), 409
-        if (row.get('storage') == 'archive'
-                and row.get('archive_status') != 'archived'):
-            return jsonify(error='File belum berhasil diarsipkan, jadi file lokal tidak dihapus.'), 409
-
-        root = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve()
-        path = root / filename
-        if Path(filename).name != filename or path.parent.resolve() != root or path.is_symlink():
-            raise ValueError('Nama file tidak valid.')
         try:
-            path.unlink(missing_ok=True)
+            removed, reason = remove_recording(row)
         except OSError:
             return jsonify(error='File tidak bisa dihapus. Periksa izin folder downloads.'), 500
-        storage.delete_recording(row['job_id'])
-        r.delete('state:' + row['job_id'], 'web:job:' + row['job_id'],
-                 'archive:state:' + row['job_id'])
+        if not removed:
+            return jsonify(error=reason + ' File lokal tidak dihapus.'), 409
         return jsonify(ok=True)
 
     return app

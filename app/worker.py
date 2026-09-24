@@ -429,7 +429,7 @@ async def heartbeat(job=None):
 
 async def set_state(job, status, state, detail=''):
     r.set(f"state:{job['job_id']}", state, ex=86400)
-    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'started_at', 'elapsed', 'size', 'filename') if key in job}
+    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'is_live', 'started_at', 'elapsed', 'size', 'filename') if key in job}
     public.update(state=state, detail=detail)
     r.set('web:job:' + job['job_id'], json.dumps(public), ex=86400)
     if os.getenv('DATA_DIR'):
@@ -817,6 +817,7 @@ def complete_recording(job):
 
 async def run_download(job):
     job.setdefault('source', 'youtube')
+    job.setdefault('is_live', job['source'] in {'oryx', 'tiktok'})
     job.setdefault('job_id', uuid.uuid4().hex)
     job.setdefault('requested_at', time.time())
     job.setdefault('origin', 'telegram')
@@ -842,6 +843,7 @@ async def run_download(job):
                 job['url'] = storage.validate_tiktok_url(job['url'])
             stage = 'inspection'
             info = await inspect_youtube(job)
+            job['is_live'] = info.get('is_live') is True
             if job['source'] == 'tiktok' and info.get('is_live') is not True:
                 await set_state(job, status, 'failed', 'Akun TikTok belum live atau siaran tidak dapat diakses. Coba lagi saat akun sedang live.')
                 return
