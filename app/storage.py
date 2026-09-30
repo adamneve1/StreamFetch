@@ -20,6 +20,7 @@ def connection():
     db.execute('CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL)')
     db.execute('CREATE TABLE IF NOT EXISTS markers (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, seconds REAL NOT NULL, note TEXT NOT NULL, created REAL NOT NULL)')
     db.execute('CREATE TABLE IF NOT EXISTS recordings (id TEXT PRIMARY KEY, updated REAL NOT NULL, data TEXT NOT NULL)')
+    db.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)')
     try:
         with db:
             yield db
@@ -63,13 +64,26 @@ def validate_tiktok_url(url):
 def sources():
     with connection() as db:
         # Seed once; editing this entry later takes precedence over .env.
-        db.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)')
         if not db.execute("SELECT 1 FROM settings WHERE key='seeded'").fetchone():
             url = os.getenv('ORYX_STREAM_URL', '').strip()
             if url:
                 db.execute('INSERT OR IGNORE INTO sources VALUES (?, ?, ?)', ('default', 'Oryx utama', url))
             db.execute("INSERT OR IGNORE INTO settings VALUES ('seeded', '1')")
         return [dict(row) for row in db.execute('SELECT * FROM sources ORDER BY name')]
+
+
+def setting(key, default=None):
+    """Read one private application setting."""
+    with connection() as db:
+        row = db.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
+        return row['value'] if row else default
+
+
+def save_setting(key, value):
+    """Persist one private application setting."""
+    with connection() as db:
+        db.execute('INSERT INTO settings VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                   (key, str(value)))
 
 
 def save_source(source_id, name, url):

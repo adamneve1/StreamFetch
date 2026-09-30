@@ -135,3 +135,17 @@ footer{padding:18px 2px 4px}
 .source-manager-label svg{width:16px;height:16px;padding:2px;border-radius:5px;background:#e8f2dc;fill:none;stroke:#456736;stroke-width:1.8;stroke-linecap:round}
 .source-manager-chevron{width:15px;height:15px;margin-left:3px;fill:none;stroke:#77777c;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;transition:transform .18s ease}
 .source-manager[open] .source-manager-chevron{transform:rotate(180deg)}
+
+/* Quiet internal copy and connection state */
+.connection-indicator{font-size:14px;line-height:1;color:#a1a1a6}
+.connection-indicator.online{color:#79a946}
+.connection-indicator.offline{color:#c75d55}
+.monitor{grid-template-columns:minmax(220px,1fr) auto minmax(130px,.55fr)}
+.monitor>.panel-heading{display:none}
+.monitor-footer{grid-column:3;grid-row:1}
+.monitor .marker-controls{grid-row:2}
+.admin-panel{margin-top:22px;padding:24px}.admin-panel form{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr)) auto;gap:14px;align-items:end}.admin-panel form label{margin-bottom:6px}.admin-panel form button{height:43px}.admin-panel .panel-heading{margin-bottom:18px}.admin-panel .panel-heading p{margin:4px 0 0}
+@media(max-width:900px){.admin-panel form{grid-template-columns:repeat(2,minmax(0,1fr))}.admin-panel form button{width:max-content}}
+@media(max-width:680px){.admin-panel form{grid-template-columns:1fr}.admin-panel form button{width:100%}}
+@media(max-width:900px){.monitor{grid-template-columns:minmax(180px,1fr) auto}}
+@media(max-width:680px){.monitor{grid-template-columns:1fr}.monitor-display{grid-column:1}.monitor .metrics{grid-column:1}}

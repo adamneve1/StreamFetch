@@ -11,13 +11,15 @@ from app import web, storage, worker
 class WebTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.env = patch.dict(os.environ, DATA_DIR=self.tmp.name, DOWNLOAD_DIR=self.tmp.name, WEB_PASSWORD='test-password', WEB_SECRET_KEY='test-secret', ORYX_STREAM_URL='http://oryx/live/original.flv')
+        self.env = patch.dict(os.environ, DATA_DIR=self.tmp.name, DOWNLOAD_DIR=self.tmp.name,
+                              WEB_PASSWORD='test-password', WEB_ADMIN_PASSWORD='admin-password',
+                              WEB_SECRET_KEY='test-secret', ORYX_STREAM_URL='http://oryx/live/original.flv')
         self.env.start()
         self.redis = fakeredis.FakeRedis(decode_responses=True)
         self.app = web.create_app(self.redis)
         self.app.testing = True
         self.client = self.app.test_client()
-        self.csrf = self.client.post('/api/login', json={'password': 'test-password'}).json['csrf']
+        self.csrf = self.client.post('/api/login', json={'password': 'admin-password'}).json['csrf']
         self.addCleanup(self.tmp.cleanup)
         self.addCleanup(self.env.stop)
 
@@ -46,6 +48,42 @@ class WebTests(unittest.TestCase):
         missing = self.client.get('/api/missing')
         self.assertEqual(missing.status_code, 404)
         self.assertTrue(missing.is_json)
+
+    def test_roles_password_change_and_admin_only_delete(self):
+        user = self.app.test_client()
+        login = user.post('/api/login', json={'password': 'test-password'})
+        self.assertEqual(login.status_code, 200)
+        self.assertFalse(login.json['is_admin'])
+        headers = {'X-CSRF-Token': login.json['csrf']}
+        storage.save_recording({'job_id': 'protected-history', 'source': 'youtube'}, 'failed')
+        denied = user.post('/api/recordings/delete', json={'job_ids': ['protected-history']},
+                           headers=headers)
+        self.assertEqual(denied.status_code, 403)
+        self.assertTrue(storage.recordings())
+        self.assertEqual(user.post('/api/admin/password', json={
+            'current_password': 'admin-password', 'target': 'user',
+            'new_password': 'new-user-password'}, headers=headers).status_code, 403)
+
+        changed = self.post('admin/password', {'current_password': 'admin-password',
+                                               'target': 'user',
+                                               'new_password': 'new-user-password'})
+        self.assertEqual(changed.status_code, 200)
+        self.assertEqual(user.get('/api/session').status_code, 401)
+        self.assertEqual(self.app.test_client().post('/api/login',
+                         json={'password': 'test-password'}).status_code, 401)
+        self.assertEqual(self.app.test_client().post('/api/login',
+                         json={'password': 'new-user-password'}).status_code, 200)
+
+    def test_admin_can_change_own_password_and_keep_current_session(self):
+        changed = self.post('admin/password', {'current_password': 'admin-password',
+                                               'target': 'admin',
+                                               'new_password': 'new-admin-password'})
+        self.assertEqual(changed.status_code, 200)
+        self.assertTrue(self.client.get('/api/session').json['is_admin'])
+        old = self.app.test_client().post('/api/login', json={'password': 'admin-password'})
+        new = self.app.test_client().post('/api/login', json={'password': 'new-admin-password'})
+        self.assertEqual(old.status_code, 401)
+        self.assertTrue(new.json['is_admin'])
 
     def test_persistent_source_edit_and_job_snapshot(self):
         source = self.client.get('/api/sources').json['sources'][0]

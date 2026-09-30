@@ -142,6 +142,7 @@ ORYX_STREAM_URL=http://oryx/live/livestream.flv
 
 # Web
 WEB_PASSWORD=isi-password-operator
+WEB_ADMIN_PASSWORD=isi-password-admin-yang-berbeda
 WEB_SECRET_KEY=isi-string-acak-panjang
 WEB_PORT=8080
 WEB_BIND=127.0.0.1
@@ -172,6 +173,12 @@ ARCHIVE_RETRY_BASE_SECONDS=60
 ```
 
 Jangan commit `.env`, token, password, URL bertoken, atau credential lainnya ke repository.
+
+Login dengan `WEB_PASSWORD` mendapat akses pengguna biasa dan tidak dapat menghapus
+riwayat maupun file hasil. Login dengan `WEB_ADMIN_PASSWORD` mendapat akses admin,
+dapat menghapus riwayat, serta dapat mengganti password pengguna atau admin dari
+panel **Pengaturan admin**. Password yang diganti lewat panel disimpan sebagai hash
+di database dan menggantikan nilai awal dari `.env`.
 
 ### Arsip sekunder opsional
 

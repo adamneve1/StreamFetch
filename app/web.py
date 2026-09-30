@@ -12,6 +12,7 @@ from pathlib import Path
 import redis
 from flask import Flask, jsonify, request, session, send_from_directory
 from werkzeug.exceptions import HTTPException
+from werkzeug.security import check_password_hash, generate_password_hash
 try:
     from . import quality, storage
 except ImportError:
@@ -52,12 +53,32 @@ def create_app(client=None):
     r = client or redis.Redis(host=os.getenv('REDIS_HOST', 'redis'), decode_responses=True,
                              socket_connect_timeout=3, socket_timeout=3)
 
+    def credential(role):
+        password_hash = storage.setting(role + '_password_hash')
+        return password_hash, os.getenv('WEB_ADMIN_PASSWORD' if role == 'admin' else 'WEB_PASSWORD', '')
+
+    def password_matches(role, password):
+        password_hash, fallback = credential(role)
+        if password_hash:
+            return check_password_hash(password_hash, password)
+        return bool(fallback) and hmac.compare_digest(password.encode(), fallback.encode())
+
+    def auth_version(role):
+        return int(storage.setting(role + '_auth_version', '0'))
+
+    def require_admin():
+        if session.get('role') != 'admin':
+            return jsonify(error='Akses ini hanya tersedia untuk admin.'), 403
+
     @app.before_request
     def authorize():
         if not request.path.startswith('/api/'):
             return
         if request.path != '/api/login' and not session.get('operator'):
             return jsonify(error='Silakan masuk untuk melanjutkan.'), 401
+        if request.path != '/api/login' and session.get('auth_version') != auth_version(session.get('role', 'user')):
+            session.clear()
+            return jsonify(error='Password akun sudah berubah. Silakan masuk lagi.'), 401
         if request.method != 'GET' and request.path != '/api/login':
             if not hmac.compare_digest(request.headers.get('X-CSRF-Token', ''), session.get('csrf', 'missing')):
                 return jsonify(error='Sesi kamu sudah berakhir. Silakan masuk lagi.'), 403
@@ -97,8 +118,7 @@ def create_app(client=None):
 
     @app.post('/api/login')
     def login():
-        password = os.getenv('WEB_PASSWORD', '')
-        if not password:
+        if not any(credential(role)[0] or credential(role)[1] for role in ('user', 'admin')):
             return jsonify(error='Password operator belum diatur. Hubungi admin.'), 503
         key = 'web:login:' + (request.remote_addr or 'unknown')
         attempts = r.incr(key)
@@ -107,17 +127,45 @@ def create_app(client=None):
         if attempts > 10:
             return jsonify(error='Terlalu banyak percobaan. Coba lagi dalam 5 menit.'), 429
         data = request.get_json() or {}
-        if not hmac.compare_digest(str(data.get('password', '')).encode(), password.encode()):
+        supplied = str(data.get('password', ''))
+        role = 'admin' if password_matches('admin', supplied) else 'user' if password_matches('user', supplied) else None
+        if not role:
             return jsonify(error='Password belum tepat. Silakan coba lagi.'), 401
         r.delete(key)
         session.clear()
-        session.update(operator=True, csrf=secrets.token_hex(32))
+        session.update(operator=True, role=role, auth_version=auth_version(role), csrf=secrets.token_hex(32))
         session.permanent = True
-        return jsonify(csrf=session['csrf'])
+        return jsonify(csrf=session['csrf'], role=role, is_admin=role == 'admin')
 
     @app.get('/api/session')
     def current_session():
-        return jsonify(csrf=session['csrf'])
+        return jsonify(csrf=session['csrf'], role=session.get('role', 'user'),
+                       is_admin=session.get('role') == 'admin')
+
+    @app.post('/api/admin/password')
+    def change_password():
+        denied = require_admin()
+        if denied:
+            return denied
+        data = request.get_json() or {}
+        current = str(data.get('current_password', ''))
+        target = str(data.get('target', 'user'))
+        new_password = str(data.get('new_password', ''))
+        if not password_matches('admin', current):
+            return jsonify(error='Password admin saat ini belum tepat.'), 403
+        if target not in {'user', 'admin'}:
+            raise ValueError('Pilih akun yang ingin diubah.')
+        if len(new_password) < 8 or len(new_password) > 256:
+            raise ValueError('Password baru harus terdiri dari 8 sampai 256 karakter.')
+        other_role = 'admin' if target == 'user' else 'user'
+        if password_matches(other_role, new_password):
+            raise ValueError('Password admin dan pengguna harus berbeda.')
+        storage.save_setting(target + '_password_hash', generate_password_hash(new_password))
+        version = auth_version(target) + 1
+        storage.save_setting(target + '_auth_version', version)
+        if target == 'admin':
+            session['auth_version'] = version
+        return jsonify(ok=True)
 
     @app.post('/api/logout')
     def logout():
@@ -349,6 +397,9 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
 
     @app.post('/api/recordings/delete')
     def delete_recordings():
+        denied = require_admin()
+        if denied:
+            return denied
         job_ids = (request.get_json() or {}).get('job_ids', [])
         if (not isinstance(job_ids, list) or not job_ids or len(job_ids) > 200
                 or any(not isinstance(value, str) or not value or len(value) > 128
@@ -424,6 +475,9 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
 
     @app.post('/api/files/<filename>/delete')
     def delete_download(filename):
+        denied = require_admin()
+        if denied:
+            return denied
         row = next((item for item in storage.recordings()
                     if item.get('filename') == filename and item.get('state') == 'ready'), None)
         if not row:
