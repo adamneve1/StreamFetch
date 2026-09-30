@@ -245,6 +245,7 @@ class WebTests(unittest.TestCase):
     def test_panel_assets_and_authenticated_download(self):
         response = self.client.get('/')
         self.assertEqual(response.status_code, 200)
+        self.assertIn(b'/static/favicon.svg', response.data)
         response.close()
         for asset in ('app.js', 'style.css', 'favicon.svg'):
             response = self.client.get('/static/' + asset)

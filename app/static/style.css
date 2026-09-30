@@ -144,6 +144,8 @@ footer{padding:18px 2px 4px}
 .monitor>.panel-heading{display:none}
 .monitor-footer{grid-column:3;grid-row:1}
 .monitor .marker-controls{grid-row:2}
+.brand-logo{display:block;width:34px;height:34px;border-radius:9px}.login-brand{display:flex;align-items:center;gap:12px;margin-bottom:24px;color:#7d8a6b;font-size:10px;font-weight:700;letter-spacing:2px}.login-logo{display:block;width:48px;height:48px;border-radius:12px}
+@media(max-width:680px){.brand-logo{width:30px;height:30px;border-radius:8px}.brand{gap:9px}}
 .admin-panel{margin-top:22px;padding:24px}.admin-panel form{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr)) auto;gap:14px;align-items:end}.admin-panel form label{margin-bottom:6px}.admin-panel form button{height:43px}.admin-panel .panel-heading{margin-bottom:18px}.admin-panel .panel-heading p{margin:4px 0 0}
 @media(max-width:900px){.admin-panel form{grid-template-columns:repeat(2,minmax(0,1fr))}.admin-panel form button{width:max-content}}
 @media(max-width:680px){.admin-panel form{grid-template-columns:1fr}.admin-panel form button{width:100%}}

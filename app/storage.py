@@ -30,12 +30,12 @@ def connection():
 
 def validate_url(url, youtube=False):
     if not isinstance(url, str) or len(url) > 4096 or any(c.isspace() for c in url):
-        raise ValueError('URL tidak valid.')
+        raise ValueError('Link-nya belum valid. Coba cek lagi, ya.')
     parsed = urlsplit(url)
     if not parsed.hostname or parsed.scheme not in ({'http', 'https'} if youtube else {'http', 'https', 'rtmp', 'rtmps', 'srt'}):
-        raise ValueError('Gunakan URL playback HTTP, HTTPS, RTMP, RTMPS, atau SRT.')
+        raise ValueError('Pakai link playback HTTP, HTTPS, RTMP, RTMPS, atau SRT, ya.')
     if youtube and parsed.hostname.lower() not in {'youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be'}:
-        raise ValueError('Masukkan URL YouTube yang valid.')
+        raise ValueError('Masukkan link YouTube yang valid, ya.')
     # Public RRI Restreamer players use the channel UUID for their HLS path.
     # Restrict conversion to the observed player route on the official host.
     if not youtube and parsed.hostname.lower() == 'public-streaming.rri.go.id':
@@ -45,7 +45,7 @@ def validate_url(url, youtube=False):
                 raise ValueError('Gunakan link player publik RRI tanpa credential atau port tambahan.')
             return f'https://public-streaming.rri.go.id/memfs/{match.group(1)}.m3u8'
     if not youtube and parsed.path.endswith('.html'):
-        raise ValueError('Gunakan URL stream, bukan halaman player.')
+        raise ValueError('Pakai link stream langsung, bukan halaman player.')
     return url
 
 
@@ -90,7 +90,7 @@ def save_source(source_id, name, url):
     url = validate_url(url)
     name = str(name).strip()
     if not name or len(name) > 80:
-        raise ValueError('Nama sumber wajib diisi, maksimal 80 karakter.')
+        raise ValueError('Nama sumbernya perlu diisi, maksimal 80 karakter.')
     with connection() as db:
         db.execute('INSERT INTO sources VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, url=excluded.url', (source_id, name, url))
 

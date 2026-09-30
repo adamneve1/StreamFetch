@@ -68,20 +68,20 @@ def create_app(client=None):
 
     def require_admin():
         if session.get('role') != 'admin':
-            return jsonify(error='Akses ini hanya tersedia untuk admin.'), 403
+            return jsonify(error='Fitur ini khusus admin, ya.'), 403
 
     @app.before_request
     def authorize():
         if not request.path.startswith('/api/'):
             return
         if request.path != '/api/login' and not session.get('operator'):
-            return jsonify(error='Silakan masuk untuk melanjutkan.'), 401
+            return jsonify(error='Masuk dulu untuk lanjut, ya.'), 401
         if request.path != '/api/login' and session.get('auth_version') != auth_version(session.get('role', 'user')):
             session.clear()
-            return jsonify(error='Password akun sudah berubah. Silakan masuk lagi.'), 401
+            return jsonify(error='Password akun ini sudah diganti. Yuk, masuk lagi.'), 401
         if request.method != 'GET' and request.path != '/api/login':
             if not hmac.compare_digest(request.headers.get('X-CSRF-Token', ''), session.get('csrf', 'missing')):
-                return jsonify(error='Sesi kamu sudah berakhir. Silakan masuk lagi.'), 403
+                return jsonify(error='Sesi kamu sudah habis. Masuk lagi, ya.'), 403
 
     @app.after_request
     def headers(response):
@@ -93,7 +93,7 @@ def create_app(client=None):
 
     @app.errorhandler(redis.exceptions.RedisError)
     def redis_error(_):
-        return jsonify(error='Layanan sedang tidak tersedia. Coba lagi sebentar.'), 503
+        return jsonify(error='Layanannya lagi tidak tersedia. Coba lagi sebentar, ya.'), 503
 
     @app.errorhandler(ValueError)
     def validation_error(exc):
@@ -109,7 +109,7 @@ def create_app(client=None):
     def unexpected_error(exc):
         app.logger.exception('Unhandled web error')
         if request.path.startswith('/api/'):
-            return jsonify(error='Terjadi kesalahan saat memproses permintaan. Coba lagi atau hubungi admin.'), 500
+            return jsonify(error='Ada yang bermasalah saat memproses permintaan. Coba lagi, atau hubungi admin kalau masih terjadi.'), 500
         return 'Internal server error', 500
 
     @app.get('/')
@@ -119,18 +119,18 @@ def create_app(client=None):
     @app.post('/api/login')
     def login():
         if not any(credential(role)[0] or credential(role)[1] for role in ('user', 'admin')):
-            return jsonify(error='Password operator belum diatur. Hubungi admin.'), 503
+            return jsonify(error='Password masuknya belum diatur. Minta bantuan admin, ya.'), 503
         key = 'web:login:' + (request.remote_addr or 'unknown')
         attempts = r.incr(key)
         if attempts == 1:
             r.expire(key, 300)
         if attempts > 10:
-            return jsonify(error='Terlalu banyak percobaan. Coba lagi dalam 5 menit.'), 429
+            return jsonify(error='Percobaannya terlalu banyak. Tunggu 5 menit, lalu coba lagi.'), 429
         data = request.get_json() or {}
         supplied = str(data.get('password', ''))
         role = 'admin' if password_matches('admin', supplied) else 'user' if password_matches('user', supplied) else None
         if not role:
-            return jsonify(error='Password belum tepat. Silakan coba lagi.'), 401
+            return jsonify(error='Password-nya belum cocok. Coba lagi, ya.'), 401
         r.delete(key)
         session.clear()
         session.update(operator=True, role=role, auth_version=auth_version(role), csrf=secrets.token_hex(32))
@@ -152,11 +152,11 @@ def create_app(client=None):
         target = str(data.get('target', 'user'))
         new_password = str(data.get('new_password', ''))
         if not password_matches('admin', current):
-            return jsonify(error='Password admin saat ini belum tepat.'), 403
+            return jsonify(error='Password admin yang sekarang belum cocok.'), 403
         if target not in {'user', 'admin'}:
             raise ValueError('Pilih akun yang ingin diubah.')
         if len(new_password) < 8 or len(new_password) > 256:
-            raise ValueError('Password baru harus terdiri dari 8 sampai 256 karakter.')
+            raise ValueError('Password baru perlu 8 sampai 256 karakter.')
         other_role = 'admin' if target == 'user' else 'user'
         if password_matches(other_role, new_password):
             raise ValueError('Password admin dan pengguna harus berbeda.')
@@ -189,17 +189,17 @@ def create_app(client=None):
         # One bounded probe at a time; diagnostics can contain private tokens.
         token = uuid.uuid4().hex
         if not r.set('web:probe', token, nx=True, ex=20):
-            return jsonify(error='Sumber lain sedang diperiksa. Tunggu sebentar lalu coba lagi.'), 409
+            return jsonify(error='Ada sumber lain yang sedang dicek. Tunggu sebentar, lalu coba lagi.'), 409
         try:
             result = subprocess.run(['ffprobe', '-v', 'error', '-rw_timeout', '8000000',
                                      '-show_entries', 'stream=codec_type,codec_name', '-of', 'json', url],
                                     capture_output=True, timeout=10)
             streams = json.loads(result.stdout).get('streams', []) if result.returncode == 0 else []
             if not any(s.get('codec_type') == 'video' for s in streams):
-                return jsonify(error='Sumber belum bisa diakses atau tidak mengirim video.'), 422
+                return jsonify(error='Sumbernya belum bisa diakses atau belum mengirim video.'), 422
             return jsonify(ok=True, codecs=[s.get('codec_name', '?') for s in streams])
         except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
-            return jsonify(error='Sumber belum merespons. Periksa alamat dan koneksi jaringan.'), 422
+            return jsonify(error='Sumbernya belum merespons. Cek lagi link dan koneksi jaringannya, ya.'), 422
         finally:
             r.eval("if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0", 1, 'web:probe', token)
 
@@ -215,7 +215,7 @@ def create_app(client=None):
             selected_quality = 'best'
         token = uuid.uuid4().hex
         if not r.set('web:estimate', token, nx=True, ex=35):
-            return jsonify(error='Estimasi lain sedang berjalan. Tunggu sebentar.'), 409
+            return jsonify(error='Ada ukuran lain yang sedang dihitung. Tunggu sebentar, ya.'), 409
         try:
             if source == 'oryx':
                 if selected_quality != 'best':
@@ -223,7 +223,7 @@ def create_app(client=None):
                 selected = next((item for item in storage.sources()
                                  if item['id'] == data.get('source_id')), None)
                 if not selected:
-                    raise ValueError('Pilih sumber live terlebih dahulu.')
+                    raise ValueError('Pilih sumber live dulu, ya.')
                 url = storage.validate_url(selected['url'])
                 result = subprocess.run([
                     'ffprobe', '-v', 'error', '-rw_timeout', '8000000',
@@ -248,7 +248,7 @@ def create_app(client=None):
             elif source == 'tiktok':
                 url = storage.validate_tiktok_url(str(data.get('url', '')).strip())
             else:
-                raise ValueError('Pilih sumber yang ingin diperiksa.')
+                raise ValueError('Pilih dulu sumber yang mau dicek.')
             result = subprocess.run([
                 'yt-dlp', '--dump-single-json', '--skip-download', '--no-playlist',
                 '--no-warnings', '-f',
@@ -300,17 +300,17 @@ def create_app(client=None):
         else:
             raise ValueError('Pilih sumber rekaman yang tersedia.')
         if not storage.disk_status()['can_record']:
-            return jsonify(error='Ruang penyimpanan tidak cukup. Kosongkan ruang sebelum mulai merekam.'), 507
+            return jsonify(error='Ruang penyimpanannya hampir habis. Kosongkan dulu sebelum mulai merekam.'), 507
         result = r.eval(ADMIT, 0, job['job_id'], json.dumps(job))
         if result != 'accepted':
-            return jsonify(error='Masih ada rekaman yang berjalan. Tunggu sampai selesai.' if result == 'busy' else 'Sistem perekam belum siap. Coba lagi sebentar atau hubungi admin.'), 409
+            return jsonify(error='Masih ada rekaman yang berjalan. Tunggu sampai selesai, ya.' if result == 'busy' else 'Perekamnya belum siap. Coba lagi sebentar atau hubungi admin.'), 409
         return jsonify(job_id=job['job_id']), 202
 
     @app.post('/api/stop')
     def stop():
         job_id = str((request.get_json() or {}).get('job_id', ''))
         if not r.eval(STOP, 0, job_id):
-            return jsonify(error='Rekaman sudah berhenti atau sedang menyiapkan file. Tunggu status berikutnya.'), 409
+            return jsonify(error='Rekamannya sudah berhenti atau sedang menyiapkan file. Tunggu sebentar, ya.'), 409
         return jsonify(ok=True)
 
     @app.get('/api/status')
@@ -340,7 +340,7 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
             return jsonify(error='Tanda momen hanya bisa disimpan saat rekaman berjalan.'), 409
         active = json.loads(snapshot)
         if not active.get('started_at'):
-            return jsonify(error='Rekaman belum benar-benar dimulai. Tunggu sebentar lalu coba lagi.'), 409
+            return jsonify(error='Rekamannya belum benar-benar mulai. Tunggu sebentar, lalu coba lagi.'), 409
         seconds = time.time() - active['started_at']
         storage.add_marker(job_id, seconds, str(data.get('note', '')).strip() or 'Momen penting')
         return jsonify(markers=storage.markers(job_id)), 201
@@ -457,9 +457,9 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
                 or source.is_symlink() or destination.is_symlink()):
             raise ValueError('Nama file tidak valid.')
         if not source.is_file():
-            return jsonify(error='File lokal sudah tidak ada. Hapus riwayat jika tidak diperlukan.'), 404
+            return jsonify(error='File lokalnya sudah tidak ada. Kamu bisa menghapus riwayat ini kalau sudah tidak diperlukan.'), 404
         if destination != source and destination.exists():
-            return jsonify(error='Nama tersebut sudah digunakan file lain.'), 409
+            return jsonify(error='Nama itu sudah dipakai file lain. Coba nama yang berbeda, ya.'), 409
         if destination == source:
             return jsonify(filename=new_name)
         try:
