@@ -36,6 +36,33 @@ services:
     depends_on:
       - redis
 
+  transcription-worker:
+    build: .
+    container_name: transcription-worker
+    user: "${UID:-1000}:${GID:-1000}"
+    command: python -u app/transcription_worker.py
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /data
+      DOWNLOAD_DIR: /downloads
+      WHISPER_MODEL_DIR: /data/whisper-models
+      WHISPER_MODEL: small
+      WHISPER_CPU_THREADS: "${WHISPER_CPU_THREADS:-4}"
+      HF_HOME: /data/huggingface
+      HF_HUB_CACHE: /data/huggingface/hub
+      HF_XET_CACHE: /data/huggingface/xet
+      XDG_CACHE_HOME: /data/huggingface/xdg
+      HF_HUB_DISABLE_XET: "1"
+    volumes:
+      - ./downloads:/downloads:rw
+      - ./data:/data:rw
+    cpus: "${TRANSCRIPTION_CPUS:-4.0}"
+    mem_limit: "${TRANSCRIPTION_MEMORY_LIMIT:-8g}"
+    depends_on:
+      - redis
+
   web:
     build: .
     container_name: capture-web

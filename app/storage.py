@@ -118,6 +118,34 @@ def save_archive_state(job_id, archive_status, **fields):
                    (time.time(), json.dumps(data), job_id))
 
 
+def save_transcription_state(job_id, status, replace=False, **fields):
+    """Persist transcript metadata without changing the recording state."""
+    allowed = {
+        'requested_at', 'started_at', 'completed_at', 'processing_seconds',
+        'language', 'language_probability', 'model', 'txt_filename',
+        'srt_filename', 'error',
+    }
+    with connection() as db:
+        row = db.execute('SELECT data FROM recordings WHERE id=?', (job_id,)).fetchone()
+        if not row:
+            return False
+        data = json.loads(row['data'])
+        transcript = {} if replace else dict(data.get('transcript') or {})
+        transcript.update(status=status, updated_at=time.time())
+        transcript.update({key: value for key, value in fields.items() if key in allowed})
+        data['transcript'] = transcript
+        db.execute('UPDATE recordings SET updated=?, data=? WHERE id=?',
+                   (time.time(), json.dumps(data), job_id))
+        return True
+
+
+def recording(job_id):
+    """Return one catalogue item, including transcript metadata."""
+    with connection() as db:
+        row = db.execute('SELECT data FROM recordings WHERE id=?', (job_id,)).fetchone()
+        return json.loads(row['data']) if row else None
+
+
 def recordings():
     with connection() as db:
         rows = [json.loads(row['data']) for row in db.execute('SELECT data FROM recordings ORDER BY updated DESC')]
@@ -137,7 +165,7 @@ def delete_recording(job_id):
         return bool(deleted)
 
 
-def rename_recording(job_id, filename):
+def rename_recording(job_id, filename, transcript_filenames=None):
     """Update the final local filename without replacing other metadata."""
     with connection() as db:
         row = db.execute('SELECT data FROM recordings WHERE id=?', (job_id,)).fetchone()
@@ -145,6 +173,8 @@ def rename_recording(job_id, filename):
             return False
         data = json.loads(row['data'])
         data['filename'] = filename
+        if transcript_filenames and data.get('transcript'):
+            data['transcript'].update(transcript_filenames)
         db.execute('UPDATE recordings SET updated=?, data=? WHERE id=?',
                    (time.time(), json.dumps(data), job_id))
         return True

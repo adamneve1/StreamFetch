@@ -151,3 +151,5 @@ footer{padding:18px 2px 4px}
 @media(max-width:680px){.admin-panel form{grid-template-columns:1fr}.admin-panel form button{width:100%}}
 @media(max-width:900px){.monitor{grid-template-columns:minmax(180px,1fr) auto}}
 @media(max-width:680px){.monitor{grid-template-columns:1fr}.monitor-display{grid-column:1}.monitor .metrics{grid-column:1}}
+
+.transcript-box{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:7px}.transcript-status{font-size:10px;font-weight:700;color:#6e6e73}.transcript-status.queued{color:#80651e}.transcript-status.transcribing{color:#286086}.transcript-status.completed{color:#467036}.transcript-status.failed{color:#a54f40}.history-table td:nth-child(2) .transcript-box small{flex-basis:100%;max-width:none;overflow:visible;text-overflow:clip;white-space:normal}.transcript-generate{padding:5px 8px!important;border:1px solid #cbd9c5;background:#f5faef;color:#376341;font-size:10px!important}.transcript-links{display:flex;gap:9px;flex-basis:100%;font-size:10px}.transcript-links a{white-space:nowrap}

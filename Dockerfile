@@ -6,6 +6,7 @@ RUN apt-get update && \
         curl \
         unzip \
         ca-certificates \
+        libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Deno

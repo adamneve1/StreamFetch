@@ -69,6 +69,15 @@ YouTube → StreamFetch → yt-dlp → MP4 / MP3
 - Download MP4 atau MP3 langsung melalui panel.
 - Monitoring kapasitas disk.
 
+### Transkripsi
+
+- Transkripsi manual untuk media yang sudah berstatus siap.
+- `faster-whisper` model `small`, CPU `int8`, dengan deteksi bahasa otomatis.
+- Worker dan antrean Redis terpisah dari proses capture/download.
+- Satu transkripsi diproses pada satu waktu untuk membatasi beban CPU.
+- Hasil TXT dan SRT tersimpan di samping file media asli.
+- Status, bahasa terdeteksi, model, dan waktu proses tampil di riwayat.
+
 ### Telegram
 
 Telegram merupakan interface opsional.
@@ -162,6 +171,11 @@ CAPTURE_IDLE_TIMEOUT=60
 CAPTURE_STOP_TIMEOUT=10
 FINALIZE_TIMEOUT=600
 PROBE_TIMEOUT=20
+
+# CPU transcription
+WHISPER_CPU_THREADS=4
+TRANSCRIPTION_CPUS=4.0
+TRANSCRIPTION_MEMORY_LIMIT=8g
 
 # Optional verified archive (disabled by default)
 ARCHIVE_ENABLED=false
@@ -333,6 +347,44 @@ Validation
 MP4 / MP3
 ```
 
+## Workflow Transkripsi
+
+Pada item riwayat yang sudah `ready`, klik **Generate Transcript**:
+
+```text
+ready media
+    ↓
+transcription_queue (Redis)
+    ↓
+transcription-worker (concurrency 1)
+    ↓
+faster-whisper small / CPU / int8
+    ↓
+<nama-video>.txt + <nama-video>.srt
+```
+
+Status berjalan melalui:
+
+```text
+Queued → Transcribing → Completed
+                         └→ Failed
+```
+
+Worker membaca audio langsung dari media melalui decoder `faster-whisper`; video
+asli tidak diubah atau di-encode ulang. FFprobe dipakai untuk menolak file rusak
+dan video tanpa stream audio sebelum inference dimulai. Output ditulis ke file
+sementara dan dipublikasikan dengan rename atomik.
+
+Metadata status disimpan di `data/capture.sqlite3`. Saat worker atau Redis
+restart, worker membangun kembali antrean dari status durable `queued` atau
+`transcribing`. Model tersimpan di `data/whisper-models`, sehingga download model
+hanya diperlukan pada pemakaian pertama. Cache tambahan Hugging Face disimpan di
+`data/huggingface`; Xet dinonaktifkan agar seluruh download memakai direktori
+yang dapat ditulis oleh user non-root container.
+
+PyAV dibatasi ke versi sebelum 19 karena `faster-whisper 1.2.1` masih memakai
+parameter decoder yang dihapus pada PyAV 19.
+
 ## Finalisasi Recording
 
 Capture stream langsung pertama kali ditulis sebagai:
@@ -464,6 +516,7 @@ Batas tersebut hanya mencegah recording dimulai dalam kondisi disk hampir penuh.
 .
 ├── app/
 │   ├── bot.py
+│   ├── transcription_worker.py
 │   ├── worker.py
 │   └── ...
 │
@@ -474,7 +527,9 @@ Batas tersebut hanya mencegah recording dimulai dalam kondisi disk hampir penuh.
 │   └── capture.sqlite3
 │
 ├── downloads/
-│   └── *.mp4
+│   ├── *.mp4
+│   ├── *.txt
+│   └── *.srt
 │
 ├── credentials/
 │

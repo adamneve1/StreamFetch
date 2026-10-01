@@ -35,6 +35,14 @@ if state == 'finalizing' or state == 'ready' or state == 'failed' then return 0 
 redis.call('SET', 'stop:' .. ARGV[1], '1', 'EX', 300)
 return 1
 """
+TRANSCRIPTION_ADMIT = """
+local guard = 'transcription:guard:' .. ARGV[1]
+if redis.call('EXISTS', guard) == 1 then return 'duplicate' end
+redis.call('SET', guard, 'queued')
+redis.call('SET', 'transcription:state:' .. ARGV[1], 'queued')
+redis.call('RPUSH', 'transcription_queue', ARGV[2])
+return 'accepted'
+"""
 
 
 def positive_int(value):
@@ -369,6 +377,55 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
                 and (not date or time.strftime('%Y-%m-%d', time.localtime(row.get('requested_at', 0))) == date)]
         return jsonify(recordings=rows[:200], total=len(rows))
 
+    @app.post('/api/recordings/<job_id>/transcript')
+    def create_transcript(job_id):
+        row = storage.recording(job_id)
+        if (not row or row.get('state') != 'ready' or not row.get('filename')
+                or Path(row['filename']).suffix.lower() != '.mp4'):
+            return jsonify(error='Rekaman tidak ditemukan atau belum siap.'), 404
+        transcript = row.get('transcript') or {}
+        if transcript.get('status') in {'queued', 'transcribing', 'completed'}:
+            return jsonify(error='Transkrip untuk rekaman ini sudah ada atau sedang diproses.'), 409
+        # A failed job is explicitly retryable, including after a worker restart.
+        if transcript.get('status') == 'failed':
+            r.delete('transcription:guard:' + job_id)
+        # Commit durable state before dispatch so a very fast worker cannot race
+        # the catalogue write. If Redis is temporarily down, worker recovery will
+        # enqueue this durable queued state when Redis returns.
+        storage.save_transcription_state(
+            job_id, 'queued', replace=True, requested_at=time.time(),
+            model=os.getenv('WHISPER_MODEL', 'small'), error='')
+        payload = json.dumps({'job_id': job_id})
+        if r.eval(TRANSCRIPTION_ADMIT, 0, job_id, payload) != 'accepted':
+            return jsonify(error='Transkrip untuk rekaman ini sudah ada atau sedang diproses.'), 409
+        return jsonify(job_id=job_id, status='queued'), 202
+
+    def transcript_file(job_id, kind, attachment):
+        row = storage.recording(job_id)
+        transcript = (row or {}).get('transcript') or {}
+        if transcript.get('status') != 'completed':
+            return jsonify(error='Transkrip belum selesai atau tidak ditemukan.'), 404
+        key = 'txt_filename' if kind == 'txt' else 'srt_filename'
+        filename = transcript.get(key)
+        if not filename or Path(filename).name != filename:
+            return jsonify(error='File transkrip tidak ditemukan.'), 404
+        mimetype = 'text/plain; charset=utf-8' if kind == 'txt' else 'application/x-subrip; charset=utf-8'
+        return send_from_directory(Path(os.getenv('DOWNLOAD_DIR', '/downloads')), filename,
+                                   as_attachment=attachment, mimetype=mimetype,
+                                   download_name=filename)
+
+    @app.get('/api/recordings/<job_id>/transcript/view')
+    def view_transcript(job_id):
+        return transcript_file(job_id, 'txt', False)
+
+    @app.get('/api/recordings/<job_id>/transcript/txt')
+    def download_transcript_txt(job_id):
+        return transcript_file(job_id, 'txt', True)
+
+    @app.get('/api/recordings/<job_id>/transcript/srt')
+    def download_transcript_srt(job_id):
+        return transcript_file(job_id, 'srt', True)
+
     @app.get('/api/files/<filename>')
     def download(filename):
         if not any(row.get('filename') == filename and row['state'] == 'ready' for row in storage.recordings()):
@@ -377,6 +434,8 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
 
     def remove_recording(row):
         """Delete a local final file and its catalogue row, never its archive."""
+        if (row.get('transcript') or {}).get('status') in {'queued', 'transcribing'}:
+            return False, 'Transkripsi masih berjalan.'
         filename = row.get('filename')
         path = None
         if filename:
@@ -390,9 +449,19 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
             return False, 'File belum berhasil diarsipkan.'
         if path:
             path.unlink(missing_ok=True)
+        transcript = row.get('transcript') or {}
+        root = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve()
+        for key in ('txt_filename', 'srt_filename'):
+            sidecar = transcript.get(key)
+            if sidecar and Path(sidecar).name == sidecar:
+                candidate = root / sidecar
+                if candidate.parent.resolve() == root and not candidate.is_symlink():
+                    candidate.unlink(missing_ok=True)
         storage.delete_recording(row['job_id'])
         r.delete('state:' + row['job_id'], 'web:job:' + row['job_id'],
-                 'archive:state:' + row['job_id'])
+                 'archive:state:' + row['job_id'],
+                 'transcription:state:' + row['job_id'],
+                 'transcription:guard:' + row['job_id'])
         return True, ''
 
     @app.post('/api/recordings/delete')
@@ -436,6 +505,8 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
             return jsonify(error='File rekaman tidak ditemukan atau belum siap.'), 404
         if r.get('capture:owner') == job_id:
             return jsonify(error='Proses yang masih aktif tidak bisa diubah namanya.'), 409
+        if (row.get('transcript') or {}).get('status') in {'queued', 'transcribing'}:
+            return jsonify(error='Tunggu transkripsi selesai sebelum mengubah nama.'), 409
         if (row.get('storage') == 'archive'
                 and row.get('archive_status') != 'archived'):
             return jsonify(error='Tunggu proses arsip selesai sebelum mengubah nama.'), 409
@@ -462,11 +533,30 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
             return jsonify(error='Nama itu sudah dipakai file lain. Coba nama yang berbeda, ya.'), 409
         if destination == source:
             return jsonify(filename=new_name)
+        transcript = row.get('transcript') or {}
+        sidecar_moves = []
+        if transcript.get('status') == 'completed':
+            for kind, suffix in (('txt_filename', '.txt'), ('srt_filename', '.srt')):
+                old_sidecar = transcript.get(kind)
+                if old_sidecar:
+                    old_path = root / old_sidecar
+                    new_path = destination.with_suffix(suffix)
+                    if (Path(old_sidecar).name != old_sidecar or old_path.parent.resolve() != root
+                            or old_path.is_symlink() or new_path.exists()):
+                        return jsonify(error='File transkrip tidak bisa ikut diubah namanya.'), 409
+                    if old_path.is_file():
+                        sidecar_moves.append((kind, old_path, new_path))
         try:
             source.rename(destination)
             try:
-                storage.rename_recording(job_id, new_name)
+                for _, old_path, new_path in sidecar_moves:
+                    old_path.rename(new_path)
+                transcript_names = {kind: new_path.name for kind, _, new_path in sidecar_moves}
+                storage.rename_recording(job_id, new_name, transcript_names)
             except Exception:
+                for _, old_path, new_path in reversed(sidecar_moves):
+                    if new_path.exists():
+                        new_path.rename(old_path)
                 destination.rename(source)
                 raise
         except OSError:

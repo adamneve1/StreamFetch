@@ -5,3 +5,6 @@ google-auth-httplib2
 google-auth-oauthlib
 Flask==3.1.2
 gunicorn==23.0.0
+faster-whisper==1.2.1
+# PyAV 19 removed metadata_errors while faster-whisper 1.2.1 still uses it.
+av>=11,<19
