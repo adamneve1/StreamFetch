@@ -190,6 +190,11 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('secret', error.detail)
         self.assertNotIn('example.test', error.detail)
         self.assertEqual(worker.inspection_error(b'ERROR: HTTP Error 400: Bad Request').code, 'http_400')
+        diagnostic = worker.safe_diagnostic(
+            'ERROR: fragment failed https://googlevideo.test/videoplayback?token=secret')
+        self.assertIn('fragment failed', diagnostic)
+        self.assertNotIn('secret', diagnostic)
+        self.assertNotIn('googlevideo', diagnostic)
 
     async def test_inspection_error_reaches_status(self):
         job = self.job('tiktok')
@@ -243,6 +248,113 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(command[command.index('-f') + 1], capped)
         with self.assertRaises(ValueError):
             quality.ytdlp_selector('2160')
+
+    def test_post_live_command_is_resumable_and_strict_about_missing_fragments(self):
+        command, _ = worker.capture_command(dict(
+            job_id='post-live', source='youtube', quality='720',
+            live_status='post_live', url='https://youtu.be/test'))
+        self.assertIn('--continue', command)
+        self.assertIn('--abort-on-unavailable-fragments', command)
+        self.assertIn('%(format_id)s', command[command.index('-o') + 1])
+
+    async def test_normal_vod_and_active_live_do_not_use_outer_retry(self):
+        lease = asyncio.get_running_loop().create_future()
+        self.addCleanup(lease.cancel)
+        for live_status in ('not_live', 'was_live', 'is_live'):
+            with self.subTest(live_status=live_status):
+                job = self.job('youtube')
+                job['live_status'] = live_status
+                with patch.object(worker, 'capture', AsyncMock(return_value='source_error')) as capture, \
+                     patch.object(worker, 'inspect_youtube', AsyncMock()) as inspect:
+                    self.assertEqual(
+                        await worker.capture_with_retries(job, None, lease), 'source_error')
+                capture.assert_awaited_once()
+                inspect.assert_not_awaited()
+
+    async def test_capture_preserves_sanitized_ytdlp_error_and_exit_code(self):
+        job = self.job('youtube')
+        lease = asyncio.get_running_loop().create_future()
+        self.addCleanup(lease.cancel)
+        command = [
+            sys.executable, '-c',
+            "import sys; print('ERROR: fragment failed "
+            "https://googlevideo.test/file?token=secret', file=sys.stderr); sys.exit(2)",
+        ]
+        with patch.object(worker, 'capture_command', return_value=(command, None)):
+            reason = await worker.capture(job, None, lease)
+        self.assertEqual(reason, 'source_error')
+        self.assertEqual(job['download_exit_code'], 2)
+        diagnostic = '\n'.join(job['_capture_diagnostics'])
+        self.assertIn('fragment failed', diagnostic)
+        self.assertNotIn('secret', diagnostic)
+        self.assertNotIn('googlevideo', diagnostic)
+
+    async def test_post_live_retry_refreshes_metadata_and_then_succeeds(self):
+        job = self.job('youtube')
+        job.update(live_status='post_live', is_live=False)
+        lease = asyncio.get_running_loop().create_future()
+        self.addCleanup(lease.cancel)
+        with patch.object(
+                worker, 'capture', AsyncMock(side_effect=['source_error', 'completed'])) as capture, \
+             patch.object(worker, 'wait_for_youtube_retry', AsyncMock(return_value=True)) as wait, \
+             patch.object(worker, 'inspect_youtube', AsyncMock(return_value={
+                 'title': 'Arsip siap', 'live_status': 'was_live', 'was_live': True,
+             })) as inspect:
+            reason = await worker.capture_with_retries(job, None, lease)
+        self.assertEqual(reason, 'completed')
+        self.assertEqual(capture.await_count, 2)
+        wait.assert_awaited_once()
+        inspect.assert_awaited_once()
+        self.assertEqual(job['download_attempt'], 2)
+        self.assertEqual(job['live_status'], 'was_live')
+
+    async def test_post_live_retries_are_bounded_and_keep_partial_files(self):
+        job = self.job('youtube')
+        job.update(live_status='post_live', is_live=False)
+        video = self.root / 'test-job-136.mp4'
+        audio = self.root / 'test-job-140.m4a.part'
+        video.write_bytes(b'complete video')
+        audio.write_bytes(b'partial audio')
+        lease = asyncio.get_running_loop().create_future()
+        self.addCleanup(lease.cancel)
+        with patch.object(worker, 'YOUTUBE_POSTLIVE_ATTEMPTS', 3), \
+             patch.object(worker, 'capture', AsyncMock(return_value='source_error')) as capture, \
+             patch.object(worker, 'wait_for_youtube_retry', AsyncMock(return_value=True)), \
+             patch.object(worker, 'inspect_youtube', AsyncMock(return_value={
+                 'live_status': 'post_live', 'was_live': True,
+             })):
+            reason = await worker.capture_with_retries(job, None, lease)
+        self.assertEqual(reason, 'source_error')
+        self.assertEqual(capture.await_count, 3)
+        self.assertTrue(video.exists())
+        self.assertTrue(audio.exists())
+
+    async def test_cancellation_during_post_live_backoff_stops_retry(self):
+        job = self.job('youtube')
+        job.update(live_status='post_live', is_live=False)
+        lease = asyncio.get_running_loop().create_future()
+        self.addCleanup(lease.cancel)
+
+        async def fail_and_cancel(*_):
+            self.redis.set('stop:test-job', '1')
+            return 'source_error'
+
+        with patch.object(worker, 'capture', AsyncMock(side_effect=fail_and_cancel)) as capture:
+            reason = await worker.capture_with_retries(job, None, lease)
+        self.assertEqual(reason, 'operator_stop')
+        capture.assert_awaited_once()
+
+    def test_download_size_ignores_file_renamed_between_glob_and_stat(self):
+        class VanishingPath:
+            def is_file(self):
+                return True
+
+            def stat(self):
+                raise FileNotFoundError
+
+        root = SimpleNamespace(glob=lambda _pattern: [VanishingPath()])
+        with patch.object(worker, 'DOWNLOAD_DIR', root):
+            self.assertEqual(worker.download_size('test-job'), 0)
 
     def test_video_presets_validate_and_build_expected_encoders(self):
         info = dict(container='mpegts', video_codec='h264', audio_codec='aac',
@@ -319,6 +431,41 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(worker.compatible_media(worker.probe_media_file(target)))
         self.assertTrue((self.root / 'test-job-video.part').exists())
         self.assertTrue((self.root / 'test-job-audio.part').exists())
+
+    def test_mismatched_completed_video_and_partial_audio_are_not_merged(self):
+        video = self.root / 'test-job-136.mp4'
+        audio = self.root / 'test-job-140.m4a.part'
+        video.write_bytes(b'video')
+        audio.write_bytes(b'audio')
+
+        def probe(path):
+            if path == video:
+                return dict(container='mov,mp4', video_codec='h264',
+                            audio_codec='unknown', pix_fmt='yuv420p',
+                            duration='2877.47', video_duration='2877.47',
+                            audio_duration=None)
+            if path == audio:
+                return dict(container='mov,mp4', video_codec='unknown',
+                            audio_codec='aac', pix_fmt='unknown',
+                            duration='1273.48', video_duration=None,
+                            audio_duration='1273.48')
+
+        with patch.object(worker, 'probe_media_file', side_effect=probe), \
+             patch.object(worker.subprocess, 'run') as run, \
+             self.assertRaises(worker.MediaValidationError) as failure:
+            worker.complete_recording(dict(job_id='test-job', source='youtube'))
+        self.assertEqual(failure.exception.code, 'incomplete_tracks')
+        run.assert_not_called()
+        self.assertTrue(video.exists())
+        self.assertTrue(audio.exists())
+
+    def test_final_mp4_requires_aligned_audio_and_video_durations(self):
+        info = dict(container='mov,mp4', video_codec='h264', audio_codec='aac',
+                    pix_fmt='yuv420p', duration='100', video_duration='100',
+                    audio_duration='50')
+        self.assertFalse(worker.compatible_media(info))
+        info['audio_duration'] = '99.5'
+        self.assertTrue(worker.compatible_media(info))
 
 
 if __name__ == '__main__':

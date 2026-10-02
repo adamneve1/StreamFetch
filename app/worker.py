@@ -8,6 +8,7 @@ import re
 import uuid
 import time
 import logging
+from collections import deque
 from urllib.parse import urlsplit
 from datetime import datetime
 
@@ -29,6 +30,8 @@ IDLE_TIMEOUT = float(os.getenv("CAPTURE_IDLE_TIMEOUT", "60"))
 STOP_TIMEOUT = float(os.getenv("CAPTURE_STOP_TIMEOUT", "10"))
 FINALIZE_TIMEOUT = float(os.getenv("FINALIZE_TIMEOUT", "600"))
 PROBE_TIMEOUT = float(os.getenv("PROBE_TIMEOUT", "20"))
+YOUTUBE_POSTLIVE_ATTEMPTS = max(1, min(5, int(os.getenv("YOUTUBE_POSTLIVE_ATTEMPTS", "3"))))
+YOUTUBE_POSTLIVE_RETRY_DELAY = max(1, float(os.getenv("YOUTUBE_POSTLIVE_RETRY_DELAY", "20")))
 ARCHIVE_ENABLED = os.getenv("ARCHIVE_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 ARCHIVE_PATH = Path(os.getenv("ARCHIVE_PATH", "/archive"))
 ARCHIVE_MAX_RETRIES = max(0, int(os.getenv("ARCHIVE_MAX_RETRIES", "3")))
@@ -199,7 +202,7 @@ def probe_media_file(path):
                 "-v",
                 "error",
                 "-show_entries",
-                "format=format_name,duration:stream=codec_type,codec_name,pix_fmt",
+                "format=format_name,duration:stream=codec_type,codec_name,pix_fmt,duration",
                 "-of",
                 "json",
                 str(path),
@@ -237,6 +240,14 @@ def probe_media_file(path):
         (stream.get("pix_fmt", "unknown") for stream in streams if stream.get("codec_type") == "video"),
         "unknown",
     )
+    video_duration = next(
+        (stream.get("duration") for stream in streams if stream.get("codec_type") == "video"),
+        None,
+    )
+    audio_duration = next(
+        (stream.get("duration") for stream in streams if stream.get("codec_type") == "audio"),
+        None,
+    )
 
     return {
         "container": format_name,
@@ -244,6 +255,8 @@ def probe_media_file(path):
         "audio_codec": audio_codec,
         "pix_fmt": pix_fmt,
         "duration": (data.get("format") or {}).get("duration"),
+        "video_duration": video_duration,
+        "audio_duration": audio_duration,
     }
 
 
@@ -443,7 +456,7 @@ async def heartbeat(job=None):
 
 async def set_state(job, status, state, detail=''):
     r.set(f"state:{job['job_id']}", state, ex=86400)
-    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'quality', 'output_format', 'compression', 'is_live', 'started_at', 'elapsed', 'size', 'filename') if key in job}
+    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'quality', 'output_format', 'compression', 'is_live', 'live_status', 'was_live', 'download_attempt', 'download_exit_code', 'started_at', 'elapsed', 'size', 'filename') if key in job}
     public.update(state=state, detail=detail)
     r.set('web:job:' + job['job_id'], json.dumps(public), ex=86400)
     if os.getenv('DATA_DIR'):
@@ -456,6 +469,7 @@ async def set_state(job, status, state, detail=''):
         labels = {
             'starting': '⏳ Starting: menghubungkan sumber...',
             'recording': '🔴 Recording: capture sedang berjalan.',
+            'waiting': '⏳ Waiting: menunggu YouTube menyiapkan arsip live...',
             'stopping': '🛑 Stopping: menunggu capture berhenti...',
             'finalizing': '🔧 Finalizing: menyiapkan dan memvalidasi file...',
             'ready': '✅ Ready: file siap digunakan.',
@@ -587,10 +601,10 @@ async def stop_process(process, job_id=None, chat_id=None):
         raise RuntimeError('Capture process did not exit')
 
 
-async def spawn(command):
+async def spawn(command, merge_stderr=True):
     return await asyncio.create_subprocess_exec(
         *command, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+        stderr=asyncio.subprocess.STDOUT if merge_stderr else asyncio.subprocess.PIPE,
         start_new_session=(os.name == 'posix'))
 
 
@@ -600,6 +614,40 @@ class SourceInspectionError(RuntimeError):
         self.code = code
         self.detail = detail
         super().__init__(code)
+
+
+class MediaValidationError(RuntimeError):
+    """A credential-free media failure suitable for logs and operator status."""
+    def __init__(self, code, detail):
+        self.code = code
+        self.detail = detail
+        super().__init__(code)
+
+
+def safe_diagnostic(text):
+    """Keep useful yt-dlp diagnostics while removing URLs and common secrets."""
+    text = re.sub(r'(?i)(?:https?|rtmps?|srt|tcp|udp)://\S+', '[URL]', str(text))
+    text = re.sub(
+        r'(?i)(authorization|cookie|token|signature|sig|key)=([^\s&]+)',
+        r'\1=[REDACTED]', text,
+    )
+    return ''.join(ch for ch in text if ch == '\t' or ord(ch) >= 32)[:1200]
+
+
+def diagnostic_detail(job):
+    diagnostics = job.get('_capture_diagnostics') or []
+    tool = 'FFmpeg' if job.get('source') == 'oryx' else 'yt-dlp'
+    message = diagnostics[-1] if diagnostics else f'{tool} berhenti sebelum menghasilkan media lengkap.'
+    exit_code = job.get('_capture_exit_code')
+    prefix = f'{tool} berhenti dengan exit code {exit_code}' if exit_code is not None else f'{tool} berhenti'
+    return f'{prefix}: {message}'
+
+
+def update_youtube_metadata(job, info):
+    job['is_live'] = info.get('is_live') is True
+    job['live_status'] = info.get('live_status') or ('is_live' if job['is_live'] else 'not_live')
+    job['was_live'] = info.get('was_live') is True or job['live_status'] in {'post_live', 'was_live'}
+    job['title'] = info.get('title') or job.get('title', '')
 
 
 def inspection_error(output):
@@ -681,43 +729,82 @@ def capture_command(job):
     command = [
         'yt-dlp', '-f', quality.ytdlp_selector(job.get('quality', 'best'), output_format),
         '--no-playlist', '--newline', '--retries', '10',
-        '--fragment-retries', '10', '--continue',
+        '--fragment-retries', '10', '--file-access-retries', '3',
+        '--retry-sleep', 'fragment:exp=1:20', '--continue',
     ]
+    if job.get('live_status') == 'post_live':
+        # A post-live manifest is still changing. Do not silently accept holes;
+        # the bounded outer retry will refresh metadata and resume the .part.
+        command += ['--abort-on-unavailable-fragments']
     if output_format == 'mp3':
         command += ['--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0']
     else:
         command += ['--merge-output-format', 'mp4', '--remux-video', 'mp4']
-    command += ['-o', str(DOWNLOAD_DIR / f'{job_id}-%(title).200B.%(ext)s'), job['url']]
+    # A stable temporary name lets a refreshed yt-dlp invocation reuse a
+    # completed format and resume the missing .part/.ytdl stream.
+    command += ['-o', str(DOWNLOAD_DIR / f'{job_id}-%(format_id)s.%(ext)s'), job['url']]
     return command, None
+
+
+def download_size(job_id):
+    """Return current job bytes while tolerating yt-dlp's atomic renames."""
+    total = 0
+    for path in DOWNLOAD_DIR.glob(f'{job_id}-*'):
+        try:
+            if path.is_file():
+                total += path.stat().st_size
+        except FileNotFoundError:
+            # yt-dlp commonly renames format.part -> format between glob/stat.
+            continue
+    return total
+
+
+def should_log_diagnostic(text):
+    lowered = text.lower()
+    return any(marker in lowered for marker in (
+        'error:', 'warning:', 'retrying', 'unable to', 'failed',
+        'fragment not found', 'unavailable fragment', 'http error',
+    ))
 
 
 async def capture(job, status, lease):
     command, temp_path = capture_command(job)
-    process = await spawn(command)
+    process = await spawn(command, merge_stderr=False)
     log.info('job=%s source=%s capture_pid=%s temporary=%s',
              job['job_id'], job['source'], process.pid,
              temp_path or f"{job['job_id']}-*")
-    # Consume output continuously, but never log raw downloader diagnostics:
-    # these may contain private playback URLs, tokens, or HTTP headers.
     activity = {'media': 0, 'percent': None}
+    diagnostics = deque(maxlen=40)
+    output_tail = deque(maxlen=40)
 
-    async def drain():
+    async def drain(stream, channel):
         while True:
-            line = await process.stdout.readline()
+            line = await stream.readline()
             if not line:
                 return
             text = line.decode(errors='replace').strip()
+            parsed_progress = None
             if job['source'] in {'youtube', 'tiktok'}:
-                progress = parse_progress(text)
-                if progress:
-                    activity['percent'] = progress['percent']
+                parsed_progress = parse_progress(text)
+                if parsed_progress:
+                    activity['percent'] = parsed_progress['percent']
             elif text.startswith('out_time_us='):
                 try:
                     activity['media'] = max(activity['media'], int(text.split('=', 1)[1]))
                 except ValueError:
                     pass
+            if text and not parsed_progress and job['source'] in {'youtube', 'tiktok'}:
+                safe = safe_diagnostic(text)
+                if safe:
+                    output_tail.append(f'{channel}: {safe}')
+            if should_log_diagnostic(text):
+                safe = safe_diagnostic(text)
+                if safe:
+                    diagnostics.append(f'{channel}: {safe}')
+                    log.warning('job=%s yt_dlp_%s=%s', job['job_id'], channel, safe)
 
-    reader = asyncio.create_task(drain())
+    readers = [asyncio.create_task(drain(process.stdout, 'stdout')),
+               asyncio.create_task(drain(process.stderr, 'stderr'))]
     started = last_activity = time.monotonic()
     last_measure = None
     recording = False
@@ -727,15 +814,14 @@ async def capture(job, status, lease):
         while process.returncode is None:
             if lease.done():
                 lease.result()
-            if reader.done():
-                reader.result()
+            for reader in readers:
+                if reader.done():
+                    reader.result()
             if r.exists(f"stop:{job['job_id']}"):
                 reason = 'operator_stop'
                 await set_state(job, status, 'stopping')
                 break
-            files = list(DOWNLOAD_DIR.glob(f"{job['job_id']}-*"))
-            measure = (sum(p.stat().st_size for p in files if p.is_file()),
-                       activity['media'])
+            measure = (download_size(job['job_id']), activity['media'])
             now = time.monotonic()
             if measure != last_measure and (measure[0] > 0 or measure[1] > 0):
                 last_activity = now
@@ -762,12 +848,111 @@ async def capture(job, status, lease):
             reason = 'source_error'
     finally:
         await stop_process(process)
-        if not reader.done():
-            reader.cancel()
-        await asyncio.gather(reader, return_exceptions=True)
+        pending_readers = [reader for reader in readers if not reader.done()]
+        if pending_readers:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending_readers, return_exceptions=True), timeout=2,
+                )
+            except asyncio.TimeoutError:
+                for reader in pending_readers:
+                    if not reader.done():
+                        reader.cancel()
+        await asyncio.gather(*readers, return_exceptions=True)
+    job['_capture_exit_code'] = process.returncode
+    job['download_exit_code'] = process.returncode
+    if process.returncode not in (None, 0) and not diagnostics:
+        diagnostics.extend(list(output_tail)[-10:])
+        for line in diagnostics:
+            log.warning('job=%s yt_dlp_output=%s', job['job_id'], line)
+    job['_capture_diagnostics'] = list(diagnostics)
+    job['_capture_output'] = list(output_tail)
     log.info('job=%s source=%s stop_reason=%s exit=%s',
              job['job_id'], job['source'], reason, process.returncode)
     return reason
+
+
+async def wait_for_youtube_retry(job, status, lease, delay, attempt, total):
+    detail = (
+        'YouTube masih menyiapkan arsip live. '
+        f'Mencoba lagi {attempt}/{total} dalam {int(delay)} detik; file parsial tetap disimpan.'
+    )
+    await set_state(job, status, 'waiting', detail)
+    deadline = time.monotonic() + delay
+    while time.monotonic() < deadline:
+        if lease.done():
+            lease.result()
+        if r.exists(f"stop:{job['job_id']}"):
+            await set_state(job, status, 'stopping')
+            return False
+        await asyncio.sleep(min(0.25, max(0, deadline - time.monotonic())))
+    return True
+
+
+async def capture_with_retries(job, status, lease):
+    """Retry post-live YouTube downloads after refreshing their manifest."""
+    post_live = job['source'] == 'youtube' and job.get('live_status') == 'post_live'
+    attempts = YOUTUBE_POSTLIVE_ATTEMPTS if post_live else 1
+    last_reason = 'source_error'
+    for attempt in range(1, attempts + 1):
+        job['download_attempt'] = attempt
+        if attempt > 1:
+            delay = min(120, YOUTUBE_POSTLIVE_RETRY_DELAY * (2 ** (attempt - 2)))
+            if not await wait_for_youtube_retry(job, status, lease, delay, attempt, attempts):
+                return 'operator_stop'
+            await set_state(
+                job, status, 'starting',
+                f'Memperbarui metadata YouTube sebelum percobaan {attempt}/{attempts}…',
+            )
+            try:
+                update_youtube_metadata(job, await inspect_youtube(job))
+            except SourceInspectionError as exc:
+                safe = safe_diagnostic(exc.detail)
+                job['_capture_diagnostics'] = [f'metadata: {safe}']
+                job['_capture_exit_code'] = None
+                log.warning('job=%s youtube_metadata_retry=%s attempt=%s/%s',
+                            job['job_id'], exc.code, attempt, attempts)
+                last_reason = 'inspection_error'
+                continue
+        last_reason = await capture(job, status, lease)
+        if last_reason in {'completed', 'operator_stop'}:
+            return last_reason
+        if post_live:
+            log.warning(
+                'job=%s youtube_download_attempt=%s/%s reason=%s exit=%s detail=%s',
+                job['job_id'], attempt, attempts, last_reason,
+                job.get('_capture_exit_code'), diagnostic_detail(job),
+            )
+        else:
+            log.warning(
+                'job=%s capture_failed reason=%s exit=%s detail=%s',
+                job['job_id'], last_reason, job.get('_capture_exit_code'),
+                diagnostic_detail(job),
+            )
+    return last_reason
+
+
+def duration_seconds(info, stream=None):
+    if not info:
+        return None
+    value = info.get(f'{stream}_duration') if stream else None
+    if value in (None, 'N/A'):
+        value = info.get('duration')
+    try:
+        parsed = float(value)
+        return parsed if parsed > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def durations_aligned(video_info, audio_info=None):
+    video_duration = duration_seconds(video_info, 'video')
+    audio_duration = duration_seconds(audio_info or video_info, 'audio')
+    if video_duration is None or audio_duration is None:
+        return True
+    longer = max(video_duration, audio_duration)
+    tolerance = max(5.0, min(30.0, longer * 0.01))
+    return abs(video_duration - audio_duration) <= tolerance
 
 
 def compatible_media(info, compression="original"):
@@ -777,7 +962,8 @@ def compatible_media(info, compression="original"):
                     and info['video_codec'] in preset['codecs']
                     and info['audio_codec'] == 'aac'
                     and info['pix_fmt'] == 'yuv420p'
-                    and float(info.get('duration') or 0) > 0)
+                    and float(info.get('duration') or 0) > 0
+                    and durations_aligned(info))
     except (ValueError, TypeError):
         return False
 
@@ -816,11 +1002,20 @@ def finalize_to_mp3(path):
 def complete_recording(job):
     # Interrupted yt-dlp files can still contain usable media, including .part.
     # Prefer an already merged A/V file; never publish a video-only fragment.
-    candidates = sorted(
-        (p for p in DOWNLOAD_DIR.glob(f"{job['job_id']}-*")
-         if p.is_file() and p.stat().st_size > 0
-         and not p.name.endswith('.ytdl') and '.finalize_tmp.' not in p.name),
-        key=lambda p: (p.suffix != '.part', p.stat().st_mtime), reverse=True)
+    candidate_stats = []
+    for path in DOWNLOAD_DIR.glob(f"{job['job_id']}-*"):
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        if (path.is_file() and stat.st_size > 0
+                and not path.name.endswith('.ytdl')
+                and '.finalize_tmp.' not in path.name):
+            candidate_stats.append((path, stat.st_mtime))
+    candidates = [item[0] for item in sorted(
+        candidate_stats,
+        key=lambda item: (item[0].suffix != '.part', item[1]), reverse=True,
+    )]
     output_format = quality.validate_format(job.get('output_format', 'mp4'))
     if output_format == 'mp3':
         for path in candidates:
@@ -836,15 +1031,18 @@ def complete_recording(job):
             return target
         raise RuntimeError('No usable audio file; temporary media retained')
     separate_video = separate_audio = None
+    separate_video_info = separate_audio_info = None
     for path in candidates:
         info = probe_media_file(path)
         if not info:
             continue
         if info['video_codec'] != 'unknown' and info['audio_codec'] == 'unknown':
-            separate_video = separate_video or path
+            if separate_video is None:
+                separate_video, separate_video_info = path, info
             continue
         if info['audio_codec'] != 'unknown' and info['video_codec'] == 'unknown':
-            separate_audio = separate_audio or path
+            if separate_audio is None:
+                separate_audio, separate_audio_info = path, info
             continue
         if info['video_codec'] == 'unknown' or info['audio_codec'] == 'unknown':
             continue
@@ -860,6 +1058,20 @@ def complete_recording(job):
                  job['job_id'], job['source'], target)
         return target
     if separate_video and separate_audio:
+        if not durations_aligned(separate_video_info, separate_audio_info):
+            video_duration = duration_seconds(separate_video_info, 'video')
+            audio_duration = duration_seconds(separate_audio_info, 'audio')
+            log.error(
+                'job=%s media_validation=incomplete_tracks video_seconds=%.2f audio_seconds=%.2f',
+                job['job_id'], video_duration or 0, audio_duration or 0,
+            )
+            raise MediaValidationError(
+                'incomplete_tracks',
+                'Download belum lengkap: durasi video '
+                f'{video_duration or 0:.0f} detik, sedangkan audio '
+                f'{audio_duration or 0:.0f} detik. File parsial tetap disimpan. '
+                + diagnostic_detail(job),
+            )
         # yt-dlp may be interrupted before its own separate-track merger runs.
         # Keep both originals until a merged, compatible clip has been verified.
         merged = DOWNLOAD_DIR / f"{job['job_id']}-recovered.mkv"
@@ -880,7 +1092,11 @@ def complete_recording(job):
                     return target
         except (OSError, subprocess.TimeoutExpired):
             log.warning('job=%s track recovery failed', job['job_id'])
-    raise RuntimeError('No usable audio/video file; temporary media retained')
+    raise MediaValidationError(
+        'incomplete_media',
+        'Proses capture belum menghasilkan video dan audio yang lengkap. '
+        'File parsial tetap disimpan. ' + diagnostic_detail(job),
+    )
 
 
 async def run_download(job):
@@ -919,17 +1135,23 @@ async def run_download(job):
                 job['url'] = storage.validate_tiktok_url(job['url'])
             stage = 'inspection'
             info = await inspect_youtube(job)
-            job['is_live'] = info.get('is_live') is True
+            update_youtube_metadata(job, info)
             if job['source'] == 'tiktok' and info.get('is_live') is not True:
                 await set_state(job, status, 'failed', 'Akun TikTok belum live atau siaran tidak dapat diakses. Coba lagi saat akun sedang live.')
                 return
-            job['title'] = info.get('title') or ''
+            if job['source'] == 'youtube' and job.get('live_status') == 'post_live':
+                await set_state(
+                    job, status, 'starting',
+                    'YouTube masih memproses arsip livestream; download akan '
+                    'dilanjutkan otomatis jika manifest berubah.',
+                )
         stage = 'capture'
-        reason = await capture(job, status, lease)
+        reason = await capture_with_retries(job, status, lease)
         job['stop_reason'] = reason
         if job.get('started_at'):
             job['elapsed'] = round(time.time() - job['started_at'], 1)
-        await set_state(job, status, 'finalizing')
+        await set_state(job, status, 'finalizing',
+                        'Menggabungkan track dan memvalidasi durasi video/audio…')
         stage = 'finalization'
         final_path = await asyncio.to_thread(complete_recording, job)
         job.update(filename=final_path.name, size=final_path.stat().st_size)
@@ -945,12 +1167,15 @@ async def run_download(job):
             log.error('ARCHIVE FAILED job=%s file=%s attempt=0 error_type=%s',
                       job['job_id'], final_path.name, type(exc).__name__)
     except Exception as exc:
-        # Exception text can include a command/URL; only log its class.
-        log.error('job=%s source=%s stage=%s error_type=%s reason=%s',
+        error_code = exc.code if isinstance(
+            exc, (SourceInspectionError, MediaValidationError)) else type(exc).__name__
+        error_detail = exc.detail if isinstance(
+            exc, (SourceInspectionError, MediaValidationError)) else safe_diagnostic(str(exc))
+        log.error('job=%s source=%s stage=%s error_type=%s reason=%s detail=%s',
                   job['job_id'], job['source'], stage, type(exc).__name__,
-                  exc.code if isinstance(exc, SourceInspectionError) else 'unknown')
+                  error_code, error_detail)
         await set_state(job, status, 'failed',
-                        exc.detail if isinstance(exc, SourceInspectionError) else
+                        exc.detail if isinstance(exc, (SourceInspectionError, MediaValidationError)) else
                         'Sumber tidak tersedia, capture berhenti sebelum ada media, atau '
                         'finalisasi gagal. File sementara yang ada tetap disimpan; '
                         'cek log dan coba lagi.')

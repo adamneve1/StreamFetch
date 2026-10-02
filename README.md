@@ -143,6 +143,13 @@ Ukuran akhir preset Seimbang dan Hemat bergantung pada kompleksitas gambar, gera
 durasi, dan codec sumber. Perkiraan di panel menunjukkan ukuran media sumber sebelum
 proses kompresi.
 
+Livestream YouTube yang baru selesai dapat sementara berstatus `post_live` saat
+YouTube masih membangun arsip VOD. StreamFetch mempertahankan file `.part`/`.ytdl`,
+menunggu dengan backoff terbatas, memperbarui metadata, lalu menjalankan yt-dlp lagi
+dengan nama format sementara yang sama agar track yang sudah selesai tidak diunduh
+ulang. Nilai bawaan adalah tiga percobaan dengan jeda 20 lalu 40 detik; atur melalui
+`YOUTUBE_POSTLIVE_ATTEMPTS` dan `YOUTUBE_POSTLIVE_RETRY_DELAY` bila diperlukan.
+
 ## Prasyarat
 
 - Docker Engine atau Docker Desktop
