@@ -95,13 +95,16 @@ Telegram dan web menggunakan Redis serta worker yang sama sehingga tidak menjala
 
 ## Format Output
 
-Rekaman video menggunakan MP4 dengan target kompatibilitas:
+Rekaman video menggunakan MP4. Preset Original dan Seimbang memakai target
+kompatibilitas:
 
 ```text
 Video : H.264
 Audio : AAC
 Pixel : yuv420p
 ```
+
+Preset Hemat tetap memakai MP4 dan AAC, tetapi videonya menggunakan H.265/HEVC.
 
 Nama default:
 
@@ -128,6 +131,17 @@ akan dipakai. Nomor urut dihitung berdasarkan hasil pada hari yang sama.
 Untuk download audio YouTube, pilih **Audio (MP3)** pada panel. StreamFetch mengambil
 audio terbaik yang tersedia dan menyimpannya sebagai `.mp3`; pilihan resolusi
 video otomatis dinonaktifkan.
+
+Untuk video, panel menyediakan preset ukuran file:
+
+- **Original**: mempertahankan stream jika sudah kompatibel; paling cepat.
+- **Seimbang**: H.264 CRF 23 dan AAC 128 kbps; pilihan bawaan dengan kompatibilitas luas.
+- **Hemat**: H.265/HEVC CRF 27 dan AAC 128 kbps; lebih kecil, tetapi proses lebih lama
+  dan perangkat lama mungkin tidak mendukung pemutaran HEVC.
+
+Ukuran akhir preset Seimbang dan Hemat bergantung pada kompleksitas gambar, gerakan,
+durasi, dan codec sumber. Perkiraan di panel menunjukkan ukuran media sumber sebelum
+proses kompresi.
 
 ## Prasyarat
 

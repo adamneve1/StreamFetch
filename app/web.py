@@ -217,10 +217,12 @@ def create_app(client=None):
         source = data.get('source')
         output_format = quality.validate_format(data.get('format', 'mp4'))
         selected_quality = quality.validate(data.get('quality', 'best'))
+        compression = quality.validate_preset(data.get('compression', 'original'))
         if output_format == 'mp3':
             if source != 'youtube':
                 raise ValueError('Format MP3 hanya tersedia untuk YouTube.')
             selected_quality = 'best'
+            compression = 'original'
         token = uuid.uuid4().hex
         if not r.set('web:estimate', token, nx=True, ex=35):
             return jsonify(error='Ada ukuran lain yang sedang dihitung. Tunggu sebentar, ya.'), 409
@@ -249,7 +251,7 @@ def create_app(client=None):
                 return jsonify(estimated_bytes=None,
                                bytes_per_hour=int(bits_per_second / 8 * 3600) if bits_per_second else None,
                                height=max(heights, default=None), is_live=True,
-                               quality='best')
+                               quality='best', compression=compression)
 
             if source == 'youtube':
                 url = storage.validate_url(str(data.get('url', '')).strip(), youtube=True)
@@ -266,7 +268,7 @@ def create_app(client=None):
                 return jsonify(error='Ukuran belum bisa diperkirakan dari sumber ini.'), 422
             metadata = json.loads(result.stdout)
             return jsonify(**quality.selected_media_info(metadata), quality=selected_quality,
-                           format=output_format)
+                           format=output_format, compression=compression)
         except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
             return jsonify(error='Ukuran belum bisa diperkirakan dari sumber ini.'), 422
         except ValueError:
@@ -280,10 +282,12 @@ def create_app(client=None):
         source = data.get('source')
         output_format = quality.validate_format(data.get('format', 'mp4'))
         selected_quality = quality.validate(data.get('quality', 'best'))
+        compression = quality.validate_preset(data.get('compression', 'original'))
         if output_format == 'mp3':
             if source != 'youtube':
                 raise ValueError('Format MP3 hanya tersedia untuk YouTube.')
             selected_quality = 'best'
+            compression = 'original'
         if source == 'oryx' and selected_quality != 'best':
             raise ValueError('Stream langsung direkam dengan kualitas asli dari sumber.')
         storage_target = data.get('storage', 'local')
@@ -295,7 +299,8 @@ def create_app(client=None):
         job = dict(job_id=uuid.uuid4().hex, source=source, origin='web', chat_id='web',
                    requested_at=time.time(), note=str(data.get('note', '')).strip()[:500],
                    storage=storage_target, archive=storage_target == 'archive',
-                   quality=selected_quality, output_format=output_format)
+                   quality=selected_quality, output_format=output_format,
+                   compression=compression)
         if source == 'oryx':
             selected = next((s for s in storage.sources() if s['id'] == data.get('source_id')), None)
             if not selected:

@@ -244,6 +244,25 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             quality.ytdlp_selector('2160')
 
+    def test_video_presets_validate_and_build_expected_encoders(self):
+        info = dict(container='mpegts', video_codec='h264', audio_codec='aac',
+                    pix_fmt='yuv420p', duration='1')
+        completed = SimpleNamespace(returncode=1)
+        for preset, codec, crf, bitrate in (
+                ('balanced', 'libx264', '23', '128k'),
+                ('compact', 'libx265', '27', '128k')):
+            with self.subTest(preset=preset), \
+                 patch.object(worker, 'probe_media_file', return_value=info), \
+                 patch.object(worker.subprocess, 'run', return_value=completed) as run:
+                self.assertIsNone(worker.finalize_to_compatible_mp4(
+                    self.root / 'source.mp4', preset))
+            command = run.call_args.args[0]
+            self.assertEqual(command[command.index('-c:v') + 1], codec)
+            self.assertEqual(command[command.index('-crf') + 1], crf)
+            self.assertEqual(command[command.index('-b:a') + 1], bitrate)
+        with self.assertRaises(ValueError):
+            quality.validate_preset('tiny')
+
     def test_mp3_command_uses_best_audio_and_audio_extraction(self):
         command, _ = worker.capture_command(dict(
             job_id='audio-job', source='youtube', quality='1080',

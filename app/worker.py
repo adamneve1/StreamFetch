@@ -247,26 +247,21 @@ def probe_media_file(path):
     }
 
 
-# Video codecs considered compatible with MP4 + Windows Media Player.
-# Everything else triggers an H.264 re-encode.
-_COMPATIBLE_VIDEO_CODECS = {"h264", "avc", "avc1"}
-
-
-def finalize_to_compatible_mp4(path):
-    """Ensure *path* becomes a universally-compatible MP4 file.
+def finalize_to_compatible_mp4(path, compression="original"):
+    """Finalize *path* as an MP4 using the selected size preset.
 
     Rules
     -----
-    * If the file is already MP4 / H.264 / AAC / yuv420p → no work needed.
+    * Original keeps an existing MP4 / H.264 / AAC / yuv420p unchanged.
+    * Seimbang always encodes H.264 CRF 23 plus AAC 128 kbps.
+    * Hemat always encodes H.265 CRF 27 plus AAC 128 kbps.
     * If the container is wrong → at minimum remux.
-    * If the video codec is not H.264 (VP9, AV1, …) → re-encode video to
-      libx264 with ``-pix_fmt yuv420p``.
-    * If the pixel format is not yuv420p → re-encode video.
-    * If the audio codec is not AAC → re-encode audio to AAC.
     * Add ``-movflags +faststart`` when remuxing or encoding.
     * Writes to a temporary file first; only replaces the original on success.
     """
 
+    compression = quality.validate_preset(compression)
+    preset = quality.video_preset(compression)
     probe = probe_media_file(path)
     if not probe:
         return None
@@ -282,8 +277,10 @@ def finalize_to_compatible_mp4(path):
     print(f"Probe  – pix_fmt: {pix_fmt}")
     print(f"Probe  – file: {path}")
 
-    need_video_reencode = video_codec not in _COMPATIBLE_VIDEO_CODECS or pix_fmt != "yuv420p"
-    need_audio_reencode = audio_codec != "aac"
+    need_video_reencode = (preset["force_encode"]
+                           or video_codec not in preset["codecs"]
+                           or pix_fmt != "yuv420p")
+    need_audio_reencode = preset["force_encode"] or audio_codec != "aac"
     is_mp4 = "mp4" in container
 
     # Fast path: nothing to do at all.
@@ -293,7 +290,10 @@ def finalize_to_compatible_mp4(path):
 
     action_parts = []
     if need_video_reencode:
-        action_parts.append(f"re-encode video ({video_codec}/{pix_fmt} → h264/yuv420p)")
+        target_codec = "hevc" if preset["codec"] == "libx265" else "h264"
+        action_parts.append(
+            f"re-encode video ({video_codec}/{pix_fmt} → {target_codec}/yuv420p)"
+        )
     if need_audio_reencode:
         action_parts.append(f"re-encode audio ({audio_codec} → aac)")
     if not is_mp4:
@@ -311,16 +311,18 @@ def finalize_to_compatible_mp4(path):
 
     if need_video_reencode:
         cmd += [
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", "18",
+            "-c:v", preset["codec"],
+            "-preset", preset["encoder_preset"],
+            "-crf", preset["crf"],
             "-pix_fmt", "yuv420p",
         ]
+        if preset["codec"] == "libx265":
+            cmd += ["-tag:v", "hvc1"]
     else:
         cmd += ["-c:v", "copy"]
 
     if need_audio_reencode:
-        cmd += ["-c:a", "aac", "-b:a", "192k"]
+        cmd += ["-c:a", "aac", "-b:a", preset["audio_bitrate"]]
     else:
         cmd += ["-c:a", "copy"]
 
@@ -358,7 +360,7 @@ def finalize_to_compatible_mp4(path):
     print(f"Temp   – audio codec: {tmp_audio}")
     print(f"Temp   – pix_fmt: {tmp_pix}")
 
-    if not compatible_media(tmp_probe):
+    if not compatible_media(tmp_probe, compression):
         print("Finalized temp file does not meet compatibility requirements – aborting.")
         temp_path.unlink(missing_ok=True)
         return None
@@ -441,7 +443,7 @@ async def heartbeat(job=None):
 
 async def set_state(job, status, state, detail=''):
     r.set(f"state:{job['job_id']}", state, ex=86400)
-    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'quality', 'output_format', 'is_live', 'started_at', 'elapsed', 'size', 'filename') if key in job}
+    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'quality', 'output_format', 'compression', 'is_live', 'started_at', 'elapsed', 'size', 'filename') if key in job}
     public.update(state=state, detail=detail)
     r.set('web:job:' + job['job_id'], json.dumps(public), ex=86400)
     if os.getenv('DATA_DIR'):
@@ -768,10 +770,11 @@ async def capture(job, status, lease):
     return reason
 
 
-def compatible_media(info):
+def compatible_media(info, compression="original"):
     try:
+        preset = quality.video_preset(compression)
         return bool(info and 'mp4' in info['container']
-                    and info['video_codec'] in _COMPATIBLE_VIDEO_CODECS
+                    and info['video_codec'] in preset['codecs']
                     and info['audio_codec'] == 'aac'
                     and info['pix_fmt'] == 'yuv420p'
                     and float(info.get('duration') or 0) > 0)
@@ -845,8 +848,9 @@ def complete_recording(job):
             continue
         if info['video_codec'] == 'unknown' or info['audio_codec'] == 'unknown':
             continue
-        final_path = finalize_to_compatible_mp4(path)
-        if final_path is None or not compatible_media(probe_media_file(final_path)):
+        compression = quality.validate_preset(job.get('compression', 'original'))
+        final_path = finalize_to_compatible_mp4(path, compression)
+        if final_path is None or not compatible_media(probe_media_file(final_path), compression):
             continue
         # One global worker reservation protects the existing date sequence.
         # A rename error must propagate: no ready message without final naming.
@@ -866,8 +870,9 @@ def complete_recording(job):
                 '-c', 'copy', '-shortest', str(merged),
             ], capture_output=True, timeout=FINALIZE_TIMEOUT, check=False)
             if result.returncode == 0:
-                final_path = finalize_to_compatible_mp4(merged)
-                if final_path and compatible_media(probe_media_file(final_path)):
+                compression = quality.validate_preset(job.get('compression', 'original'))
+                final_path = finalize_to_compatible_mp4(merged, compression)
+                if final_path and compatible_media(probe_media_file(final_path), compression):
                     target = generate_final_filename(job.get('title', ''), note=job.get('note', ''))
                     final_path.rename(target)
                     log.info('job=%s source=%s finalization=passed final=%s recovery=tracks',
@@ -883,10 +888,12 @@ async def run_download(job):
     job.setdefault('is_live', job['source'] in {'oryx', 'tiktok'})
     job['quality'] = quality.validate(job.get('quality', 'best'))
     job['output_format'] = quality.validate_format(job.get('output_format', 'mp4'))
+    job['compression'] = quality.validate_preset(job.get('compression', 'original'))
     if job['output_format'] == 'mp3':
         if job['source'] != 'youtube':
             raise ValueError('MP3 is only supported for YouTube downloads')
         job['quality'] = 'best'
+        job['compression'] = 'original'
     job.setdefault('job_id', uuid.uuid4().hex)
     job.setdefault('requested_at', time.time())
     job.setdefault('origin', 'telegram')

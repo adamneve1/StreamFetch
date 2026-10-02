@@ -9,6 +9,27 @@ QUALITY_HEIGHTS = {
 
 OUTPUT_FORMATS = {"mp4", "mp3"}
 
+# ``original`` preserves the current fast path: compatible H.264/AAC files are
+# only remuxed.  The other presets intentionally encode every video so their
+# size/quality trade-off is predictable regardless of the source codec.
+VIDEO_PRESETS = {
+    "original": {
+        "codec": "libx264", "codecs": {"h264", "avc", "avc1"},
+        "crf": "18", "encoder_preset": "medium", "audio_bitrate": "192k",
+        "force_encode": False,
+    },
+    "balanced": {
+        "codec": "libx264", "codecs": {"h264", "avc", "avc1"},
+        "crf": "23", "encoder_preset": "medium", "audio_bitrate": "128k",
+        "force_encode": True,
+    },
+    "compact": {
+        "codec": "libx265", "codecs": {"hevc", "h265", "hev1", "hvc1"},
+        "crf": "27", "encoder_preset": "medium", "audio_bitrate": "128k",
+        "force_encode": True,
+    },
+}
+
 
 def validate(value):
     value = str(value or "best")
@@ -22,6 +43,17 @@ def validate_format(value):
     if value not in OUTPUT_FORMATS:
         raise ValueError("Pilih format file yang tersedia.")
     return value
+
+
+def validate_preset(value):
+    value = str(value or "original").lower()
+    if value not in VIDEO_PRESETS:
+        raise ValueError("Pilih preset ukuran file yang tersedia.")
+    return value
+
+
+def video_preset(value):
+    return VIDEO_PRESETS[validate_preset(value)]
 
 
 def ytdlp_selector(value, output_format="mp4"):

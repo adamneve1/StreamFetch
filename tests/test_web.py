@@ -192,9 +192,20 @@ class WebTests(unittest.TestCase):
         self.redis.set('worker:heartbeat', 1)
         queued = self.post('record', {'source': 'youtube',
                                       'url': 'https://youtu.be/test',
-                                      'quality': '720'})
+                                      'quality': '720',
+                                      'compression': 'balanced'})
         self.assertEqual(queued.status_code, 202)
-        self.assertEqual(json.loads(self.redis.lindex('download_queue', 0))['quality'], '720')
+        job = json.loads(self.redis.lindex('download_queue', 0))
+        self.assertEqual(job['quality'], '720')
+        self.assertEqual(job['compression'], 'balanced')
+
+    def test_invalid_compression_preset_is_rejected(self):
+        self.redis.set('worker:heartbeat', 1)
+        response = self.post('record', {'source': 'youtube',
+                                        'url': 'https://youtu.be/test',
+                                        'compression': 'tiny'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.redis.llen('download_queue'), 0)
 
     def test_youtube_mp3_estimate_and_job_snapshot(self):
         from types import SimpleNamespace
@@ -225,6 +236,7 @@ class WebTests(unittest.TestCase):
         job = json.loads(self.redis.lindex('download_queue', 0))
         self.assertEqual(job['output_format'], 'mp3')
         self.assertEqual(job['quality'], 'best')
+        self.assertEqual(job['compression'], 'original')
 
     def test_mp3_is_rejected_for_live_sources(self):
         source = self.client.get('/api/sources').json['sources'][0]
