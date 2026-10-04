@@ -1,6 +1,32 @@
 """Source metadata and legacy transcript sidecars for the read-only reader."""
 import re
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+
+def youtube_id(value):
+    """Accept a video ID or an exact supported YouTube URL, never arbitrary embeds."""
+    value = str(value or '')
+    if re.fullmatch(r'[A-Za-z0-9_-]{11}', value):
+        return value
+    try:
+        url = urlsplit(value)
+        if url.scheme not in {'https', 'http'} or url.username or url.password:
+            return None
+        if url.hostname == 'youtu.be':
+            candidate = url.path.strip('/')
+        elif url.hostname in {'youtube.com', 'www.youtube.com', 'm.youtube.com'}:
+            if url.path == '/watch':
+                candidate = parse_qs(url.query).get('v', [''])[0]
+            elif re.fullmatch(r'/(?:embed|shorts|live)/[^/]+/?', url.path):
+                candidate = url.path.split('/')[2]
+            else:
+                return None
+        else:
+            return None
+        return candidate if re.fullmatch(r'[A-Za-z0-9_-]{11}', candidate) else None
+    except ValueError:
+        return None
 
 
 LABELS = {
@@ -119,7 +145,14 @@ def reader_data(row, root):
     if not segments:
         segments = [{'start': None, 'end': None, 'text': text.strip()}
                     for text in (files['txt'] or '').splitlines() if text.strip()]
-    return {'job_id': row['job_id'], 'info': recording_info(row),
+    source = row.get('source_metadata') or {}
+    video_id = None
+    if row.get('source') == 'youtube' and isinstance(source, dict):
+        video_id = next((identifier for value in (
+            source.get('youtube_id'), row.get('youtube_id'),
+            source.get('webpage_url'), row.get('url'))
+            if (identifier := youtube_id(value))), None)
+    return {'job_id': row['job_id'], 'info': recording_info(row), 'youtube_id': video_id,
             'segments': segments, 'raw': files['txt'] if files['txt'] is not None
             else '\n'.join(segment['text'] for segment in segments),
             'exports': [kind for kind, content in files.items() if content is not None],

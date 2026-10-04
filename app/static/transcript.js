@@ -28,13 +28,37 @@ function findMatches(text,query){
 }
 function nextMatchIndex(current,delta,count){return count?(current+delta+count)%count:-1;}
 
-if(typeof module!=='undefined')module.exports={readerTimestamp,timestampLabel,formatInfo,formatTranscript,findMatches,nextMatchIndex};
+function seekTranscript(player,seconds){
+  if(!player||!Number.isFinite(seconds)||seconds<0)return false;
+  player.seekTo(seconds,true);return true;
+}
+
+if(typeof module!=='undefined')module.exports={readerTimestamp,timestampLabel,formatInfo,formatTranscript,findMatches,nextMatchIndex,seekTranscript};
 if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',async()=>{
   const $=id=>document.getElementById(id);
   const status=$('reader-status'),content=$('reader-content'),article=$('transcript-text');
   const base=location.pathname.replace(/\/(?:view)?$/,'');
-  let data,matchNodes=[],current=-1;
+  let data,matchNodes=[],current=-1,player=null,playerReady=false,pendingSeek=null;
   function notify(message){status.textContent=message;}
+  function seek(seconds){
+    if(playerReady){seekTranscript(player,seconds);return;}
+    pendingSeek=seconds;$('player-status').hidden=false;$('player-status').textContent='Video masih dimuat. Posisi akan dibuka saat siap.';
+  }
+  function initPlayer(videoId){
+    if(!/^[A-Za-z0-9_-]{11}$/.test(videoId||''))return;
+    $('reader-player').hidden=false;
+    function createPlayer(){
+      player=new window.YT.Player('youtube-player',{
+        videoId,playerVars:{playsinline:1,origin:location.origin},
+        events:{onReady:()=>{playerReady=true;$('player-status').hidden=true;if(pendingSeek!==null){seekTranscript(player,pendingSeek);pendingSeek=null;}},
+          onError:()=>{playerReady=false;$('reader-player').hidden=true;$('player-status').hidden=false;$('player-status').textContent='Video tidak dapat diputar di sini. Transkrip tetap tersedia.';}}
+      });
+    }
+    if(window.YT&&window.YT.Player){createPlayer();return;}
+    window.onYouTubeIframeAPIReady=createPlayer;
+    const script=document.createElement('script');script.src='https://www.youtube.com/iframe_api';
+    script.addEventListener('error',()=>{$('reader-player').hidden=true;$('player-status').hidden=false;$('player-status').textContent='Video tidak dapat dimuat. Transkrip tetap tersedia.';});document.head.append(script);
+  }
   function highlightedText(parent,text,query){
     let last=0;
     for(const match of findMatches(text,query)){
@@ -59,7 +83,11 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
       for(const segment of data.segments){
         const row=document.createElement('section');row.className='reader-segment';
         const label=timestampLabel(segment,mode);
-        if(label){const timestamp=document.createElement('time');timestamp.textContent=label;row.append(timestamp);}
+        if(label){
+          const timestamp=document.createElement(data.youtube_id?'button':'time');timestamp.textContent=label;
+          if(data.youtube_id){timestamp.type='button';timestamp.className='reader-timestamp';timestamp.setAttribute('aria-label','Seek to '+label);timestamp.addEventListener('click',()=>seek(segment.start));}
+          row.append(timestamp);
+        }
         else if(mode!=='none'){const empty=document.createElement('span');row.append(empty);}
         const paragraph=document.createElement('p');highlightedText(paragraph,segment.text,query);row.append(paragraph);article.append(row);
       }
@@ -69,7 +97,7 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
   }
   function showInfo(info){
     const dl=$('program-info');
-    for(const [label,value] of [['Program',info.program],[info.date_time_label||'Date/Time',info.date_time],['Theme',info.theme],['Guests / Narasumber',info.guests],['Presenter',info.presenter]]){
+    for(const [label,value] of [['Date/Time',info.date_time_label==='Source upload date'?'':info.date_time],['Theme',info.theme],['Narasumber',info.guests],['Presenter',info.presenter]]){
       const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;
       if(Array.isArray(value)&&value.length){
         const list=document.createElement('ul');
@@ -87,7 +115,9 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
     const response=await fetch(base+'/data');
     if(!response.ok){const error=await response.json();throw Error(error.error||'Transkrip tidak dapat dibuka.');}
     data=await response.json();document.title=data.info.program+' · StreamFetch';
-    $('reader-title').textContent=data.info.program;$('reader-source').textContent=[data.info.source,data.language].filter(Boolean).join(' · ');
+    $('reader-title').textContent=data.info.program;
+    $('reader-source').textContent=[data.info.source,data.language,data.info.date_time_label==='Source upload date'?'Source upload date: '+data.info.date_time:''].filter(Boolean).join(' · ');
+    initPlayer(data.youtube_id);
     showInfo(data.info);
     for(const kind of data.exports){const link=document.createElement('a');link.href=base+'/'+kind;link.textContent='Export '+kind.toUpperCase();$('transcript-exports').append(link);}
     if(!data.segments.some(segment=>Number.isFinite(segment.start))){$('timestamp-mode').value='none';$('timestamp-mode').disabled=true;}

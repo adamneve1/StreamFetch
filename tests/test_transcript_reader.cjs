@@ -43,19 +43,51 @@ class Node {
   set textContent(value){this.replaceChildren();this._text=String(value);}
   get textContent(){return this._text+this.children.map(node=>node.textContent).join('');}
   addEventListener(type,callback){this.listeners[type]=callback;}
+  setAttribute(name,value){this[name]=value;}
   scrollIntoView(){this.scrolled=true;}
 }
-async function fixture(data){
+async function fixture(data,window={}){
   const html=fs.readFileSync(require.resolve('../app/static/transcript.html'),'utf8');
   const nodes=new Map([...html.matchAll(/id="([^"]+)"/g)].map(match=>[match[1],new Node()]));
   nodes.get('timestamp-mode').value='segment';
   let init;const copies=[],requests=[];
-  const context=vm.createContext({document:{getElementById:id=>nodes.get(id),createElement:()=>new Node(),createTextNode:text=>{const node=new Node();node.textContent=text;return node;},addEventListener:(_,callback)=>init=callback},location:{pathname:'/api/recordings/old/transcript/view'},navigator:{clipboard:{writeText:async text=>copies.push(text)}},fetch:async url=>{requests.push(url);return {ok:true,json:async()=>data};}});
+  const head=new Node();
+  const context=vm.createContext({window,document:{head,getElementById:id=>nodes.get(id),createElement:()=>new Node(),createTextNode:text=>{const node=new Node();node.textContent=text;return node;},addEventListener:(_,callback)=>init=callback},location:{origin:'https://streamfetch.example',pathname:'/api/recordings/old/transcript/view'},navigator:{clipboard:{writeText:async text=>copies.push(text)}},fetch:async url=>{requests.push(url);return {ok:true,json:async()=>data};}});
   vm.runInContext(fs.readFileSync(require.resolve('../app/static/transcript.js'),'utf8'),context);
   await init();
-  return {get:id=>nodes.get(id),copies,requests};
+  return {get:id=>nodes.get(id),copies,requests,head};
 }
 function descendants(node){return node.children.flatMap(child=>[child,...descendants(child)]);}
+test('YouTube timestamp seeks the single player including clicks before readiness',async()=>{
+  let options;const seeks=[];
+  const window={YT:{Player:function(id,config){assert.equal(id,'youtube-player');options=config;this.seekTo=(...args)=>seeks.push(args);}}};
+  const f=await fixture({youtube_id:'abcdefghijk',info:{program:'Dialog'},segments,raw:'TXT',exports:['txt']},window);
+  assert.equal(options.videoId,'abcdefghijk');
+  assert.equal(options.playerVars.origin,'https://streamfetch.example');
+  assert.equal(f.get('reader-player').hidden,false);
+  const buttons=descendants(f.get('transcript-text')).filter(node=>node.className==='reader-timestamp');
+  buttons[0].listeners.click();assert.equal(seeks.length,0);
+  options.events.onReady();assert.deepEqual(seeks,[[1.25,true]]);
+  buttons[1].listeners.click();assert.deepEqual(seeks.at(-1),[65,true]);
+  options.events.onError();assert.equal(f.get('reader-player').hidden,true);
+  assert.match(f.get('player-status').textContent,/Transkrip tetap tersedia/);
+  assert.equal(f.requests.length,1);
+});
+test('YouTube API loads once and unsupported sources omit the player',async()=>{
+  const data={info:{program:'Old'},segments,raw:'TXT',exports:['txt']};
+  const old=await fixture(data);assert.equal(old.head.children.length,0);
+  const f=await fixture({...data,youtube_id:'abcdefghijk'});
+  assert.equal(f.head.children.length,1);
+  assert.equal(f.head.children[0].src,'https://www.youtube.com/iframe_api');
+  f.get('timestamp-mode').value='none';f.get('timestamp-mode').listeners.change();
+  assert.equal(f.head.children.length,1);assert.equal(f.requests.length,1);
+  f.head.children[0].listeners.error();assert.equal(f.get('reader-player').hidden,true);
+});
+test('seek rejects unavailable players and invalid timestamps',()=>{
+  assert.equal(reader.seekTranscript(null,1),false);
+  assert.equal(reader.seekTranscript({seekTo:()=>assert.fail()},NaN),false);
+  assert.equal(reader.seekTranscript({seekTo:()=>assert.fail()},-1),false);
+});
 test('reader renders metadata safely and preserves full original description',async()=>{
   const info={program:'<script>Program</script>',theme:'Tema',date_time:'4 Oktober',guests:[{name:'Rina',role:'Dosen'}],presenter:'Sari',description:'Full original\n<script>unsafe</script>'};
   const f=await fixture({info,segments,raw:'Original TXT',exports:['txt','srt','vtt']});

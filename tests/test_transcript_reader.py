@@ -40,6 +40,32 @@ class ReaderTests(unittest.TestCase):
     def data(self):
         return self.client.get('/api/recordings/reader-job/transcript/data')
 
+    def test_youtube_id_supports_known_urls_and_rejects_other_origins(self):
+        for value in ['abcdefghijk', 'https://youtu.be/abcdefghijk?t=2',
+                      'https://www.youtube.com/watch?v=abcdefghijk',
+                      'https://youtube.com/shorts/abcdefghijk',
+                      'https://youtube.com/live/abcdefghijk']:
+            self.assertEqual(transcript_reader.youtube_id(value), 'abcdefghijk')
+        for value in ['https://youtube.com.evil.example/watch?v=abcdefghijk',
+                      'https://evil.example/abcdefghijk', 'javascript:abcdefghijk',
+                      'https://user@youtube.com/watch?v=abcdefghijk', None, 'bad']:
+            self.assertIsNone(transcript_reader.youtube_id(value))
+
+    def test_persisted_id_embed_csp_and_non_youtube_compatibility(self):
+        self.row['source_metadata']['youtube_id'] = 'abcdefghijk'
+        storage.save_recording(self.row, 'ready')
+        storage.save_transcription_state('reader-job', 'completed',
+                                         txt_filename='reader.txt', srt_filename='reader.srt')
+        self.assertEqual(self.data().json['youtube_id'], 'abcdefghijk')
+        page = self.client.get('/api/recordings/reader-job/transcript/view')
+        self.assertIn('frame-src https://www.youtube.com', page.headers['Content-Security-Policy'])
+        self.assertNotIn('youtube.com', self.data().headers['Content-Security-Policy'])
+        self.row['source'] = 'oryx'
+        self.assertIsNone(transcript_reader.reader_data(self.row, self.root)['youtube_id'])
+
+    def test_legacy_youtube_without_id_does_not_invent_a_player(self):
+        self.assertIsNone(self.data().json['youtube_id'])
+
     def test_explicit_program_fields_and_guest_roles(self):
         parsed = transcript_reader.parse_source_metadata(DESCRIPTION)
         self.assertEqual(parsed['program'], 'Dialog Batam')

@@ -668,6 +668,8 @@ def update_youtube_metadata(job, info):
         for key in ('title', 'description', 'channel', 'upload_date'):
             if info.get(key) is not None:
                 metadata[key] = info[key]
+        if re.fullmatch(r'[A-Za-z0-9_-]{11}', str(info.get('id') or '')):
+            metadata['youtube_id'] = info['id']
         job['source_metadata'] = metadata
 
 

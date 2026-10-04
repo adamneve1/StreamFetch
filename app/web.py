@@ -98,6 +98,11 @@ def create_app(client=None):
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['X-Frame-Options'] = 'DENY'
         response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'"
+        if request.endpoint == 'view_transcript':
+            response.headers['Content-Security-Policy'] = (
+                "default-src 'self'; script-src 'self' https://www.youtube.com; "
+                "frame-src https://www.youtube.com; style-src 'self'; frame-ancestors 'none'")
+            response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
         return response
 
     @app.errorhandler(redis.exceptions.RedisError)

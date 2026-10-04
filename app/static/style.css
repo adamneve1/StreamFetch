@@ -206,3 +206,4 @@ footer{padding:18px 2px 4px}
 .history-table .col-size{width:88px}
 .history-table .col-status{width:128px}
 @media(max-width:680px){.capture-panel .media-options,.capture-panel .media-options.has-format,.capture-panel .output-options{grid-template-columns:1fr;gap:14px}.monitor{padding:14px}.monitor .metrics{margin-top:2px}}
+.transcript-box .transcript-cta{display:inline-flex;align-items:center;justify-content:center;padding:8px 12px!important;border:1px solid #abc48c;border-radius:9px;background:#edf5df;color:var(--deep);font-size:12px!important;font-weight:600;text-decoration:none}.transcript-box .transcript-cta:disabled{opacity:.75}.transcript-progress{width:100px;height:7px;accent-color:#7ea247}.transcript-cta:focus-visible{outline:2px solid #629d45;outline-offset:2px}

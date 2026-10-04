@@ -101,7 +101,7 @@ def save_recording(job, state, detail=''):
     data.update(state=state, detail=detail)
     if isinstance(job.get('source_metadata'), dict):
         data['source_metadata'] = {key: job['source_metadata'][key]
-                                   for key in ('title', 'description', 'channel', 'upload_date')
+                                   for key in ('title', 'description', 'channel', 'upload_date', 'youtube_id')
                                    if key in job['source_metadata']}
     with connection() as db:
         if 'source_metadata' not in data:
@@ -134,7 +134,7 @@ def save_transcription_state(job_id, status, replace=False, **fields):
     allowed = {
         'requested_at', 'started_at', 'completed_at', 'processing_seconds',
         'language', 'language_probability', 'model', 'txt_filename',
-        'srt_filename', 'vtt_filename', 'error',
+        'srt_filename', 'vtt_filename', 'error', 'progress_percent', 'eta_seconds',
     }
     with connection() as db:
         row = db.execute('SELECT data FROM recordings WHERE id=?', (job_id,)).fetchone()

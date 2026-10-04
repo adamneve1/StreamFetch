@@ -30,7 +30,32 @@ function languageName(code){if(!code)return '—';try{const name=new Intl.Displa
 function processingTime(seconds){if(seconds===undefined||seconds===null)return '—';const value=Math.round(seconds);return value>=60?Math.floor(value/60)+'m '+value%60+'s':value+'s';}
 async function generateTranscript(row){try{await api('recordings/'+encodeURIComponent(row.job_id)+'/transcript',{});notice('Transkrip masuk antrean. Statusnya akan diperbarui otomatis.');await refresh();}catch(error){notice(error.message);}}
 function transcriptLink(row,kind,label){const link=document.createElement('a');link.href='/api/recordings/'+encodeURIComponent(row.job_id)+'/transcript/'+kind;link.textContent=label;if(kind==='view'){link.target='_blank';link.rel='noopener';}return link;}
-function renderTranscript(row,cell){if(row.state!=='ready'||!row.filename?.toLowerCase().endsWith('.mp4'))return;const transcript=row.transcript||null,box=document.createElement('div');box.className='transcript-box';if(!transcript||transcript.status==='failed'){if(transcript){const status=document.createElement('span');status.className='transcript-status failed';status.textContent='Transcript · '+transcriptStateName(transcript.status);box.append(status);if(transcript.error){const error=document.createElement('small');error.textContent=transcript.error;box.append(error);}}const button=document.createElement('button');button.type='button';button.className='transcript-generate';button.textContent='Generate Transcript';button.onclick=()=>generateTranscript(row);box.append(button);}else{const status=document.createElement('span');status.className='transcript-status '+transcript.status;status.textContent='Transcript · '+transcriptStateName(transcript.status);box.append(status);if(transcript.status==='completed'){const meta=document.createElement('small');meta.textContent='Language: '+languageName(transcript.language)+' · Model: '+(transcript.model||'small')+' · Processing time: '+processingTime(transcript.processing_seconds);const actions=document.createElement('span');actions.className='transcript-links';actions.append(transcriptLink(row,'view','View Transcript'),transcriptLink(row,'txt','Download TXT'),transcriptLink(row,'srt','Download SRT'));box.append(meta,actions);}}cell.append(box);}
+function transcriptETA(transcript){
+ if(!Number.isFinite(transcript.eta_seconds))return 'Estimating time…';
+ const elapsed=transcript.updated_at?Math.max(0,Date.now()/1000-transcript.updated_at):0;
+ const seconds=Math.max(0,transcript.eta_seconds-elapsed);
+ return seconds<60?'Less than a minute remaining':'About '+Math.ceil(seconds/60)+' min remaining';
+}
+function renderTranscript(row,cell){
+ if(row.state!=='ready'||(!row.transcript&&!row.filename?.toLowerCase().endsWith('.mp4')))return;
+ const transcript=row.transcript||{},state=transcript.status,box=document.createElement('div');box.className='transcript-box';
+ if(state==='completed'){
+  const link=transcriptLink(row,'view','View Transcript');link.className='transcript-cta';box.append(link);
+ }else{
+  const button=document.createElement('button');button.type='button';button.className='transcript-cta transcript-generate';
+  button.textContent=({queued:'Waiting',transcribing:'Generating',failed:'Retry Transcript'})[state]||'Generate Transcript';
+  button.disabled=['queued','transcribing'].includes(state);button.onclick=()=>generateTranscript(row);box.append(button);
+  if(state==='queued'||state==='transcribing'){
+   const progress=document.createElement('progress');progress.max=100;progress.className='transcript-progress';progress.setAttribute('aria-label','Transcript progress');
+   if(state==='transcribing'&&Number.isFinite(transcript.progress_percent))progress.value=Math.min(100,Math.max(0,transcript.progress_percent));
+   const hint=document.createElement('small');hint.setAttribute('role','status');
+   hint.textContent=state==='queued'?'Waiting in queue':(Number.isFinite(transcript.progress_percent)?Math.round(transcript.progress_percent)+'% · ':'')+transcriptETA(transcript);
+   box.append(progress,hint);
+  }
+  if(state==='failed'&&transcript.error){const error=document.createElement('small');error.className='transcript-status failed';error.textContent=transcript.error;box.append(error);}
+ }
+ cell.append(box);
+}
 function updateStorageHint(){$('storage-hint').textContent=$('storage-target').value==='archive'?'File disimpan di lokal, lalu disalin ke arsip.':archiveEnabled?'File disimpan di folder downloads.':'File disimpan di folder downloads. Arsipnya belum aktif.';}
 function renderDownloadProgress(job){
  const download=job?.source==='youtube'&&job.is_live===false;

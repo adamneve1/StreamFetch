@@ -336,9 +336,13 @@ def _local_model(model):
     return model if model is not None else load_model()
 
 
-def normalize_local_result(result):
+def normalize_local_result(result, progress=None):
     segments, info = result
     normalized = []
+    duration = getattr(info, 'duration', None)
+    started = time.monotonic()
+    if progress:
+        progress(0, duration * 0.5 if duration else None)
     for segment in segments:
         words = []
         for word in (getattr(segment, "words", None) or []):
@@ -347,13 +351,20 @@ def normalize_local_result(result):
                 getattr(word, "probability", None)))
         normalized.append(TranscriptSegment(
             float(segment.start), float(segment.end), str(segment.text), words))
+        if progress and duration and duration > 0:
+            fraction = min(1, max(0, float(segment.end) / duration))
+            elapsed = time.monotonic() - started
+            eta = elapsed * (1 - fraction) / fraction if fraction > 0 else duration * 0.5
+            progress(fraction * 95, eta)
     return normalized, TranscriptInfo(
         getattr(info, "language", None),
         getattr(info, "language_probability", None))
 
 
-def transcribe_local(media_path, model):
+def transcribe_local(media_path, model, progress=None):
     started = time.monotonic()
+    if progress:
+        progress(0, None)
     log.info("transcription provider=local model=%s", MODEL_NAME)
     try:
         local_model = _local_model(model)
@@ -363,7 +374,7 @@ def transcribe_local(media_path, model):
     result = local_model.transcribe(
         str(media_path), language=None, beam_size=5, vad_filter=True,
     )
-    normalized = normalize_local_result(result)
+    normalized = normalize_local_result(result, progress)
     log.info("transcription provider=local processing_seconds=%.3f",
              time.monotonic() - started)
     return normalized
@@ -637,13 +648,16 @@ def _transcribe_cloudflare_chunk(chunk, total, cancel_event):
     return ChunkResult(chunk, segments, info, neurons, elapsed)
 
 
-def transcribe_cloudflare(media_path, cancel_event=None):
+def transcribe_cloudflare(media_path, cancel_event=None, progress=None):
     # Fail fast before spending time extracting audio.
     cloudflare_credentials()
     concurrency = _env_int("CLOUDFLARE_TRANSCRIPTION_CONCURRENCY", 3)
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="streamfetch-transcription-") as temporary:
         chunks = prepare_audio_chunks(media_path, temporary, cancel_event)
+        if progress:
+            # Initial estimate is refined as real chunk processing times arrive.
+            progress(0, sum(chunk.duration for chunk in chunks) * 0.14 / concurrency)
         log.info("transcription provider=cloudflare model=%s chunks=%d concurrency=%d",
                  CLOUDFLARE_MODEL, len(chunks), concurrency)
         executor = ThreadPoolExecutor(max_workers=concurrency,
@@ -653,7 +667,15 @@ def transcribe_cloudflare(media_path, cancel_event=None):
             futures = [executor.submit(
                 _transcribe_cloudflare_chunk, chunk, len(chunks), cancel_event)
                        for chunk in chunks]
-            results = [future.result() for future in as_completed(futures)]
+            results = []
+            for future in as_completed(futures):
+                results.append(future.result())
+                if progress:
+                    completed = len(results)
+                    remaining = len(chunks) - completed
+                    average = sum(result.elapsed for result in results) / completed
+                    eta = average * remaining / concurrency
+                    progress(completed / len(chunks) * 95, eta)
         except Exception:
             for future in futures:
                 future.cancel()
@@ -687,11 +709,24 @@ def transcribe(job, model=None, cancel_event=None):
     published = []
     provider = None
     active_model = MODEL_NAME
+    last_progress = 0.0
+
+    def progress(percent, eta):
+        nonlocal last_progress
+        if cancel_event and cancel_event.is_set():
+            raise TranscriptionCancelled('Transkripsi dibatalkan.')
+        # Local inference can emit thousands of segments; avoid a write per word.
+        now = time.monotonic()
+        if percent == 0 or now - last_progress >= 1 or percent >= 95:
+            storage.save_transcription_state(
+                job_id, 'transcribing', progress_percent=round(percent, 1),
+                eta_seconds=round(eta) if eta is not None else None)
+            last_progress = now
     try:
         provider = configured_provider()
         active_model = configured_model(provider)
         set_state(job_id, "transcribing", started_at=started,
-                  model=active_model, error="")
+                  model=active_model, error="", progress_percent=0, eta_seconds=None)
         row = storage.recording(job_id)
         if not row or row.get("state") != "ready":
             raise TranscriptionError("Rekaman belum siap untuk ditranskripsi.")
@@ -700,7 +735,7 @@ def transcribe(job, model=None, cancel_event=None):
 
         if provider in {"auto", "cloudflare"}:
             try:
-                segments, info = transcribe_cloudflare(media_path, cancel_event)
+                segments, info = transcribe_cloudflare(media_path, cancel_event, progress)
             except CloudflareRetryableError as exc:
                 if provider != "auto":
                     raise TranscriptionError(str(exc)) from exc
@@ -709,9 +744,12 @@ def transcribe(job, model=None, cancel_event=None):
                     "fallback_reason=%s",
                     job_id, str(exc))
                 active_model = MODEL_NAME
-                segments, info = transcribe_local(media_path, model)
+                segments, info = transcribe_local(media_path, model, progress)
         else:
-            segments, info = transcribe_local(media_path, model)
+            segments, info = transcribe_local(media_path, model, progress)
+
+        if cancel_event and cancel_event.is_set():
+            raise TranscriptionCancelled('Transkripsi dibatalkan.')
 
         txt, srt = render_outputs(segments)
         vtt = render_vtt(segments)
@@ -732,7 +770,7 @@ def transcribe(job, model=None, cancel_event=None):
             language_probability=info.language_probability,
             model=active_model, txt_filename=outputs[0][0].name,
             srt_filename=outputs[1][0].name, vtt_filename=outputs[2][0].name,
-            error="",
+            error="", progress_percent=100, eta_seconds=0,
         )
         log.info("transcription job=%s provider=%s total_seconds=%.3f model=%s",
                  job_id, "local" if active_model == MODEL_NAME else "cloudflare",

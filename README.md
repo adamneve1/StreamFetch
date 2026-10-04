@@ -76,11 +76,18 @@ YouTube → StreamFetch → yt-dlp → MP4 / MP3
 - Worker dan antrean Redis terpisah dari proses capture/download.
 - Satu transkripsi diproses pada satu waktu untuk membatasi beban CPU.
 - Hasil TXT dan SRT tersimpan di samping file media asli.
-- Status, bahasa terdeteksi, model, dan waktu proses tampil di riwayat.
+- Satu tombol transkripsi mengikuti status Generate Transcript, Waiting,
+  Generating, View Transcript, atau Retry Transcript. Saat diproses, progress
+  dan perkiraan waktu tersisa ditampilkan tanpa detail provider/model.
+  Perkiraan diperbarui dari hasil pemrosesan, termasuk saat fallback ke lokal.
 - **View Transcript** membuka reader dengan informasi program, Full Description,
   pencarian dengan navigasi hasil, mode timestamp None/Segment/Subtitle, copy,
   export TXT/SRT/VTT yang tersedia, dan Raw view. Mengubah tampilan tidak
   mentranskripsi ulang atau mengubah file sumber.
+- Reader menampilkan player YouTube 16:9 untuk rekaman dengan ID video valid;
+  klik timestamp untuk seek. Sumber lain atau rekaman lama tanpa ID tetap
+  menampilkan transkrip tanpa player. Metadata sekunder dan deskripsi asli
+  tersedia di Full Description.
 - Deskripsi YouTube lengkap disimpan saat download baru dan menjadi sumber
   metadata berlabel (Program, Tanggal/Jam, Tema, Narasumber, Presenter).
   Rekaman lama tanpa deskripsi tetap dapat dibaca; fakta yang tidak tersedia

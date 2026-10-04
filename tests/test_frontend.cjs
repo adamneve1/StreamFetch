@@ -59,6 +59,28 @@ function fixture() {
   return { context, get: id => ids.get(id), run: code => vm.runInContext(code, context) };
 }
 
+test('one transcript CTA follows all lifecycle states without provider details',()=>{
+  const f=fixture();
+  for(const [status,label,disabled] of [[undefined,'Generate Transcript',false],['queued','Waiting',true],['transcribing','Generating',true],['failed','Retry Transcript',false],['completed','View Transcript',false]]){
+    f.context.rows=[{job_id:'transcript',state:'ready',filename:'video.mp4',transcript:{status,progress_percent:42,eta_seconds:125,model:'technical-model',provider:'cloudflare'}}];
+    f.run('renderHistory(rows)');
+    const box=f.get('results').querySelector('.transcript-box');
+    assert.equal(box.querySelectorAll('.transcript-cta').length,1);
+    assert.equal(box.querySelector('.transcript-cta').textContent,label);
+    assert.equal(box.querySelector('.transcript-cta').disabled,disabled);
+    assert.doesNotMatch(box.textContent,/cloudflare|technical-model|chunk/i);
+    if(status==='transcribing'){assert.match(box.textContent,/42%.*About 3 min/);assert.equal(box.querySelector('progress').value,42);}
+    if(status==='completed')assert.equal(box.querySelector('a').href,'/api/recordings/transcript/transcript/view');
+  }
+});
+test('ETA is rounded, ages from its last update, and handles legacy missing estimates',()=>{
+  const f=fixture();
+  assert.equal(f.run('transcriptETA({})'),'Estimating time…');
+  assert.equal(f.run('transcriptETA({eta_seconds:59})'),'Less than a minute remaining');
+  assert.equal(f.run('transcriptETA({eta_seconds:61})'),'About 2 min remaining');
+  assert.equal(f.run('transcriptETA({eta_seconds:120,updated_at:Date.now()/1000-100})'),'Less than a minute remaining');
+});
+
 test('download progress shows the real track and attempt, and resets when unknown', () => {
   const f = fixture();
   f.run(`renderDownloadProgress({source:'youtube',is_live:false,state:'recording',progress_phase:'audio',progress_percent:42.5,download_attempt:2,download_attempts:3})`);

@@ -36,6 +36,33 @@ class FakeModel:
 
 
 class TranscriptionWorkerTests(unittest.TestCase):
+    def test_local_progress_estimates_from_segment_positions(self):
+        updates = []
+        segments = [SimpleNamespace(start=0, end=50, text='Speech'),
+                    SimpleNamespace(start=50, end=100, text='More speech')]
+        info = SimpleNamespace(duration=100, language='id')
+        with patch.object(transcription_worker.time, 'monotonic', side_effect=[10, 20, 30]):
+            transcription_worker.normalize_local_result(
+                (iter(segments), info), lambda percent, eta: updates.append((percent, eta)))
+        self.assertEqual(updates, [(0, 50), (47.5, 10), (95, 0)])
+
+    def test_fallback_resets_cloud_progress_and_estimate(self):
+        def cloud(path, event, progress):
+            progress(60, 15)
+            raise transcription_worker.CloudflareRetryableError('Temporary unavailable')
+
+        original = storage.save_transcription_state
+        with patch.dict(os.environ, TRANSCRIPTION_PROVIDER='auto'), \
+                patch.object(transcription_worker, 'transcribe_cloudflare', side_effect=cloud), \
+                patch.object(storage, 'save_transcription_state', wraps=original) as save:
+            transcription_worker.transcribe({'job_id': 'video-job'}, FakeModel())
+        updates = [call.kwargs for call in save.call_args_list
+                   if 'progress_percent' in call.kwargs]
+        self.assertTrue(any(update['progress_percent'] == 0 and
+                            update['eta_seconds'] is None for update in updates[1:]))
+        self.assertEqual(updates[-1]['progress_percent'], 100)
+        self.assertEqual(storage.recording('video-job')['transcript']['model'], 'small')
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.env = patch.dict(os.environ, DATA_DIR=self.tmp.name,
@@ -63,7 +90,8 @@ class TranscriptionWorkerTests(unittest.TestCase):
             transcription_worker.transcribe({'job_id': 'video-job'}, FakeModel())
 
         statuses = [call.args[1] for call in save.call_args_list]
-        self.assertEqual(statuses, ['transcribing', 'completed'])
+        self.assertEqual(statuses[-1], 'completed')
+        self.assertTrue(all(status == 'transcribing' for status in statuses[:-1]))
         transcript = storage.recording('video-job')['transcript']
         self.assertEqual(transcript['status'], 'completed')
         self.assertEqual(transcript['language'], 'id')
@@ -229,9 +257,15 @@ class CloudflareTranscriptionTests(unittest.TestCase):
                              return_value=chunks), \
                 patch.object(transcription_worker, 'cloudflare_request',
                              side_effect=request):
-            segments, _ = transcription_worker.transcribe_cloudflare(self.media)
+            progress = []
+            segments, _ = transcription_worker.transcribe_cloudflare(
+                self.media, progress=lambda percent, eta: progress.append((percent, eta)))
         self.assertEqual(maximum, 2)
         self.assertEqual(len(segments), 7)
+        self.assertEqual(len(progress), 8)
+        self.assertEqual(progress[0][0], 0)
+        self.assertEqual(progress[-1], (95, 0))
+        self.assertTrue(all(a[0] <= b[0] for a, b in zip(progress, progress[1:])))
 
     def _assert_transient_falls_back(self, error):
         model = FakeModel()
