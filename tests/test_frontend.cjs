@@ -133,7 +133,7 @@ test('history keeps expanded errors and selection through refresh without interp
     detail: '<script>alert(1)</script>\n' + 'Arsip live belum siap. '.repeat(15) }];
   f.run('historyRows=rows; renderHistory(rows)');
   const table = f.get('results');
-  assert.equal(table.children[0].children.length, 7);
+  assert.equal(table.children[0].children.length, 6);
   assert.equal(table.querySelector('.status-badge').dataset.tone, 'error');
   assert.equal(table.querySelector('.preset-badge').textContent, 'Hemat');
   assert.equal(table.querySelector('.recording-detail-body').children[0].textContent, f.context.rows[0].detail);
@@ -252,7 +252,7 @@ test('Admin navigation separates advanced controls and returning preserves the c
   await f.run('enter({is_admin:true})');assert.equal(f.get('admin-panel').hidden,false);
   f.run('showLogin()');assert.equal(f.get('control-room').hidden,false);assert.equal(f.get('capture-content').hidden,false);
 });
-test('Control Room markup places History immediately after Source and configuration only in Admin',()=>{
+test('workspace markup places History immediately after Source and configuration only in Admin',()=>{
   const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
   assert.match(html,/<\/div><\/section>\s*<section id="history-panel"/);
   const control=html.slice(html.indexOf('<section id="control-room"'),html.indexOf('<section id="admin-view"'));
@@ -260,4 +260,44 @@ test('Control Room markup places History immediately after Source and configurat
   for(const id of ['capture-panel','quality','media-format','compression','storage-target','history-panel','status-monitor','stop','marker-controls'])assert.ok(control.includes('id="'+id+'"'),id);
   for(const id of ['password-form','source-form','disk-meter']){assert.ok(admin.includes('id="'+id+'"'));assert.ok(!control.includes('id="'+id+'"'));}
   assert.ok(admin.includes('TRANSCRIPTION_PROVIDER'));assert.ok(!control.includes('TRANSCRIPTION_PROVIDER'));
+});
+
+test('StreamFetch branding retains the existing mark and removes old user-facing names',()=>{
+  const root=path.resolve(__dirname,'../app/static');
+  for(const file of ['index.html','transcript.html']){
+    const html=fs.readFileSync(path.join(root,file),'utf8');
+    assert.doesNotMatch(html,/Grabby|GRABBY|Control Room|TikTok Live/);
+    assert.match(html,/<img class="brand-logo" src="\/static\/favicon.svg" alt=""><strong>StreamFetch<\/strong>/);
+  }
+  const f=fixture();f.run("showSection('control')");assert.equal(f.get('page-title').textContent,'StreamFetch');
+  f.run("showSection('admin')");assert.equal(f.get('page-title').textContent,'Admin');
+});
+test('segmented sources preserve mode behavior and expose the selected state accessibly',()=>{
+  const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
+  assert.ok(html.indexOf('id="tab-youtube"')<html.indexOf('id="tab-tiktok"'));
+  assert.ok(html.indexOf('id="tab-tiktok"')<html.indexOf('id="tab-oryx"'));
+  const f=fixture();
+  for(const source of ['youtube','tiktok','oryx']){
+    f.run(`setMode('${source}')`);
+    for(const tab of ['youtube','tiktok','oryx'])assert.equal(f.get('tab-'+tab).attributes['aria-pressed'],String(tab===source));
+    assert.equal(f.get(source+'-fields').hidden,false);
+  }
+  assert.equal(f.run("sourceDisplayName({source:'tiktok',source_name:'TikTok Live'})"),'TikTok');
+  assert.equal(f.run("sourceDisplayName({source:'oryx',source_name:'PRO 2 RRI BATAM'})"),'PRO 2 RRI BATAM');
+});
+test('compact jobs retain every state, title, full diagnostics, metadata and secondary stop control',()=>{
+  const f=fixture();
+  for(const state of ['starting','recording','waiting','stopping','finalizing','ready','failed','interrupted']){
+    f.context.rows=[{job_id:'job',state,source:'tiktok',source_name:'TikTok Live',note:'Dialog Batam',detail:'Detail lengkap',filename:state==='ready'?'dialog.mp4':undefined}];
+    f.run('renderHistory(rows);active=rows[0];renderOperationalStatus()');
+    assert.equal(f.get('results').querySelector('.recording-heading').querySelector('.status-badge').textContent,f.run('jobStateName(rows[0])'));
+    assert.equal(f.get('status-job-title').textContent,state==='ready'?'dialog.mp4':'Dialog Batam');
+    assert.equal(f.get('status-detail').textContent,'Detail lengkap');
+    assert.equal(f.get('active-source').textContent,'TikTok');
+  }
+  const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8');
+  assert.match(css,/\.workspace-page #status-monitor\{width:fit-content;max-width:100%/);
+  assert.match(css,/padding:10px 12px;border:1px solid #36363b;border-radius:12px/);
+  assert.match(css,/\.workspace-page #stop\{height:30px/);
+  assert.match(css,/\.workspace-page #capture-panel \.capture-options \.form-grid\{display:contents\}/);
 });

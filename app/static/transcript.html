@@ -10,11 +10,12 @@
   <script src="/static/transcript.js" defer></script>
 </head>
 <body>
-  <header><a class="brand" href="/"><strong>Stream<span>Fetch</span></strong></a><a class="reader-back" href="/">← Control Room</a></header>
+  <header><a class="brand" href="/"><img class="brand-logo" src="/static/favicon.svg" alt=""><strong>StreamFetch</strong></a><a class="reader-back" href="/">← Workspace</a></header>
   <main class="reader-shell">
     <p class="eyebrow">TRANSCRIPT READER</p>
     <p id="reader-status" role="status" aria-live="polite">Memuat transkrip…</p>
-    <div id="reader-content" hidden>
+    <div id="reader-content" class="reader-workspace" hidden>
+      <aside class="reader-sidebar" aria-label="Video and program">
       <section id="reader-player" class="reader-player" aria-label="YouTube video" hidden>
         <div id="youtube-player"></div>
       </section>
@@ -24,7 +25,9 @@
         <dl id="program-info"></dl>
         <details id="full-description"><summary>Full Description</summary><p id="reader-source" class="muted"></p><pre id="source-description"></pre></details>
       </section>
+      </aside>
       <section class="panel reader-document" aria-label="Transcript">
+        <div class="reader-tools">
         <div class="reader-toolbar">
           <div class="reader-search">
             <label for="transcript-search">Search transcript</label>
@@ -34,11 +37,14 @@
           <div class="reader-display"><label for="timestamp-mode">Timestamps</label><select id="timestamp-mode"><option value="none">None</option><option value="segment" selected>Segment</option><option value="subtitle">Subtitle</option></select></div>
         </div>
         <div class="reader-actions">
-          <button id="copy-info" class="secondary" type="button">Copy Info</button>
-          <button id="copy-transcript" class="secondary" type="button">Copy Transcript</button>
-          <button id="copy-all" class="secondary" type="button">Copy All</button>
-          <nav id="transcript-exports" aria-label="Export transcript"></nav>
-          <label class="reader-raw-toggle"><input id="raw-view" type="checkbox"> Raw view</label>
+          <details class="reader-menu"><summary>Copy</summary><div class="reader-menu-content">
+            <button id="copy-transcript" class="secondary" type="button">Copy Transcript</button>
+            <button id="copy-info" class="secondary" type="button">Copy Info</button>
+            <button id="copy-all" class="secondary" type="button">Copy All</button>
+          </div></details>
+          <details id="reader-export-menu" class="reader-menu" hidden><summary>Export</summary><nav id="transcript-exports" class="reader-menu-content" aria-label="Export transcript"></nav></details>
+          <details class="reader-menu reader-more"><summary>More</summary><div class="reader-menu-content"><label class="reader-raw-toggle"><input id="raw-view" type="checkbox"> Raw view</label></div></details>
+        </div>
         </div>
         <article id="transcript-text" class="reader-prose" aria-label="Transcript text"></article>
       </section>

@@ -13,6 +13,15 @@ test('timestamp modes format the same immutable segments',()=>{
   assert.equal(reader.timestampLabel({start:null,end:null},'subtitle'),'');
   assert.equal(JSON.stringify(segments),original);
 });
+test('compact display timestamps preserve hour boundaries and original copy format',()=>{
+  for(const [seconds,label] of [[0,'00:00'],[65,'01:05'],[3599,'59:59'],[3600,'1:00:00'],[3665,'1:01:05'],[36000,'10:00:00']]){
+    assert.equal(reader.readerDisplayTimestamp(seconds),label);
+  }
+  assert.equal(reader.timestampLabel(segments[0],'subtitle',true),'00:01.250 → 00:02.500');
+  assert.equal(reader.timestampLabel(segments[1],'segment',true),'01:05');
+  assert.equal(reader.timestampLabel(segments[0],'none',true),'');
+  assert.equal(reader.formatTranscript(segments,'segment'),'[00:00:01]\nHalo dunia\n\n[00:01:05]\nSelamat pagi');
+});
 test('copy formatting keeps info, roles and transcript separate',()=>{
   const info={program:'Dialog',date_time:'4 Oktober',theme:'Pendidikan',guests:[{name:'Rina',role:'Dosen'}],presenter:'Sari'};
   assert.equal(reader.formatInfo(info),'Program: Dialog\nDate/Time: 4 Oktober\nTheme: Pendidikan\nGuests / Narasumber: Rina — Dosen\nPresenter: Sari');
@@ -66,6 +75,7 @@ test('YouTube timestamp seeks the single player including clicks before readines
   assert.equal(options.playerVars.origin,'https://streamfetch.example');
   assert.equal(f.get('reader-player').hidden,false);
   const buttons=descendants(f.get('transcript-text')).filter(node=>node.className==='reader-timestamp');
+  assert.equal(buttons[0].textContent,'00:01');assert.equal(buttons[1].textContent,'01:05');
   buttons[0].listeners.click();assert.equal(seeks.length,0);
   options.events.onReady();assert.deepEqual(seeks,[[1.25,true]]);
   buttons[1].listeners.click();assert.deepEqual(seeks.at(-1),[65,true]);
@@ -133,4 +143,32 @@ test('secondary and unknown sections stay out of compact metadata and raw descri
 test('desktop player sizing is capped and centered without changing the 16:9 embed',()=>{
   const css=fs.readFileSync(require.resolve('../app/static/transcript.css'),'utf8');
   assert.match(css,/\.reader-shell \.reader-player\{max-width:680px;width:100%;margin:8px auto 12px;aspect-ratio:16\/9\}/);
+});
+test('reader workspace separates sticky sidebar from sticky tools and stacks on tablet',()=>{
+  const html=fs.readFileSync(require.resolve('../app/static/transcript.html'),'utf8');
+  const css=fs.readFileSync(require.resolve('../app/static/transcript.css'),'utf8');
+  const sidebar=html.slice(html.indexOf('<aside'),html.indexOf('</aside>'));
+  const tools=html.slice(html.indexOf('<div class="reader-tools">'),html.indexOf('<article'));
+  for(const id of ['reader-player','reader-title','program-info','full-description'])assert.ok(sidebar.includes('id="'+id+'"'));
+  for(const id of ['transcript-search','timestamp-mode','copy-transcript','copy-info','copy-all','transcript-exports','raw-view'])assert.ok(tools.includes('id="'+id+'"'));
+  assert.match(css,/grid-template-columns:minmax\(0,38fr\) minmax\(0,62fr\)/);
+  assert.match(css,/\.reader-sidebar\{position:sticky;top:16px/);
+  assert.match(css,/\.reader-tools\{position:sticky;top:16px/);
+  assert.match(css,/@media\(max-width:1000px\)\{\.reader-workspace\{grid-template-columns:minmax\(0,1fr\)/);
+  assert.match(css,/\.reader-sidebar\{position:static;max-height:none;overflow:visible\}/);
+  assert.match(css,/user-select:text/);
+  assert.match(css,/\.reader-segment\+\.reader-segment\{border-top:0\}/);
+  assert.match(html,/<summary>More<\/summary>.*id="raw-view"/);
+});
+test('non-YouTube timestamps remain readable, exports omit absent files, and display changes make no requests',async()=>{
+  const f=await fixture({info:{program:'Radio',guests:[]},segments:[{start:3665,end:3669,text:'Siaran panjang'}],raw:'TXT',exports:[]});
+  assert.equal(f.get('transcript-text').children[0].children[0].textContent,'1:01:05');
+  assert.equal(f.get('transcript-text').children[0].children[0].listeners.click,undefined);
+  assert.equal(f.get('reader-export-menu').hidden,true);
+  assert.equal(f.head.children.length,0);
+  f.get('timestamp-mode').value='subtitle';f.get('timestamp-mode').listeners.change();
+  assert.match(f.get('transcript-text').textContent,/1:01:05.000 → 1:01:09.000/);
+  f.get('timestamp-mode').value='none';f.get('timestamp-mode').listeners.change();
+  assert.equal(f.get('transcript-text').textContent,'Siaran panjang');
+  assert.equal(f.requests.length,1);
 });

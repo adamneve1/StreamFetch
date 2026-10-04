@@ -6,10 +6,16 @@ function readerTimestamp(seconds, subtitle=false){
   const value=[h,m,s].map(n=>String(n).padStart(2,'0')).join(':');
   return subtitle?value+'.'+String(milliseconds%1000).padStart(3,'0'):value;
 }
-function timestampLabel(segment,mode){
+function readerDisplayTimestamp(seconds,subtitle=false){
+  const parts=readerTimestamp(seconds,subtitle).split(':');
+  const hours=Number(parts.shift());
+  return (hours?hours+':':'')+parts.join(':');
+}
+function timestampLabel(segment,mode,compact=false){
   if(mode==='none'||!Number.isFinite(segment.start))return '';
-  if(mode==='subtitle')return readerTimestamp(segment.start,true)+' → '+readerTimestamp(segment.end,true);
-  return readerTimestamp(segment.start);
+  const format=compact?readerDisplayTimestamp:readerTimestamp;
+  if(mode==='subtitle')return format(segment.start,true)+' → '+format(segment.end,true);
+  return format(segment.start);
 }
 function formatInfo(info){
   const guests=(info.guests||[]).map(guest=>guest.role?guest.name+' — '+guest.role:guest.name).join('\n');
@@ -33,7 +39,7 @@ function seekTranscript(player,seconds){
   player.seekTo(seconds,true);return true;
 }
 
-if(typeof module!=='undefined')module.exports={readerTimestamp,timestampLabel,formatInfo,formatTranscript,findMatches,nextMatchIndex,seekTranscript};
+if(typeof module!=='undefined')module.exports={readerTimestamp,readerDisplayTimestamp,timestampLabel,formatInfo,formatTranscript,findMatches,nextMatchIndex,seekTranscript};
 if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',async()=>{
   const $=id=>document.getElementById(id);
   const status=$('reader-status'),content=$('reader-content'),article=$('transcript-text');
@@ -82,7 +88,7 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
     }else{
       for(const segment of data.segments){
         const row=document.createElement('section');row.className='reader-segment';
-        const label=timestampLabel(segment,mode);
+        const label=timestampLabel(segment,mode,true);
         if(label){
           const timestamp=document.createElement(data.youtube_id?'button':'time');timestamp.textContent=label;
           if(data.youtube_id){timestamp.type='button';timestamp.className='reader-timestamp';timestamp.setAttribute('aria-label','Seek to '+label);timestamp.addEventListener('click',()=>seek(segment.start));}
@@ -120,6 +126,7 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
     initPlayer(data.youtube_id);
     showInfo(data.info);
     for(const kind of data.exports){const link=document.createElement('a');link.href=base+'/'+kind;link.textContent='Export '+kind.toUpperCase();$('transcript-exports').append(link);}
+    $('reader-export-menu').hidden=!data.exports.length;
     if(!data.segments.some(segment=>Number.isFinite(segment.start))){$('timestamp-mode').value='none';$('timestamp-mode').disabled=true;}
     $('timestamp-mode').addEventListener('change',()=>render());
     $('raw-view').addEventListener('change',()=>{render(true);$('timestamp-mode').disabled=$('raw-view').checked||!data.segments.some(segment=>Number.isFinite(segment.start));});

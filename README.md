@@ -100,6 +100,9 @@ YouTube → StreamFetch → yt-dlp → MP4 / MP3
   klik timestamp untuk seek. Sumber lain atau rekaman lama tanpa ID tetap
   menampilkan transkrip tanpa player. Metadata sekunder dan deskripsi asli
   tersedia di Full Description.
+- Desktop memakai dua kolom: video/metadata sticky di kiri dan transkrip dengan
+  search/toolbar sticky di kanan. Tablet/mobile kembali ke satu kolom.
+  Timestamp tampilan memakai MM:SS atau H:MM:SS; format copy/export tetap sama.
 - Deskripsi YouTube lengkap disimpan saat download baru dan menjadi sumber
   metadata berlabel (Program, Tanggal/Jam, Tema, Narasumber, Presenter).
   Rekaman lama tanpa deskripsi tetap dapat dibaca; fakta yang tidak tersedia
