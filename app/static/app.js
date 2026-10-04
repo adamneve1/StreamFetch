@@ -1,4 +1,5 @@
 const $ = id => document.getElementById(id);
+const motion=window.StreamFetchMotion;
 let csrf='', isAdmin=false, mode='oryx', sources=[], editing='', active=null, online=false, queued=0, pending=false, disk=null, archiveEnabled=false, historyRows=[], refreshId=0, estimateId=0, estimateTimer, lastObservedJob=null;
 let focusedJobId=null, submittedJob=null, focusPending=false;
 const expandedHistoryDetails=new Set();
@@ -11,10 +12,13 @@ function showSection(section){
  }
  closeActionMenu();
 }
-function collapseSource(collapsed){
- $('capture-panel').dataset.collapsed=String(collapsed);
- $('capture-content').hidden=collapsed;$('capture-another').hidden=!collapsed;
- $('capture-another').setAttribute('aria-expanded',String(!collapsed));
+function collapseSource(collapsed,options={}){
+ const change=()=>{
+  $('capture-panel').dataset.collapsed=String(collapsed);
+  $('capture-content').hidden=collapsed;$('capture-another').hidden=!collapsed;
+  $('capture-another').setAttribute('aria-expanded',String(!collapsed));
+ };
+ if(motion)motion.source($('capture-panel'),collapsed,change,options);else change();
 }
 function captureSubmitted(result,payload){
  focusedJobId=result.job_id;focusPending=true;
@@ -22,14 +26,18 @@ function captureSubmitted(result,payload){
   quality:payload.quality,output_format:payload.format,compression:payload.compression,
   storage:payload.storage,requested_at:Date.now()/1000,state:'starting',
   detail:'Capture diterima. Menunggu worker…'};
+ // Create/focus the new row immediately; motion never gates publication or polling.
+ showSection('control');
+ renderHistory([submittedJob,...historyRows.filter(row=>row.job_id!==focusedJobId)]);
+ renderOperationalStatus();
+ const job=$('results').children[0];
+ collapseSource(true,{accepted:true,job});
  if(payload.source==='youtube')$('youtube-url').value='';
  if(payload.source==='tiktok')$('tiktok-url').value='';
  if(payload.source==='instagram')$('instagram-url').value='';
  clearTimeout(estimateTimer);estimateId++;
  $('size-estimate').textContent='Pilih sumber dulu untuk melihat perkiraan ukurannya.';
  for(const id of ['filter-q','filter-source','filter-state','filter-date'])$(id).value='';
- showSection('control');collapseSource(true);
- renderHistory([submittedJob,...historyRows.filter(row=>row.job_id!==focusedJobId)]);
  $('empty').hidden=true;
 }
 async function api(path, data){
@@ -48,8 +56,8 @@ async function api(path, data){
  return result;
 }
 function notice(text){$('notice').textContent=text;$('notice').hidden=!text;}
-function showLogin(){$('workspace').hidden=true;$('login').hidden=false;csrf='';isAdmin=false;active=null;lastObservedJob=null;focusedJobId=null;submittedJob=null;focusPending=false;collapseSource(false);showSection('control');expandedHistoryDetails.clear();}
-function controls(){const canMark=!!active&&active.state==='recording'&&active.is_live!==false;$('marker-controls').hidden=!canMark;$('mark').disabled=pending||!canMark;$('record').disabled=pending||!online||!disk?.can_record||!!active||queued>0||(mode==='oryx'&&!$('source').value);$('stop').disabled=pending||!active||['finalizing','stopping','ready','failed'].includes(active.state);renderOperationalStatus();}
+function showLogin(){const returning=$('login').hidden;if(returning)motion?.reset();$('workspace').hidden=true;$('login').hidden=false;csrf='';isAdmin=false;active=null;lastObservedJob=null;focusedJobId=null;submittedJob=null;focusPending=false;collapseSource(false);showSection('control');expandedHistoryDetails.clear();if(returning)motion?.loginReveal?.($('login'));$('password').focus({preventScroll:true});}
+function controls(){const canMark=!!active&&active.state==='recording'&&active.is_live!==false;$('mark').disabled=pending||!canMark;$('record').disabled=pending||!online||!disk?.can_record||!!active||queued>0||(mode==='oryx'&&!$('source').value);$('stop').disabled=pending||!active||['finalizing','stopping','ready','failed'].includes(active.state);renderOperationalStatus();}
 function bytes(n=0){return n>=1e9?(n/1e9).toFixed(2)+' GB':(n/1e6).toFixed(1)+' MB';}
 function stateName(state){return ({starting:'Menghubungkan',recording:'Berjalan',waiting:'Menunggu YouTube',stopping:'Menghentikan',finalizing:'Memproses',ready:'Siap',failed:'Gagal',interrupted:'Terputus'})[state]||state||'Siap';}
 function isFiniteDownload(job){return ['youtube','tiktok','instagram'].includes(job?.source)&&job.is_live===false;}
@@ -61,7 +69,7 @@ function duration(n=0){return [Math.floor(n/3600),Math.floor(n/60)%60,Math.floor
 function transcriptStateName(state){return ({queued:'Queued',transcribing:'Transcribing',completed:'Completed',failed:'Failed'})[state]||state;}
 function languageName(code){if(!code)return '—';try{const name=new Intl.DisplayNames(['id'],{type:'language'}).of(code);return name.charAt(0).toUpperCase()+name.slice(1);}catch{return code;}}
 function processingTime(seconds){if(seconds===undefined||seconds===null)return '—';const value=Math.round(seconds);return value>=60?Math.floor(value/60)+'m '+value%60+'s':value+'s';}
-async function generateTranscript(row){try{await api('recordings/'+encodeURIComponent(row.job_id)+'/transcript',{});notice('Transkrip masuk antrean. Statusnya akan diperbarui otomatis.');await refresh();}catch(error){notice(error.message);}}
+async function generateTranscript(row){try{await api('recordings/'+encodeURIComponent(row.job_id)+'/transcript',{});lastObservedJob={...row,transcript:{...row.transcript,status:'queued'}};renderOperationalStatus();notice('Transkrip masuk antrean. Statusnya akan diperbarui otomatis.');await refresh();}catch(error){notice(error.message);}}
 function transcriptLink(row,kind,label){const link=document.createElement('a');link.href='/api/recordings/'+encodeURIComponent(row.job_id)+'/transcript/'+kind;link.textContent=label;if(kind==='view'){link.target='_blank';link.rel='noopener';}return link;}
 function transcriptETA(transcript){
  if(!Number.isFinite(transcript.eta_seconds))return 'Estimating time…';
@@ -94,19 +102,28 @@ function renderDownloadProgress(job){
  const download=isFiniteDownload(job);
  const visible=download&&['starting','recording','waiting','finalizing'].includes(job.state);
  $('download-progress').hidden=!visible;
- if(!visible)return;
+ if(!visible){motion?.progress($('progress-bar'),null);return;}
  const phase=({video:'Mengunduh video',audio:'Mengunduh audio',media:'Mengunduh video dan audio'})[job.progress_phase]||'Mengunduh';
  const label=job.state==='waiting'?'Menunggu YouTube':job.state==='starting'?'Menyiapkan download':job.state==='finalizing'?'Menggabungkan dan memproses':phase;
  const attempt=job.download_attempt?' · Percobaan '+job.download_attempt+(job.download_attempts?'/'+job.download_attempts:''):'';
  $('progress-label').textContent=label+attempt;
  const percent=job.state==='recording'&&typeof job.progress_percent==='number'&&Number.isFinite(job.progress_percent)?Math.min(100,Math.max(0,job.progress_percent)):null;
- if(percent===null){$('progress-bar').removeAttribute('value');$('progress-value').textContent='';}
- else{$('progress-bar').value=percent;$('progress-value').textContent=percent.toFixed(1)+'%';}
+ if(motion)motion.progress($('progress-bar'),percent);
+ else if(percent===null)$('progress-bar').removeAttribute('value');else $('progress-bar').value=percent;
+ $('progress-value').textContent=percent===null?'':percent.toFixed(1)+'%';
  $('progress-bar').setAttribute('aria-label',label);
 }
 function renderOperationalStatus(){
- const job=active||lastObservedJob,connection=$('connection');
- $('status-monitor').hidden=!job&&!queued;
+ const job=active||submittedJob||lastObservedJob,connection=$('connection');
+ const transcript=job?.state==='ready'?job.transcript:null;
+ const phase=transcript?.status==='transcribing'?'transcribing':transcript?.status==='queued'?'queued':transcript?.status==='failed'?'failed':
+  ({starting:'queued',waiting:'queued',recording:'downloading',stopping:'processing',finalizing:'processing',ready:'completed',failed:'failed',interrupted:'failed'})[job?.state]||(queued?'queued':'hidden');
+ const canStop=!!active&&!['finalizing','stopping','ready','failed'].includes(active.state);
+ const canMark=!!active&&active.state==='recording'&&active.is_live!==false;
+ const change=()=>{
+ $('status-monitor').hidden=phase==='hidden';
+ $('status-monitor').dataset.phase=phase;
+ $('stop').hidden=!canStop;$('marker-controls').hidden=!canMark;
  connection.textContent=online?'Online':'Offline';connection.classList.toggle('online',online);connection.classList.toggle('offline',!online);
  connection.title=online?'Sistem siap':'Sistem offline';connection.setAttribute('aria-label',connection.title);
  $('status-monitor').dataset.tone=statusTone(job?.state);
@@ -120,7 +137,25 @@ function renderOperationalStatus(){
  $('size').textContent=bytes(job?.size);
  $('active-source').textContent=job?sourceDisplayName(job)+(job.origin?' · '+(job.origin==='web'?'Web':'Telegram'):''):'';
  $('queue').textContent=queued?queued+' antrean':'';$('monitor-footer').hidden=!job&&!queued;
- renderDownloadProgress(job);
+ if(!job&&queued){$('state').textContent='Menunggu';$('status-detail').textContent='Capture menunggu worker…';}
+ if(!transcript||!['queued','transcribing'].includes(transcript.status))renderDownloadProgress(job);
+ if(transcript&&['queued','transcribing'].includes(transcript.status)){
+  $('state').textContent=transcript.status==='queued'?'Waiting':'Generating';
+  $('state').dataset.tone='working';$('status-monitor').dataset.tone='working';
+  $('status-detail').textContent=transcript.status==='queued'?'Waiting in queue':transcriptETA(transcript);
+  $('download-progress').hidden=false;$('progress-label').textContent='Transcript';
+  $('progress-bar').setAttribute('aria-label','Transcript progress');
+  const percent=transcript.status==='transcribing'&&Number.isFinite(transcript.progress_percent)?Math.min(100,Math.max(0,transcript.progress_percent)):null;
+  if(motion)motion.progress($('progress-bar'),percent);else if(percent!==null)$('progress-bar').value=percent;else $('progress-bar').removeAttribute('value');
+  $('progress-value').textContent=percent===null?'':Math.round(percent)+'%';
+ }else if(transcript?.status==='failed'){
+  $('state').textContent='Failed';$('state').dataset.tone='error';$('status-monitor').dataset.tone='error';
+  $('status-detail').textContent=transcript.error||'Transcription failed';
+ }
+ };
+ // Percent/ETA/detail changes aren't structural and never start a new Flip.
+ const key=[job?.job_id||'queue',job?.state,transcript?.status,canStop,canMark].join(':');
+ if(motion)motion.island($('status-monitor'),key,phase,change);else change();
 }
 function editSource(id){editing=id;const s=sources.find(x=>x.id===id);$('source-name').value=s?.name||'';$('source-url').value=s?.url||'';$('source-feedback').textContent='';}
 async function loadSources(){const previous=$('source').value; sources=(await api('sources')).sources;$('source').replaceChildren();for(const s of sources){const o=document.createElement('option');o.value=s.id;o.textContent=s.name;$('source').append(o);}if(!sources.length){const o=document.createElement('option');o.value='';o.textContent='Belum ada sumber — tambahkan dulu';$('source').append(o);}if(sources.some(x=>x.id===previous))$('source').value=previous;editSource($('source').value);scheduleEstimate();controls();}
@@ -191,7 +226,7 @@ function renderHistory(rows){
    trigger.title='Aksi lainnya';trigger.onclick=()=>toggleActionMenu(trigger,row);action.append(trigger);
   }
   tr.append(action);$('results').append(tr);
-  if(row.job_id===focusedJobId&&focusPending){tr.focus({preventScroll:true});tr.scrollIntoView({behavior:'smooth',block:'center'});focusPending=false;}
+  if(row.job_id===focusedJobId&&focusPending){tr.focus({preventScroll:true});tr.scrollIntoView({behavior:motion?.reduced()?'auto':'smooth',block:'center'});focusPending=false;}
  }
  updateDeleteControls();
 }
@@ -220,7 +255,7 @@ async function refresh(){
   }
   if(!active&&lastObservedJob){
    let finished=rows.find(row=>row.job_id===lastObservedJob.job_id);
-   if(!finished&&filtered&&!['ready','failed','interrupted'].includes(lastObservedJob.state)){
+   if(!finished&&filtered&&(!['ready','failed','interrupted'].includes(lastObservedJob.state)||['queued','transcribing'].includes(lastObservedJob.transcript?.status))){
     // Monitor completion must not depend on the user's history filters.
     const all=await api('recordings?');if(revision!==refreshId)return;
     finished=all.recordings.find(row=>row.job_id===lastObservedJob.job_id);
@@ -235,19 +270,23 @@ async function refresh(){
   closeActionMenu();renderHistory(rows);
  }catch(error){online=false;controls();notice(error.message);}
 }
-async function enter(auth){isAdmin=!!auth?.is_admin;$('login').hidden=true;$('workspace').hidden=false;$('role-badge').textContent=isAdmin?'Admin':'Pengguna';$('admin-panel').hidden=!isAdmin;$('delete-selected').hidden=!isAdmin;updateFormatControls();await loadSources();await refresh();}
-$('login-form').onsubmit=async e=>{e.preventDefault();try{const auth=await api('login',{password:$('password').value});csrf=auth.csrf;$('password').value='';$('login-error').textContent='';await enter(auth);}catch(err){$('login-error').textContent=err.message;}};
+async function enter(auth){isAdmin=!!auth?.is_admin;$('login').hidden=true;$('workspace').hidden=false;motion?.loginSuccess?.($('workspace'));$('role-badge').textContent=isAdmin?'Admin':'Pengguna';$('admin-panel').hidden=!isAdmin;$('delete-selected').hidden=!isAdmin;updateFormatControls();await loadSources();await refresh();}
+let loginBusy=false;
+function loginLoading(busy){loginBusy=busy;$('login-form').setAttribute('aria-busy',String(busy));$('login-submit').disabled=busy;$('login-submit').textContent=busy?'Masuk…':'Masuk';}
+$('login-form').onsubmit=async e=>{e.preventDefault();if(loginBusy)return;loginLoading(true);$('login-error').textContent='';$('password').removeAttribute('aria-invalid');try{const auth=await api('login',{password:$('password').value});csrf=auth.csrf;$('password').value='';await enter(auth);}catch(err){$('login-error').textContent=err.message;$('password').setAttribute('aria-invalid','true');motion?.loginError?.($('login-error'));$('password').focus({preventScroll:true});}finally{loginLoading(false);}};
+$('password').oninput=()=>{$('password').removeAttribute('aria-invalid');$('login-error').textContent='';};
 $('logout').onclick=async()=>{try{await api('logout',{});showLogin();}catch(e){notice(e.message);}};
 $('nav-control').onclick=()=>showSection('control');$('nav-admin').onclick=()=>showSection('admin');
 $('capture-another').onclick=()=>{collapseSource(false);sourceInput().focus();};
 $('tab-instagram').onclick=()=>setMode('instagram');$('tab-tiktok').onclick=()=>setMode('tiktok');$('tab-oryx').onclick=()=>setMode('oryx');$('tab-youtube').onclick=()=>setMode('youtube');$('source').onchange=()=>{editSource($('source').value);scheduleEstimate();controls();};$('new-source').onclick=()=>{$('source-manager').open=true;editSource('');$('source-name').focus();};
 $('source-form').onsubmit=async e=>{e.preventDefault();try{const saved=await api('sources',{id:editing,name:$('source-name').value,url:$('source-url').value});await loadSources();$('source').value=saved.id;editSource(saved.id);$('source-feedback').textContent='Sip, sumbernya sudah tersimpan dan siap dipakai.';controls();}catch(err){$('source-feedback').textContent=err.message;}};
 $('check').onclick=async()=>{$('check').disabled=true;$('source-feedback').textContent='Lagi mencoba terhubung…';try{const result=await api('check',{url:$('source-url').value});$('source-feedback').textContent='Berhasil tersambung · '+result.codecs.join(' / ');}catch(e){$('source-feedback').textContent=e.message;}finally{$('check').disabled=false;}};
-$('record').onclick=async()=>{pending=true;controls();notice('');const payload={source:mode,source_id:$('source').value,url:mode==='oryx'?'':sourceInput().value,note:$('note').value,storage:$('storage-target').value,quality:$('quality').value,format:$('media-format').value,compression:$('compression').value};try{const result=await api('record',payload);captureSubmitted(result,payload);await refresh();}catch(e){collapseSource(false);notice(e.message);}finally{pending=false;controls();}};
+$('record').onclick=async()=>{if(pending)return;pending=true;$('record').textContent='Mengirim…';$('capture-panel').setAttribute('aria-busy','true');controls();notice('');const payload={source:mode,source_id:$('source').value,url:mode==='oryx'?'':sourceInput().value,note:$('note').value,storage:$('storage-target').value,quality:$('quality').value,format:$('media-format').value,compression:$('compression').value};try{const result=await api('record',payload);captureSubmitted(result,payload);await refresh();}catch(e){collapseSource(false);notice(e.message);}finally{pending=false;$('record').textContent=mode==='youtube'?'Download':'Mulai';$('capture-panel').setAttribute('aria-busy','false');controls();}};
 $('storage-target').onchange=updateStorageHint;
 $('quality').onchange=scheduleEstimate;$('compression').onchange=()=>{updateCompressionHint();scheduleEstimate();};$('media-format').onchange=()=>{updateFormatControls();scheduleEstimate();};$('youtube-url').oninput=scheduleEstimate;$('tiktok-url').oninput=scheduleEstimate;$('instagram-url').oninput=scheduleEstimate;
 $('stop').onclick=async()=>{pending=true;controls();try{await api('stop',{job_id:active.job_id});notice('Lagi dihentikan. File-nya akan muncul sebentar lagi.');await refresh();}catch(e){notice(e.message);}finally{pending=false;controls();}};
 setInterval(()=>{const job=active||lastObservedJob;$('duration').textContent=duration(job?.state==='recording'&&job.started_at?Math.max(0,Date.now()/1000-job.started_at):job?.elapsed||0);},1000);
+motion?.loginReveal?.($('login'));
 (async()=>{try{const auth=await api('session');csrf=auth.csrf;await enter(auth);}catch{showLogin();}})();
 async function poll(){await refresh();setTimeout(poll,2500);}setTimeout(poll,2500);
 

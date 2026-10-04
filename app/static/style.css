@@ -236,3 +236,38 @@ footer{padding:18px 2px 4px}
  .app-header{grid-template-columns:minmax(0,1fr) auto auto;gap:2px;min-height:56px;padding:6px max(12px,env(safe-area-inset-right)) 6px max(12px,env(safe-area-inset-left));flex-wrap:nowrap}.app-header .brand{gap:6px}.app-header .brand-logo{width:24px;height:24px}.app-header .brand strong{font-size:14px}.app-header .workspace-nav{gap:0}.app-header .workspace-nav button,.app-header #logout{width:44px;min-height:44px;padding:12px}.app-header .workspace-nav .nav-label,.app-header .utility-label{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.app-header .workspace-nav [aria-current=page]::after{inset:auto 12px 3px}.header-utilities{gap:0}.app-header .connection-indicator{display:none}.app-header .reader-back{min-height:44px;padding:10px 6px;font-size:11px}
  .workspace-page #status-monitor{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:'state action' 'content content' 'metadata metadata' 'markers markers';gap:8px;padding:10px}.workspace-page #status-monitor>.panel-heading{align-self:center}.workspace-page #stop{min-height:44px;padding:9px 12px}.workspace-page #status-monitor .monitor-copy{max-width:100%}.workspace-page #status-job-title{font-size:13px}.workspace-page #status-monitor .metrics{width:auto}.workspace-page #status-monitor .metrics>div{display:flex;align-items:baseline;gap:5px}.workspace-page #status-monitor .monitor-metadata{gap:8px 12px}.workspace-page #capture-panel .tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));width:100%;gap:2px}.workspace-page #capture-panel .tab{min-width:0;min-height:44px;padding:8px 3px;font-size:11px}.workspace-page #capture-panel input,.workspace-page #capture-panel select,.workspace-page #record,.workspace-page .source-actions button,.workspace-page .history-toolbar button,.workspace-page .filters input,.workspace-page .filters select,.workspace-page .filters button{min-height:44px}.workspace-page #source-form{grid-template-columns:minmax(0,1fr)}.workspace-page .history-toolbar{margin-left:0}.workspace-page .history-heading{gap:8px}.workspace-page .system-settings{min-width:0}
 }
+/* Compact authentication composition, shared with the application shell. */
+.workspace-page .login-shell{min-height:100svh;min-height:100dvh;display:grid;place-items:center;align-items:safe center;padding:max(24px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left))}
+.workspace-page .login-card{width:100%;max-width:344px;min-width:0;margin:0;padding:28px;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 2px 12px #18292706}
+.workspace-page .login-brand{display:flex;align-items:center;gap:9px;margin:0 0 28px;color:var(--ink);font-size:18px;line-height:1.3;font-weight:650;letter-spacing:-.45px}.workspace-page .login-logo{width:30px;height:30px;border-radius:8px;flex:none}
+.workspace-page .login-card label{margin:0 0 6px;font-size:12px;line-height:1.4;font-weight:550;color:var(--ink)}.workspace-page .login-card input{display:block;width:100%;min-width:0;min-height:44px;padding:10px 12px;border-radius:8px;border-color:var(--line);font-size:16px;line-height:1.4;background:#fafafc}.workspace-page .login-card input:focus{background:#fff;outline:2px solid #629d45;outline-offset:2px}.workspace-page .login-card input[aria-invalid=true]{border-color:#b65e55;outline-color:#b65e55}
+.workspace-page .login-card button{display:flex;align-items:center;justify-content:center;width:100%;min-height:44px;margin:12px 0 0;padding:10px 14px;border:1px solid #b7db79;border-radius:8px;font-size:13px;font-weight:600;line-height:1.4;color:var(--deep);background:var(--green)}.workspace-page .login-card button:hover:not(:disabled){background:#b8e461;filter:none}.workspace-page .login-card button:active:not(:disabled){background:#add957}.workspace-page .login-card button:focus-visible{outline:2px solid #629d45;outline-offset:3px}.workspace-page .login-card button:disabled{cursor:wait;opacity:.7}
+.workspace-page #login-error{font-size:12px;line-height:1.5;color:#a54f40;overflow-wrap:anywhere;margin:14px 0 0}.workspace-page #login-error:empty{display:none}
+@media(max-width:480px){.workspace-page .login-card{padding:24px}.workspace-page .login-brand{margin-bottom:24px}}
+/* Wide Source cards keep a short, connected reading path through the form. */
+@media(min-width:1100px){
+ .workspace-page #capture-content{width:100%;max-width:1160px}
+ .workspace-page #capture-panel .source-field{max-width:760px}.workspace-page #capture-panel #oryx-fields{max-width:380px}
+ .workspace-page #capture-panel .capture-options{max-width:760px;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 20px}
+ .workspace-page #capture-panel #format-field{grid-column:1/-1;width:100%;max-width:calc((100% - 20px)/2)}
+ .workspace-page #capture-panel .capture-footer{max-width:760px;justify-content:flex-start;margin-top:16px;padding-top:12px;border-top:1px solid var(--line)}
+ .workspace-page #capture-panel #record{min-width:128px}
+}
+/* Only admission/island geometry is owned by Flip; ordinary controls stay CSS. */
+.workspace-page #capture-panel{position:relative}
+.workspace-page #capture-panel[data-collapsed=true]{width:fit-content;max-width:100%}
+.workspace-page #capture-panel[data-motion=true]{overflow:hidden}
+.source-admission-snapshot{position:absolute;pointer-events:none;margin:0;z-index:1}
+.workspace-page #status-monitor[data-phase=completed] #status-detail,
+.workspace-page #status-monitor[data-phase=completed] .monitor-metadata,
+.workspace-page #status-monitor[data-phase=completed] .history-job-controls{display:none}
+.workspace-page #status-monitor[data-phase=completed]{align-items:center;gap:5px 10px}
+@media(prefers-reduced-motion:reduce){.source-admission-snapshot{display:none}}
+/* Quiet login credit stays in document flow, including with a mobile keyboard. */
+.workspace-page .login-shell{grid-template-rows:minmax(min-content,1fr) auto;gap:24px}
+.workspace-page .login-card{align-self:center}
+.workspace-page #login-error,.workspace-page #login-error:empty{display:block;min-height:1.5em;margin:12px 0 0}
+.workspace-page .login-credit{margin:0;font-size:11px;line-height:1.5;color:var(--muted);text-align:center}
+.workspace-page .login-credit a{display:inline-flex;align-items:center;min-height:44px;color:inherit;text-decoration:none;opacity:.72;transition:opacity .15s}
+.workspace-page .login-credit a:hover,.workspace-page .login-credit a:focus-visible{opacity:1}
+.workspace-page .login-credit a:focus-visible{outline:2px solid #629d45;outline-offset:3px;border-radius:3px}

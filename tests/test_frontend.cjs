@@ -40,7 +40,7 @@ class Element {
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
 }
 
-function fixture() {
+function fixture(motion) {
   const root = path.resolve(__dirname, '..');
   const html = fs.readFileSync(path.join(root, 'app/static/index.html'), 'utf8');
   const body = new Element('body'); body.root = true;
@@ -52,7 +52,7 @@ function fixture() {
   const context = vm.createContext({
     document: { body, getElementById: id => ids.get(id), createElement: tag => new Element(tag),
       createElementNS: (_, tag) => new Element(tag), addEventListener() {} },
-    window: { addEventListener() {} }, URLSearchParams, Intl,
+    window: { addEventListener() {}, StreamFetchMotion:motion }, URLSearchParams, Intl,
     setInterval() {}, setTimeout() {}, clearTimeout() {},
     // Keep auto-login pending; each test drives the state itself.
     fetch: () => new Promise(() => {}),
@@ -385,4 +385,156 @@ test('Settings ends with a minimal product footer and preserves the existing saf
   assert.match(footer,/aria-label="GitHub \(opens in a new tab\)"/);
   assert.match(footer,/>GitHub <svg/);
   assert.doesNotMatch(footer,/@adamneve1|Built by|About|credit-link/);
+});
+test('login composition remains minimal with accessible authentication and a quiet safe developer credit',()=>{
+  const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
+  const login=html.slice(html.indexOf('<div id="login"'),html.indexOf('<div id="workspace"'));
+  assert.match(login,/aria-label="Masuk StreamFetch" aria-busy="false"/);
+  assert.match(login,/<label for="password">Password<\/label>/);
+  assert.match(login,/name="password" type="password" autocomplete="current-password" aria-describedby="login-error" autofocus required/);
+  assert.match(login,/<button id="login-submit" class="primary" type="submit">Masuk<\/button>/);
+  assert.match(login,/id="login-error" role="alert"/);
+  assert.doesNotMatch(login,/<h1|class="muted"|Welcome|<footer|feature|slogan/);
+  assert.match(login,/<\/form><p id="login-credit" class="login-credit">Built with 💖 by /);
+  assert.match(login,/href="https:\/\/github.com\/adamneve1" target="_blank" rel="noopener noreferrer"/);
+  assert.match(login,/>@adamneve1<\/a>/);
+  const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8').split('/* Compact authentication composition')[1];
+  assert.match(css,/max-width:344px/);assert.match(css,/min-height:100dvh/);
+  assert.match(css,/align-items:safe center/);assert.match(css,/font-size:16px/);
+  assert.match(css,/min-height:44px/);assert.match(css,/input\[aria-invalid=true\]/);
+  assert.doesNotMatch(css,/gradient|backdrop-filter/);
+  assert.match(css,/grid-template-rows:minmax\(min-content,1fr\) auto/);
+  assert.match(css,/#login-error:empty\{display:block;min-height:1.5em/);
+  assert.match(css,/\.login-credit\{margin:0;font-size:11px/);
+});
+
+test('login submission shows busy state, preserves the API payload, and clears password only on success',async()=>{
+  const f=fixture();let finish;const requests=[];let entered;
+  f.context.fetch=(url,options)=>{requests.push({url,options});return new Promise(resolve=>finish=resolve);};
+  f.context.enter=async auth=>{entered=auth;};
+  f.get('password').value='test-password';let prevented=false;
+  const submission=f.get('login-form').onsubmit({preventDefault(){prevented=true;}});
+  assert.equal(prevented,true);assert.equal(f.get('login-submit').disabled,true);
+  assert.equal(f.get('login-submit').textContent,'Masuk…');assert.equal(f.get('login-form').attributes['aria-busy'],'true');
+  await f.get('login-form').onsubmit({preventDefault(){}});assert.equal(requests.length,1);
+  assert.equal(requests[0].url,'/api/login');assert.equal(requests[0].options.method,'POST');
+  assert.deepEqual(JSON.parse(requests[0].options.body),{password:'test-password'});
+  finish({status:200,ok:true,headers:{get:()=> 'application/json'},json:async()=>({csrf:'test-csrf',is_admin:true})});
+  await submission;
+  assert.equal(f.run('csrf'),'test-csrf');assert.equal(entered.is_admin,true);
+  assert.equal(f.get('password').value,'');assert.equal(f.get('login-submit').disabled,false);
+  assert.equal(f.get('login-submit').textContent,'Masuk');assert.equal(f.get('login-form').attributes['aria-busy'],'false');
+});
+
+test('login errors remain visible, retain input, support correction, and returning to login focuses password',async()=>{
+  const f=fixture();f.get('password').value='wrong';
+  f.context.fetch=async()=>({status:401,ok:false,headers:{get:()=> 'application/json'},json:async()=>({error:'Password salah.'})});
+  await f.get('login-form').onsubmit({preventDefault(){}});
+  assert.equal(f.get('password').value,'wrong');assert.equal(f.get('login-error').textContent,'Password salah.');
+  assert.equal(f.get('password').attributes['aria-invalid'],'true');assert.equal(f.get('login-submit').disabled,false);
+  assert.equal(f.get('password').focused,true);
+  f.get('password').oninput();assert.equal(f.get('login-error').textContent,'');assert.equal(f.get('password').attributes['aria-invalid'],undefined);
+  f.run('showLogin()');assert.equal(f.get('password').focused,true);assert.equal(f.get('login').hidden,false);assert.equal(f.get('workspace').hidden,true);
+});
+test('wide Source form bounds input/options and connects the action row without overriding smaller layouts',()=>{
+  const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8');
+  const wide=css.slice(css.indexOf('/* Wide Source cards')).split('/* Only admission')[0];
+  assert.match(wide,/@media\(min-width:1100px\)/);
+  assert.match(wide,/#capture-content\{width:100%;max-width:1160px\}/);
+  assert.match(wide,/\.source-field\{max-width:760px\}/);
+  assert.match(wide,/#oryx-fields\{max-width:380px\}/);
+  assert.match(wide,/\.capture-options\{max-width:760px;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(wide,/#format-field\{grid-column:1\/-1/);
+  assert.match(wide,/\.capture-footer\{max-width:760px;justify-content:flex-start/);
+  assert.doesNotMatch(wide,/display:none|position:absolute/);
+  const f=fixture();f.get('quality').value='720';f.get('storage-target').value='archive';f.get('note').value='Dialog';
+  for(const source of ['youtube','tiktok','instagram']){f.run(`setMode('${source}')`);assert.equal(f.get('quality').value,'720');assert.equal(f.get('storage-target').value,'archive');assert.equal(f.get('note').value,'Dialog');}
+  assert.equal(f.get('compression-details').hidden,false);
+});
+
+function motionSpy(){
+ const calls=[];return {calls,reduced:()=>false,reset(){calls.push(['reset']);},
+  loginReveal(element){calls.push(['loginReveal',element]);},
+  loginError(element){calls.push(['loginError',element]);},
+  loginSuccess(element){calls.push(['loginSuccess',element]);},
+  source(panel,collapsed,change,options){calls.push(['source',collapsed,options,panel.dataset.collapsed]);change();},
+  island(panel,key,phase,change){calls.push(['island',key,phase]);change();},
+  progress(panel,value){if(value===null)panel.removeAttribute('value');else panel.value=value;},
+ };
+}
+test('accepted submission morphs Source only after admission and immediately publishes the job',async()=>{
+ const motion=motionSpy(),f=fixture(motion);let accept;
+ f.run("mode='youtube';online=true;disk={can_record:true}");
+ f.get('youtube-url').value='https://youtu.be/abcdefghijk';
+ f.context.fetch=()=>new Promise(resolve=>{accept=resolve;});
+ const request=f.get('record').onclick();
+ assert.equal(f.get('capture-content').hidden,false);
+ assert.equal(f.get('capture-panel').attributes['aria-busy'],'true');
+ assert.equal(f.get('record').textContent,'Mengirim…');
+ assert.equal(motion.calls.filter(c=>c[0]==='source').length,0);
+ accept({ok:true,status:202,headers:{get:()=> 'application/json'},json:async()=>({job_id:'accepted'})});
+ await request;
+ const admission=motion.calls.find(c=>c[0]==='source');
+ assert.equal(admission[1],true);assert.equal(admission[2].accepted,true);
+ assert.equal(admission[2].job.dataset.jobId,'accepted');
+ assert.equal(f.get('status-job-title').textContent,'YouTube');
+ assert.equal(f.get('capture-panel').attributes['aria-busy'],'false');
+ f.get('capture-another').onclick();
+ assert.equal(motion.calls.filter(c=>c[0]==='source').at(-1)[1],false);
+ assert.equal(f.get('capture-content').hidden,false);
+});
+test('login entrance and errors use scoped motion while keeping authentication immediate and focus restored',async()=>{
+ const motion=motionSpy(),f=fixture(motion);
+ assert.equal(motion.calls[0][0],'loginReveal');
+ f.get('password').value='wrong';
+ f.context.fetch=async()=>({status:401,ok:false,headers:{get:()=> 'application/json'},json:async()=>({error:'Password salah.'})});
+ await f.get('login-form').onsubmit({preventDefault(){}});
+ assert.equal(motion.calls.some(c=>c[0]==='loginError'&&c[1]===f.get('login-error')),true);
+ assert.equal(f.get('password').focused,true);assert.equal(f.get('password').value,'wrong');
+ const reveals=motion.calls.filter(c=>c[0]==='loginReveal').length;
+ f.run('showLogin()');assert.equal(motion.calls.filter(c=>c[0]==='loginReveal').length,reveals);
+ captureAPI(f);await f.run('enter({is_admin:false})');
+ assert.equal(f.get('workspace').hidden,false);assert.equal(f.get('login').hidden,true);
+ assert.equal(motion.calls.some(c=>c[0]==='loginSuccess'),true);
+ f.run('showLogin()');assert.equal(motion.calls.filter(c=>c[0]==='loginReveal').length,reveals+1);
+});
+test('rejected submission never runs the accepted morph or discards input',async()=>{
+ const motion=motionSpy(),f=fixture(motion);captureAPI(f,true);
+ f.run("mode='youtube';online=true;disk={can_record:true}");f.get('youtube-url').value='draft';
+ await f.get('record').onclick();
+ assert.equal(motion.calls.some(c=>c[0]==='source'&&c[1]),false);
+ assert.equal(f.get('capture-content').hidden,false);assert.equal(f.get('youtube-url').value,'draft');
+});
+test('island maps capture and transcript phases without exposing provider details',()=>{
+ const motion=motionSpy(),f=fixture(motion);
+ for(const [state,transcript,phase] of [['starting',null,'queued'],['recording',null,'downloading'],['finalizing',null,'processing'],['ready',{status:'queued'},'queued'],['ready',{status:'transcribing',progress_percent:35,eta_seconds:120,provider:'cloudflare'},'transcribing'],['ready',{status:'completed'},'completed'],['ready',{status:'failed',error:'Try again'},'failed']]){
+  f.context.job={job_id:'island',source:'instagram',is_live:false,state,transcript};
+  f.run('active=job;controls()');
+  assert.equal(motion.calls.filter(c=>c[0]==='island').at(-1)[2],phase);
+  assert.doesNotMatch(f.get('status-detail').textContent,/cloudflare/i);
+ }
+});
+test('transcription started from History is observed by the same island without changing queue requests',async()=>{
+ const motion=motionSpy(),f=fixture(motion);const calls=[];
+ f.context.fetch=async(url,options)=>{calls.push([url,JSON.parse(options.body)]);return {ok:true,status:202,headers:{get:()=> 'application/json'},json:async()=>({})};};
+ await f.run("generateTranscript({job_id:'old-recording',state:'ready',source:'tiktok',filename:'old.mp4'})");
+ assert.deepEqual(calls,[['/api/recordings/old-recording/transcript',{}]]);
+ assert.equal(f.get('state').textContent,'Waiting');assert.equal(f.get('status-job-title').textContent,'old.mp4');
+ assert.equal(motion.calls.filter(c=>c[0]==='island').at(-1)[2],'queued');
+});
+test('GSAP and Flip load locally and only the workspace opts into the motion system',()=>{
+ const root=path.resolve(__dirname,'..'),html=fs.readFileSync(path.join(root,'app/static/index.html'),'utf8');
+ const scripts=[...html.matchAll(/<script defer src="([^"]+)"/g)].map(match=>match[1]);
+ assert.deepEqual(scripts,['/static/vendor/gsap.min.js','/static/vendor/Flip.min.js','/static/motion.js','/static/app.js']);
+ assert.equal(fs.readFileSync(path.join(root,'package.json'),'utf8').includes('"gsap": "3.15.0"'),true);
+ assert.doesNotMatch(fs.readFileSync(path.join(root,'app/static/transcript.html'),'utf8'),/gsap|Flip|motion\.js/);
+});
+test('rapid repeated submission cannot duplicate admission and a changed source retains its action label',async()=>{
+ const motion=motionSpy(),f=fixture(motion);let reject,count=0;
+ f.run("setMode('youtube');online=true;disk={can_record:true}");
+ f.context.fetch=()=>{count++;return new Promise((_,fail)=>{reject=fail;});};
+ const first=f.get('record').onclick();await f.get('record').onclick();
+ assert.equal(count,1);f.run("setMode('instagram')");reject(Error('Offline'));await first;
+ assert.equal(f.get('record').textContent,'Mulai');assert.equal(f.get('capture-content').hidden,false);
+ assert.equal(motion.calls.some(c=>c[0]==='source'&&c[1]),false);
 });

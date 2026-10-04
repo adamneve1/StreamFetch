@@ -1,0 +1,11 @@
+{
+  "name": "streamfetch-frontend",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build-frontend.mjs",
+    "test": "node --test tests/test_*.cjs"
+  },
+  "dependencies": {
+    "gsap": "3.15.0"
+  }
+}

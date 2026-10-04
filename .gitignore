@@ -28,3 +28,7 @@ venv/
 # Persistent web settings and catalogue
 data/
 archive/
+
+# Reproducible frontend build
+node_modules/
+app/static/vendor/

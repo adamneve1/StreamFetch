@@ -1,0 +1,17 @@
+node_modules
+.git
+.env
+.env.*
+.venv
+venv
+downloads
+data
+archive
+__pycache__
+.pytest_cache
+credentials
+.aws
+.codex
+.agents
+.DS_Store
+app/static/vendor

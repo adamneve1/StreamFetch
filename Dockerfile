@@ -1,3 +1,10 @@
+FROM node:22-slim AS frontend
+WORKDIR /frontend
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY scripts/build-frontend.mjs ./scripts/build-frontend.mjs
+RUN npm run build
+
 FROM python:3.12-slim
 
 RUN apt-get update && \
@@ -22,6 +29,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY --from=frontend /frontend/app/static/vendor ./app/static/vendor
 
 RUN mkdir -p /downloads
 

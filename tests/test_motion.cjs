@@ -1,0 +1,150 @@
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const createMotion=require('../app/static/motion.js');
+
+function fixture(reduced=false,available=true){
+ const flips=[],states=[],tweens=[],contexts=[],timelines=[],timers=new Map(),listeners={};let timerId=0,current;
+ const element=()=>({dataset:{},style:{},children:[],hidden:false,value:0,
+  setAttribute(name,value){this[name]=value;},removeAttribute(name){delete this[name];},
+  append(node){this.children.push(node);},remove(){this.removed=true;},
+  querySelectorAll(){return [];},querySelector(selector){return this.queries?.[selector]||this.action;},
+  cloneNode(){const clone=element();clone.action=element();return clone;},
+  getBoundingClientRect(){return {width:640};},offsetLeft:12,offsetTop:12});
+ const panel=element(),content=element(),compact=element(),island=element(),bar=element(),job=element();
+ const shell=element(),form=element(),brand=element(),label=element(),password=element(),button=element(),credit=element(),error=element(),workspace=element();
+ form.queries={'.login-brand':brand,label};
+ const ids={'capture-content':content,'capture-another':compact,'login-form':form,password,'login-submit':button,'login-credit':credit};
+ panel.dataset.collapsed='false';compact.hidden=true;island.hidden=true;
+ island.children=[element(),element(),element()];
+ const tween=(target,vars)=>{
+  const t={target,vars,killed:false,kill(){this.killed=true;}};tweens.push(t);current?.animations.push(t);return t;
+ };
+ const media={matches:reduced,addEventListener(type,fn){listeners.media=fn;}};
+ const gsap={registerPlugin(){},to:tween,fromTo(target,from,vars){const t=tween(target,vars);t.from=from;return t;},
+  timeline(vars){const timeline={vars,to(target,vars){tween(target,vars);return this;},fromTo(target,from,vars,position){const t=tween(target,vars);t.from=from;t.position=position;return this;}};timelines.push(timeline);return timeline;},
+  context(fn){const c={animations:[],reverted:false,revert(){this.reverted=true;for(const t of this.animations)t.kill();}};
+   contexts.push(c);current=c;fn();current=null;return c;}};
+ const Flip={getState(targets,vars){const s={targets,vars,collapsed:panel.dataset.collapsed,phase:island.dataset.phase};states.push(s);return s;},
+  from(state,vars){const t=tween(state.targets,vars);flips.push({state,vars,t});return t;}};
+ const env={document:{getElementById:id=>ids[id]},
+  gsap:available?gsap:null,Flip:available?Flip:null,matchMedia:()=>media,
+  setTimeout(fn){timers.set(++timerId,fn);return timerId;},clearTimeout(id){timers.delete(id);},
+  addEventListener(type,fn){listeners[type]=fn;}};
+ const motion=createMotion(env);
+ const source=(collapsed,accepted=false)=>motion.source(panel,collapsed,()=>{
+  panel.dataset.collapsed=String(collapsed);content.hidden=collapsed;compact.hidden=!collapsed;
+ },{accepted,job});
+ const status=(key,phase)=>motion.island(island,key,phase,()=>{island.hidden=false;island.detail=phase;});
+ const tick=()=>{const callbacks=[...timers.values()];timers.clear();callbacks.forEach(fn=>fn());};
+ return {motion,source,status,tick,flips,states,tweens,contexts,timelines,timers,listeners,media,panel,content,compact,island,bar,job,Flip,shell,form,brand,label,password,button,credit,error,workspace};
+}
+test('Source admission snapshots before mutation, morphs surface, and keeps snapshot inert',()=>{
+ const f=fixture();f.source(true,true);
+ assert.equal(f.states[0].collapsed,'false');assert.equal(f.panel.dataset.collapsed,'true');
+ assert.equal(f.flips.length,1);assert.equal(f.flips[0].vars.duration,.48);
+ const snapshot=f.panel.children[0];assert.equal(snapshot.inert,true);assert.equal(snapshot['aria-hidden'],'true');
+ assert.equal(snapshot.action.textContent,'Diterima ✓');
+ f.flips[0].vars.onComplete();assert.equal(snapshot.removed,true);
+ assert.equal(f.panel.dataset.motion,undefined);assert.equal(f.contexts[0].reverted,true);
+});
+test('Source reopens through the same Flip surface without stale inline styles',()=>{
+ const f=fixture();f.source(true,true);f.source(false);
+ assert.equal(f.flips.length,2);assert.equal(f.states[1].collapsed,'true');
+ assert.equal(f.content.hidden,false);assert.equal(f.compact.hidden,true);
+ assert.equal(f.contexts[0].reverted,true);assert.equal(f.panel.children[0].removed,true);
+ f.flips[1].vars.onComplete();assert.equal(f.panel.dataset.motion,undefined);
+});
+test('rapid repeated Source interaction replaces motion and ignores obsolete completion',()=>{
+ const f=fixture();f.source(true,true);f.source(false);f.source(true,true);
+ assert.equal(f.flips[0].t.killed,true);assert.equal(f.flips[1].t.killed,true);
+ f.flips[0].vars.onComplete();assert.equal(f.panel.dataset.motion,'true');
+ f.flips[2].vars.onComplete();assert.equal(f.panel.dataset.motion,undefined);
+ f.source(true);assert.equal(f.flips.length,3);
+});
+test('island structural phases Flip the persistent object and its content positions',()=>{
+ const f=fixture();
+ for(const phase of ['queued','downloading','processing','transcribing','completed','failed'])f.status('job',phase);
+ assert.equal(f.flips.length,6);assert.equal(f.island.dataset.phase,'failed');
+ assert.equal(f.flips[0].state.targets[0],f.island);assert.equal(f.flips[0].state.targets.length,4);
+ assert.equal(f.states[1].phase,'queued');assert.equal(f.timers.size,0);
+});
+test('progress and ETA-only polling never start a full Flip and replace progress tweens',()=>{
+ const f=fixture();f.status('job','downloading');f.motion.progress(f.bar,20);
+ const first=f.tweens.at(-1);f.motion.progress(f.bar,40);f.status('job','downloading');
+ assert.equal(f.flips.length,1);assert.equal(first.killed,true);assert.equal(f.bar['aria-valuenow'],40);
+ const count=f.tweens.length;f.motion.progress(f.bar,40);assert.equal(f.tweens.length,count);
+ f.motion.progress(f.bar,null);assert.equal(f.bar.value,undefined);assert.equal(f.bar['aria-valuenow'],undefined);
+});
+test('interrupted island transitions revert their own styles and stale callbacks cannot settle successors',()=>{
+ const f=fixture();f.status('job','queued');f.status('job','processing');
+ assert.equal(f.states[1].vars.kill,false);assert.equal(f.contexts[0].reverted,true);
+ f.flips[0].vars.onComplete();assert.equal(f.island.dataset.motion,'true');
+ f.flips[1].vars.onComplete();assert.equal(f.island.dataset.motion,undefined);
+});
+test('completed island holds once then dismisses without polling resurrecting it',()=>{
+ const f=fixture();f.status('job','completed');f.status('job','completed');
+ assert.equal(f.timers.size,1);assert.equal(f.island.hidden,false);f.tick();
+ assert.equal(f.island.hidden,true);f.status('job','completed');assert.equal(f.island.hidden,true);
+ f.status('next','queued');assert.equal(f.island.hidden,false);
+});
+test('failed remains visible and cancels obsolete success dismissal',()=>{
+ const f=fixture();f.status('job','completed');const old=[...f.timers.values()][0];
+ f.status('job','failed');old();f.tick();assert.equal(f.island.hidden,false);assert.equal(f.island.dataset.phase,'failed');
+});
+test('reduced motion preserves Source, progress, and completion dismissal with no animation',()=>{
+ const f=fixture(true);f.source(true,true);f.source(false);f.status('job','completed');f.motion.progress(f.bar,75);
+ assert.equal(f.flips.length,0);assert.equal(f.tweens.length,0);assert.equal(f.content.hidden,false);assert.equal(f.bar.value,75);
+ f.tick();assert.equal(f.island.hidden,true);
+});
+test('changing reduced-motion preference or resizing immediately settles in-flight geometry',()=>{
+ const f=fixture();f.source(true,true);f.status('job','downloading');f.motion.progress(f.bar,60);
+ f.media.matches=true;f.listeners.media();
+ assert.equal(f.panel.dataset.motion,undefined);assert.equal(f.island.dataset.motion,undefined);assert.equal(f.bar.value,60);
+ f.media.matches=false;f.source(false);f.listeners.resize();assert.equal(f.panel.dataset.motion,undefined);
+});
+test('reset removes pending dismissals and detached snapshots; missing libraries preserve behavior',()=>{
+ const f=fixture();f.source(true,true);f.status('job','completed');f.motion.reset();
+ assert.equal(f.timers.size,0);assert.equal(f.panel.children[0].removed,true);
+ f.status('job','completed');assert.equal(f.island.hidden,false);
+ const unavailable=fixture(false,false);unavailable.source(true,true);unavailable.status('job','failed');
+ assert.equal(unavailable.content.hidden,true);assert.equal(unavailable.island.hidden,false);assert.equal(unavailable.flips.length,0);
+});
+test('a failed geometry read cannot turn accepted admission into a rejected submission',()=>{
+ const f=fixture();f.Flip.getState=()=>{throw Error('Motion unavailable');};
+ f.source(true,true);f.status('job','failed');
+ assert.equal(f.content.hidden,true);assert.equal(f.island.hidden,false);assert.equal(f.flips.length,0);
+});
+test('login reveal coordinates restrained elements within 520ms without Flip',()=>{
+ const f=fixture();f.motion.loginReveal(f.shell);
+ assert.equal(f.flips.length,0);assert.equal(f.tweens.length,4);
+ const [surface,brand,fields,credit]=f.tweens;
+ assert.equal(surface.target,f.form);assert.equal(surface.from.scale,.99);
+ assert.equal(brand.from.y,10);assert.equal(fields.from.y,8);assert.equal(fields.vars.stagger,.045);
+ assert.deepEqual(fields.target,[f.label,f.password,f.button]);
+ assert.equal(credit.target,f.credit);assert.equal(credit.position+credit.vars.duration,.52);
+ f.timelines[0].vars.onComplete();assert.equal(f.contexts[0].reverted,true);
+});
+test('login errors settle entrance, animate feedback without shake, and replace stale error motion',()=>{
+ const f=fixture();f.motion.loginReveal(f.shell);f.motion.loginError(f.error);
+ assert.equal(f.contexts[0].reverted,true);const old=f.tweens.at(-1);
+ assert.equal(old.from.y,3);assert.equal(old.vars.duration,.16);assert.equal(old.vars.x,undefined);
+ f.motion.loginError(f.error);assert.equal(old.killed,true);
+ old.vars.onComplete();assert.equal(f.contexts.at(-1).reverted,false);
+ f.tweens.at(-1).vars.onComplete();assert.equal(f.contexts.at(-1).reverted,true);
+});
+test('success settles immediately without promise, timer, or architecture change',()=>{
+ const f=fixture();f.motion.loginReveal(f.shell);f.motion.loginError(f.error);
+ const result=f.motion.loginSuccess(f.workspace);
+ assert.equal(result,undefined);assert.equal(f.timers.size,0);
+ assert.equal(f.contexts[1].reverted,true);assert.equal(f.tweens.at(-1).target,f.workspace);
+ assert.equal(f.tweens.at(-1).vars.duration,.12);
+ f.motion.reset();assert.equal(f.contexts.at(-1).reverted,true);
+});
+test('login reduced motion and unavailable GSAP preserve visible, immediately usable controls',()=>{
+ for(const f of [fixture(true),fixture(false,false)]){
+  f.motion.loginReveal(f.shell);f.motion.loginError(f.error);f.motion.loginSuccess(f.workspace);
+  assert.equal(f.tweens.length,0);assert.equal(f.flips.length,0);assert.equal(f.form.hidden,false);
+ }
+ const f=fixture();f.motion.loginReveal(f.shell);f.media.matches=true;f.listeners.media();
+ assert.equal(f.contexts[0].reverted,true);assert.equal(f.tweens.every(t=>t.killed),true);
+});

@@ -349,6 +349,16 @@ tidak menghapus file lokal secara otomatis.
 
 ## Menjalankan StreamFetch
 
+Frontend memakai GSAP untuk koreografi login; Flip hanya untuk transisi Source dan status island.
+Docker membangun aset npm yang terkunci dan menyajikannya lokal (tanpa CDN).
+Untuk menjalankan web langsung dari checkout, bangun aset terlebih dahulu:
+
+```bash
+npm ci
+npm run build
+npm test
+```
+
 Buat direktori persistent:
 
 ```bash
