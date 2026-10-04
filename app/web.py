@@ -14,10 +14,11 @@ from flask import Flask, jsonify, request, session, send_from_directory
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 try:
-    from . import quality, storage
+    from . import quality, storage, transcript_reader
 except ImportError:
     import quality
     import storage
+    import transcript_reader
 
 ADMIT = """
 if redis.call('EXISTS', 'worker:heartbeat') == 0 then return 'offline' end
@@ -427,7 +428,20 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
 
     @app.get('/api/recordings/<job_id>/transcript/view')
     def view_transcript(job_id):
-        return transcript_file(job_id, 'txt', False)
+        row = storage.recording(job_id)
+        if not row or (row.get('transcript') or {}).get('status') != 'completed':
+            return jsonify(error='Transkrip belum selesai atau tidak ditemukan.'), 404
+        return app.send_static_file('transcript.html')
+
+    @app.get('/api/recordings/<job_id>/transcript/data')
+    def transcript_data(job_id):
+        row = storage.recording(job_id)
+        if not row or (row.get('transcript') or {}).get('status') != 'completed':
+            return jsonify(error='Transkrip belum selesai atau tidak ditemukan.'), 404
+        data = transcript_reader.reader_data(row, os.getenv('DOWNLOAD_DIR', '/downloads'))
+        if not data['exports']:
+            return jsonify(error='File transkrip tidak ditemukan.'), 404
+        return jsonify(data)
 
     @app.get('/api/recordings/<job_id>/transcript/txt')
     def download_transcript_txt(job_id):

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Transcript · StreamFetch</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/transcript.css">
+  <script src="/static/transcript.js" defer></script>
+</head>
+<body>
+  <header><a class="brand" href="/"><strong>Stream<span>Fetch</span></strong></a><a class="reader-back" href="/">← Control Room</a></header>
+  <main class="reader-shell">
+    <p class="eyebrow">TRANSCRIPT READER</p>
+    <h1 id="reader-title">Transcript</h1>
+    <p id="reader-source" class="muted"></p>
+    <p id="reader-status" role="status" aria-live="polite">Memuat transkrip…</p>
+    <div id="reader-content" hidden>
+      <section class="panel reader-info" aria-label="Program information">
+        <div class="reader-section-heading"><h2>Program information</h2><button id="copy-info" class="secondary" type="button">Copy Info</button></div>
+        <dl id="program-info"></dl>
+        <details id="full-description"><summary>Full Description</summary><pre id="source-description"></pre></details>
+      </section>
+      <section class="panel reader-document" aria-label="Transcript">
+        <div class="reader-toolbar">
+          <div class="reader-search">
+            <label for="transcript-search">Search transcript</label>
+            <div class="reader-search-controls"><input id="transcript-search" type="search" placeholder="Cari kata atau frasa…" autocomplete="off"><button id="search-previous" class="secondary" type="button" aria-label="Previous match">↑</button><button id="search-next" class="secondary" type="button" aria-label="Next match">↓</button></div>
+            <span id="search-count" role="status" aria-live="polite"></span>
+          </div>
+          <div class="reader-display"><label for="timestamp-mode">Timestamps</label><select id="timestamp-mode"><option value="none">None</option><option value="segment" selected>Segment</option><option value="subtitle">Subtitle</option></select></div>
+        </div>
+        <div class="reader-actions">
+          <button id="copy-transcript" class="secondary" type="button">Copy Transcript</button>
+          <button id="copy-all" class="secondary" type="button">Copy All</button>
+          <nav id="transcript-exports" aria-label="Export transcript"></nav>
+          <label class="reader-raw-toggle"><input id="raw-view" type="checkbox"> Raw view</label>
+        </div>
+        <article id="transcript-text" class="reader-prose" aria-label="Transcript text"></article>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

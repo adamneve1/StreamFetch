@@ -663,6 +663,12 @@ def update_youtube_metadata(job, info):
     job['live_status'] = info.get('live_status') or ('is_live' if job['is_live'] else 'not_live')
     job['was_live'] = info.get('was_live') is True or job['live_status'] in {'post_live', 'was_live'}
     job['title'] = info.get('title') or job.get('title', '')
+    if job.get('source') == 'youtube':
+        metadata = dict(job.get('source_metadata') or {})
+        for key in ('title', 'description', 'channel', 'upload_date'):
+            if info.get(key) is not None:
+                metadata[key] = info[key]
+        job['source_metadata'] = metadata
 
 
 def inspection_error(output):

@@ -360,7 +360,10 @@ class TranscriptionWebTests(unittest.TestCase):
         srt_download = self.client.get('/api/recordings/existing/transcript/srt')
         vtt_download = self.client.get('/api/recordings/existing/transcript/vtt')
         self.assertEqual(view.status_code, 200)
-        self.assertEqual(view.get_data(as_text=True), 'Isi transkrip\n')
+        self.assertIn('TRANSCRIPT READER', view.get_data(as_text=True))
+        reader = self.client.get('/api/recordings/existing/transcript/data').json
+        self.assertEqual(reader['raw'], 'Isi transkrip\n')
+        self.assertEqual(reader['segments'][0]['start'], 0)
         self.assertEqual(txt_download.status_code, 200)
         self.assertIn('attachment', txt_download.headers['Content-Disposition'])
         self.assertEqual(srt_download.status_code, 200)

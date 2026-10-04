@@ -77,6 +77,14 @@ YouTube → StreamFetch → yt-dlp → MP4 / MP3
 - Satu transkripsi diproses pada satu waktu untuk membatasi beban CPU.
 - Hasil TXT dan SRT tersimpan di samping file media asli.
 - Status, bahasa terdeteksi, model, dan waktu proses tampil di riwayat.
+- **View Transcript** membuka reader dengan informasi program, Full Description,
+  pencarian dengan navigasi hasil, mode timestamp None/Segment/Subtitle, copy,
+  export TXT/SRT/VTT yang tersedia, dan Raw view. Mengubah tampilan tidak
+  mentranskripsi ulang atau mengubah file sumber.
+- Deskripsi YouTube lengkap disimpan saat download baru dan menjadi sumber
+  metadata berlabel (Program, Tanggal/Jam, Tema, Narasumber, Presenter).
+  Rekaman lama tanpa deskripsi tetap dapat dibaca; fakta yang tidak tersedia
+  tidak dibuat-buat. Tanggal upload diberi label terpisah dari tanggal program.
 
 ### Telegram
 

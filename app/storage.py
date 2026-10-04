@@ -99,7 +99,18 @@ def save_recording(job, state, detail=''):
     # Never store playback URLs/credentials in catalogue or browser status.
     data = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'storage', 'quality', 'output_format', 'compression', 'is_live', 'live_status', 'was_live', 'download_attempt', 'download_attempts', 'download_exit_code', 'requested_at', 'started_at', 'elapsed', 'size', 'filename', 'stop_reason') if key in job}
     data.update(state=state, detail=detail)
+    if isinstance(job.get('source_metadata'), dict):
+        data['source_metadata'] = {key: job['source_metadata'][key]
+                                   for key in ('title', 'description', 'channel', 'upload_date')
+                                   if key in job['source_metadata']}
     with connection() as db:
+        if 'source_metadata' not in data:
+            previous = db.execute('SELECT data FROM recordings WHERE id=?',
+                                  (job['job_id'],)).fetchone()
+            if previous:
+                metadata = json.loads(previous['data']).get('source_metadata')
+                if metadata is not None:
+                    data['source_metadata'] = metadata
         db.execute('INSERT INTO recordings VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET updated=excluded.updated, data=excluded.data', (job['job_id'], time.time(), json.dumps(data)))
 
 
