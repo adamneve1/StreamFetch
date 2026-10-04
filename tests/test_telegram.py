@@ -58,7 +58,8 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
                 tc.watch_window(day, start, end, now)
 
     def test_channel_validation_only_accepts_channel_not_arbitrary_urls(self):
-        for value in ['https://youtube.com/@rribatam/live', 'https://www.youtube.com/@rribatam/streams']:
+        for value in ['@rribatam', 'youtube.com/@rribatam', 'https://www.youtube.com/@rribatam',
+                      'https://youtube.com/@rribatam/live', 'https://www.youtube.com/@rribatam/streams']:
             self.assertEqual(tc.channel_url(value), 'https://www.youtube.com/@rribatam')
         for value in ['https://youtube.com.evil/@rribatam', 'https://youtu.be/abcdefghijk',
                       'https://youtube.com/watch?v=abcdefghijk', 'https://user@youtube.com/@rribatam']:
@@ -202,6 +203,9 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         update = self.update(user=99, callback='transcribe:video-job')
         await self.controls.callback(update, self.context)
         update.callback_query.answer.assert_awaited_once_with('Tidak diizinkan.', show_alert=True)
+        update = self.update(user=99, callback='watch:12345678:confirm')
+        await self.controls.watch_callback(update, self.context)
+        update.callback_query.answer.assert_awaited_once_with('Tidak diizinkan.', show_alert=True)
         self.watch()
         with patch.dict(os.environ, TELEGRAM_ALLOWED_USER_IDS=''), patch.object(tc, 'discover_live') as discover:
             await self.controls.tick(self.sender, 110)
@@ -211,7 +215,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
     async def test_watch_wizard_default_first_list_and_owner_only_cancel(self):
         update = self.update()
         await self.controls.watch(update, self.context)
-        for answer in ['https://youtube.com/@rribatam', 'tomorrow', '09:00', '10:00', '-', 'no']:
+        for answer in ['@rribatam', 'tomorrow', '9.00 - 10.00 WIB', 'no', 'confirm']:
             update.message.text = answer
             self.assertTrue(await self.controls.watch_reply(update, self.context))
         watch = store.watches()[0]
@@ -225,6 +229,91 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         await self.controls.cancelwatch(update, self.context)
         self.assertEqual(store.watches()[0]['status'], 'cancelled')
         self.assertEqual(self.redis.keys('stop:*'), [])
+
+    def test_flexible_window_and_compact_command_parsing(self):
+        for value in ['08:00-10:00', '8:00 - 10:00', '08.00-10.00', '8.00 - 10.00 WIB']:
+            self.assertEqual(tc.parse_window(value), ('08:00', '10:00'))
+        self.assertEqual(tc.parse_window('21:22 - 23:00 wib'), ('21:22', '23:00'))
+        for value in ['24:00-25:00', '8:60-10:00', '08:00', '08:00-10:00 UTC', '8:0-10:00']:
+            with self.assertRaises(ValueError):
+                tc.parse_window(value)
+        for command in ['@rribatam today 08:00-10:00', 'youtube.com/@rribatam tomorrow 08.00-10.00',
+                        '@rribatam tomorrow 8:00 - 10:00 WIB']:
+            values = tc.watch_arguments(command.split())
+            self.assertEqual(values[2:], ['08:00', '10:00', 'first', 'no'])
+        self.assertEqual(tc.watch_arguments('@rribatam tomorrow 08:00-10:00 every yes'.split())[4:], ['every', 'yes'])
+        self.assertEqual(tc.watch_arguments('@rribatam tomorrow 08:00 10:00 first yes'.split())[2:],
+                         ['08:00', '10:00', 'first', 'yes'])
+
+    async def test_one_line_watch_uses_existing_creation_and_clears_draft_only_on_success(self):
+        await self.controls.watch(self.update(), self.context)
+        self.context.args = '@rribatam tomorrow bad-window'.split()
+        await self.controls.watch(self.update(), self.context)
+        self.assertIn('watch_draft', self.context.user_data)
+        self.assertEqual(store.watches(), [])
+        for command in ['@rribatam today 08:00-10:00', 'https://youtube.com/@rribatam tomorrow 08.00-10.00']:
+            self.context.args = command.split()
+            with patch.object(tc, 'watch_window', return_value=(100, 200)):
+                await self.controls.watch(self.update(), self.context)
+        self.assertNotIn('watch_draft', self.context.user_data)
+        self.assertEqual(len(store.watches()), 2)
+        for watch in store.watches():
+            self.assertEqual(watch['channel'], 'https://www.youtube.com/@rribatam')
+            self.assertEqual(watch['mode'], 'first')
+            self.assertFalse(watch['auto_transcribe'])
+
+    async def test_watch_owns_text_including_invalid_source_urls_and_other_chats(self):
+        await self.controls.watch(self.update(), self.context)
+        with patch.object(bot, 'controls', self.controls), patch.object(bot, 'r', self.redis):
+            await bot.handle_url(self.update('https://youtube.com/watch?v=abcdefghijk'), self.context)
+            self.assertEqual(self.context.user_data['watch_draft']['step'], 'channel')
+            await bot.handle_url(self.update('youtube.com/@rribatam'), self.context)
+            self.assertEqual(self.context.user_data['watch_draft']['step'], 'date')
+            await bot.handle_url(self.update('https://youtube.com/watch?v=abcdefghijk'), self.context)
+            self.assertEqual(self.context.user_data['watch_draft']['step'], 'date')
+            other_chat = self.update('https://youtube.com/watch?v=abcdefghijk')
+            other_chat.effective_chat.id = 88
+            await bot.handle_url(other_chat, self.context)
+        self.assertEqual(self.redis.llen('download_queue'), 0)
+
+    async def test_watch_buttons_confirmation_and_invalid_input_preserve_step(self):
+        update = self.update()
+        await self.controls.watch(update, self.context)
+        token = self.context.user_data['watch_draft']['token']
+        await self.controls.watch_reply(self.update('@rribatam'), self.context)
+        async def click(action):
+            await self.controls.watch_callback(self.update(callback='watch:' + token + ':' + action), self.context)
+        await click('date:choose')
+        self.assertEqual(self.context.user_data['watch_draft']['step'], 'date')
+        await self.controls.watch_reply(self.update('bad date'), self.context)
+        self.assertEqual(self.context.user_data['watch_draft']['step'], 'date')
+        await click('date:tomorrow')
+        for bad in ['bad window', '10:00-09:00', '24:00-25:00']:
+            await self.controls.watch_reply(self.update(bad), self.context)
+            self.assertEqual(self.context.user_data['watch_draft']['step'], 'window')
+        await self.controls.watch_reply(self.update('8:00 - 10:00 WIB'), self.context)
+        await click('date:today')  # Stale date button cannot change the current step.
+        self.assertEqual(self.context.user_data['watch_draft']['step'], 'auto')
+        await self.controls.watch_reply(self.update('maybe'), self.context)
+        self.assertEqual(self.context.user_data['watch_draft']['step'], 'auto')
+        await click('auto:yes')
+        self.assertEqual(store.watches(), [])
+        await click('confirm')
+        self.assertTrue(store.watches()[0]['auto_transcribe'])
+        await click('confirm')  # Repeated confirmation cannot create another watch.
+        self.assertEqual(len(store.watches()), 1)
+
+    async def test_watch_cancel_and_stale_or_foreign_buttons(self):
+        await self.controls.watch(self.update(), self.context)
+        token = self.context.user_data['watch_draft']['token']
+        other_context = SimpleNamespace(args=[], user_data={})
+        await self.controls.watch_callback(self.update(user=8, callback='watch:' + token + ':cancel'), other_context)
+        self.assertIn('watch_draft', self.context.user_data)
+        await self.controls.watch_callback(self.update(callback='watch:00000000:cancel'), self.context)
+        self.assertIn('watch_draft', self.context.user_data)
+        await self.controls.watch_callback(self.update(callback='watch:' + token + ':cancel'), self.context)
+        self.assertFalse(await self.controls.watch_reply(self.update('@rribatam'), self.context))
+        self.assertEqual(store.watches(), [])
 
     def test_web_and_bot_share_admission_and_public_url_validation(self):
         self.recording()

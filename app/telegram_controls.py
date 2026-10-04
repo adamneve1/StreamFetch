@@ -53,7 +53,15 @@ def reader_url(job_id):
 
 
 def channel_url(value):
-    storage.validate_url(value, youtube=True)
+    value = value.strip()
+    if value.startswith('@'):
+        value = 'https://www.youtube.com/' + value
+    elif re.match(r'^(?:www\.|m\.)?youtube\.com/', value, re.I):
+        value = 'https://' + value
+    try:
+        storage.validate_url(value, youtube=True)
+    except ValueError:
+        raise ValueError('Kirim @channel atau URL channel YouTube, misalnya youtube.com/@rribatam.') from None
     parsed = urlsplit(value)
     if (parsed.hostname not in {'youtube.com', 'www.youtube.com', 'm.youtube.com'}
             or parsed.username or parsed.password or parsed.port not in {None, 80, 443}
@@ -61,6 +69,41 @@ def channel_url(value):
         raise ValueError('Kirim URL channel YouTube, misalnya https://youtube.com/@rribatam.')
     path = re.sub(r'/(?:live|streams)/?$', '', parsed.path).rstrip('/')
     return 'https://www.youtube.com' + path
+
+
+WINDOW_PATTERN = r'(\d{1,2})[:.](\d{2})\s*[-–—]\s*(\d{1,2})[:.](\d{2})(?:\s*WIB)?'
+
+
+def parse_window(value):
+    match = re.fullmatch(WINDOW_PATTERN, value.strip(), re.I)
+    if not match or any(int(match[index]) > limit for index, limit in ((1, 23), (2, 59), (3, 23), (4, 59))):
+        raise ValueError('Kirim window seperti 08:00-10:00 atau 8.00 - 10.00 WIB (jam 00–23).')
+    return (f'{int(match[1]):02d}:{match[2]}', f'{int(match[3]):02d}:{match[4]}')
+
+
+def watch_arguments(args):
+    """Accept compact ranges while retaining the original separate-time command."""
+    if len(args) < 3:
+        raise ValueError('/watch @channel today|tomorrow|YYYY-MM-DD 08:00-10:00 [first|every] [yes|no]')
+    rest = ' '.join(args[2:])
+    match = re.fullmatch(WINDOW_PATTERN + r'(?:\s+(first|every))?(?:\s+(yes|no))?', rest, re.I)
+    if match:
+        start, end = parse_window(f'{match[1]}:{match[2]}-{match[3]}:{match[4]}')
+        return [args[0], args[1], start, end, (match[5] or 'first').lower(), (match[6] or 'no').lower()]
+    if len(args) in {4, 5, 6} and re.fullmatch(r'\d{2}:\d{2}', args[2]) and re.fullmatch(r'\d{2}:\d{2}', args[3]):
+        return args
+    raise ValueError('Contoh: /watch @rribatam tomorrow 08:00-10:00 WIB [every] [yes|no]')
+
+
+def watch_day(value):
+    value = value.strip().lower()
+    aliases = {'today': 0, 'hari ini': 0, 'tomorrow': 1, 'besok': 1}
+    if value in aliases:
+        return (datetime.now(WIB).date() + timedelta(days=aliases[value])).isoformat()
+    try:
+        return datetime.strptime(value, '%Y-%m-%d').date().isoformat()
+    except ValueError:
+        raise ValueError('Pilih Today / Tomorrow atau kirim tanggal YYYY-MM-DD.') from None
 
 
 def watch_window(day, start, end, now=None):
@@ -133,53 +176,100 @@ class Controls:
     @authorized
     async def watch(self, update, context):
         if not context.args:
-            context.user_data['watch_draft'] = {'chat_id': update.effective_chat.id, 'values': []}
-            await update.effective_message.reply_text('Watch WIB · kirim URL channel YouTube. /cancelwatch untuk batal.')
+            draft = {'chat_id': update.effective_chat.id, 'token': uuid.uuid4().hex[:8], 'step': 'channel'}
+            context.user_data['watch_draft'] = draft
+            await update.effective_message.reply_text('Watch WIB · kirim @channel atau URL channel YouTube.',
+                                                      reply_markup=self.watch_buttons(draft))
             return
         try:
-            watch = self.create_watch(context.args, update.effective_user.id, update.effective_chat.id)
+            watch = self.create_watch(watch_arguments(context.args), update.effective_user.id, update.effective_chat.id)
+            context.user_data.pop('watch_draft', None)
             await update.effective_message.reply_text('Watch ' + watch['id'] + ' tersimpan · ' + watch['mode'] + ' · WIB.')
         except ValueError as exc:
             await update.effective_message.reply_text(str(exc))
 
+    @staticmethod
+    def watch_buttons(draft):
+        prefix = 'watch:' + draft['token'] + ':'
+        choices = {'date': [('Today', 'date:today'), ('Tomorrow', 'date:tomorrow'), ('Choose date', 'date:choose')],
+                   'auto': [('Yes', 'auto:yes'), ('No', 'auto:no')],
+                   'confirm': [('Confirm', 'confirm')]}.get(draft['step'], [])
+        rows = [[InlineKeyboardButton(label, callback_data=prefix + value) for label, value in choices]] if choices else []
+        rows.append([InlineKeyboardButton('Cancel', callback_data=prefix + 'cancel')])
+        return InlineKeyboardMarkup(rows)
+
     async def watch_reply(self, update, context):
         draft = getattr(context, 'user_data', {}).get('watch_draft')
-        if not draft or draft['chat_id'] != update.effective_chat.id:
+        if not draft:
             return False
-        values = draft['values']
-        answer = update.effective_message.text.strip()
-        try:
-            if not values:
-                answer = channel_url(answer)
-            elif len(values) == 1:
-                # Validate the date now; final validation checks the full window.
-                if answer.lower() not in {'today', 'tomorrow', 'hari ini', 'besok'}:
-                    datetime.strptime(answer, '%Y-%m-%d')
-            elif len(values) in {2, 3}:
-                if not re.fullmatch(r'\d{2}:\d{2}', answer):
-                    raise ValueError('Gunakan HH:MM WIB.')
-                datetime.strptime(answer, '%H:%M')
-                if len(values) == 3:
-                    watch_window(values[1], values[2], answer)
-            elif len(values) == 4:
-                answer = 'first' if answer == '-' else answer.lower()
-                if answer not in {'first', 'every'}:
-                    raise ValueError('Pilih first atau every (default: first).')
-            elif len(values) == 5 and answer.lower() not in {'yes', 'no'}:
-                raise ValueError('Auto-transcribe: yes atau no.')
-            if len(values) == 5:
-                watch = self.create_watch(values + [answer], update.effective_user.id, update.effective_chat.id)
-                context.user_data.pop('watch_draft', None)
-                await update.effective_message.reply_text('Watch ' + watch['id'] + ' tersimpan · WIB.')
-            else:
-                values.append(answer)
-                prompts = ['Today / tomorrow / YYYY-MM-DD?', 'Jam mulai HH:MM WIB?',
-                           'Jam akhir HH:MM WIB?', 'First / every? Kirim - untuk first.',
-                           'Auto-transcribe yes / no?']
-                await update.effective_message.reply_text(prompts[len(values) - 1])
-        except ValueError as exc:
-            await update.effective_message.reply_text(str(exc))
+        if draft['chat_id'] != update.effective_chat.id:
+            await update.effective_message.reply_text('Watch sedang diisi di chat lain. Lanjutkan di sana atau /cancelwatch.')
+            return True
+        await self.watch_answer(update, context, update.effective_message.text.strip())
         return True
+
+    async def watch_answer(self, update, context, answer):
+        draft = context.user_data['watch_draft']
+        message = update.effective_message
+        try:
+            step = draft['step']
+            if answer.lower() == 'cancel':
+                context.user_data.pop('watch_draft', None)
+                await message.reply_text('Konfigurasi watch dibatalkan.')
+                return
+            if step == 'channel':
+                draft['channel'] = channel_url(answer)
+                draft['step'] = 'date'
+                prompt = 'Pilih tanggal (WIB), atau kirim YYYY-MM-DD.'
+            elif step == 'date':
+                draft['day'] = watch_day(answer)
+                draft['step'] = 'window'
+                prompt = 'Kirim window dalam satu pesan, misalnya 08:00-10:00 WIB.'
+            elif step == 'window':
+                start, end = parse_window(answer)
+                watch_window(draft['day'], start, end)
+                draft.update(start=start, end=end, step='auto')
+                prompt = 'Auto-transcribe setelah capture selesai?'
+            elif step == 'auto':
+                answer = answer.lower()
+                if answer not in {'yes', 'no'}:
+                    raise ValueError('Auto-transcribe: pilih Yes / No.')
+                if answer == 'yes':
+                    reader_url('check')
+                draft.update(auto=answer, step='confirm')
+                prompt = (draft['channel'] + '\n' + draft['day'] + ' · ' + draft['start'] + '–' + draft['end']
+                          + ' WIB\nFirst live · Auto-transcribe: ' + answer + '\nConfirm untuk menyimpan.')
+            elif step == 'confirm':
+                if answer.lower() != 'confirm':
+                    raise ValueError('Pilih Confirm untuk menyimpan atau Cancel untuk batal.')
+                watch = self.create_watch([draft['channel'], draft['day'], draft['start'], draft['end'], 'first', draft['auto']],
+                                          update.effective_user.id, update.effective_chat.id)
+                context.user_data.pop('watch_draft', None)
+                await message.reply_text('Watch ' + watch['id'] + ' tersimpan · first live · WIB.')
+                return
+            else:
+                raise ValueError('Mulai ulang dengan /watch.')
+            await message.reply_text(prompt, reply_markup=self.watch_buttons(draft))
+        except ValueError as exc:
+            await message.reply_text(str(exc), reply_markup=self.watch_buttons(draft))
+
+    @authorized
+    async def watch_callback(self, update, context):
+        query = update.callback_query
+        await query.answer()
+        draft = context.user_data.get('watch_draft')
+        match = re.fullmatch(r'watch:([a-f0-9]{8}):(cancel|confirm|date:(?:today|tomorrow|choose)|auto:(?:yes|no))', query.data or '')
+        if not match or not draft or draft.get('token') != match[1] or draft['chat_id'] != update.effective_chat.id:
+            await query.message.reply_text('Tombol watch sudah tidak aktif. Gunakan /watch untuk mulai.')
+            return
+        action = match[2]
+        if action != 'cancel' and action.split(':')[0] != draft['step']:
+            await query.message.reply_text('Lanjutkan langkah watch saat ini.', reply_markup=self.watch_buttons(draft))
+            return
+        if action == 'date:choose':
+            await query.message.reply_text('Kirim tanggal YYYY-MM-DD (WIB).', reply_markup=self.watch_buttons(draft))
+            return
+        await self.watch_answer(update, context, action.split(':')[-1])
 
     @authorized
     async def watchlist(self, update, context):

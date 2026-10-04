@@ -132,14 +132,22 @@ misalnya `123456789,987654321`. Tanpa allowlist, semua command/callback ditolak.
 `STREAMFETCH_PUBLIC_URL` harus menunjuk workspace yang bisa dibuka pengguna,
 misalnya `https://streamfetch.example.com`; View Transcript tetap memakai login web.
 
-`/watch` memandu konfigurasi channel, today/tomorrow/tanggal ISO, jam mulai/akhir
-HH:MM WIB, first/every, dan auto-transcribe yes/no. Cara singkat:
+`/watch` memandu konfigurasi channel → Today/Tomorrow/Choose date → window dalam
+satu pesan → auto-transcribe Yes/No → Confirm. Channel menerima `@rribatam`,
+`youtube.com/@rribatam`, atau URL lengkap. Tombol Cancel atau `/cancelwatch`
+membatalkan konfigurasi; input salah tidak menghapus langkah yang sedang diisi.
+Window menerima `08:00-10:00`, `8:00 - 10:00`, atau `08.00-10.00`, dengan opsional
+`WIB`. Cara singkat (langsung tersimpan):
 
 ```text
-/watch https://youtube.com/@rribatam tomorrow 09:00 12:00 first yes
+/watch @rribatam today 08:00-10:00
+/watch https://youtube.com/@rribatam tomorrow 08.00-10.00
+/watch @rribatam tomorrow 09:00-12:00 every yes
 ```
 
-Mode default `first`, auto-transcribe default `no`. Jam akhir harus sesudah jam
+Mode default `first` (tanpa pertanyaan mode), auto-transcribe default `no` untuk
+command satu baris. Mode `every` dapat dipilih secara eksplisit lewat command;
+format lama dengan jam terpisah tetap didukung. Jam akhir harus sesudah jam
 mulai pada tanggal yang sama; window yang sudah berakhir ditolak. Polling default
 30 detik (`TELEGRAM_WATCH_POLL_SECONDS`, minimum 10). Discovery memakai metadata
 20 siaran terbaru pada tab Streams, hanya memilih video yang sudah `is_live`,
