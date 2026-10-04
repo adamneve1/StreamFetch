@@ -1,6 +1,36 @@
 const $ = id => document.getElementById(id);
 let csrf='', isAdmin=false, mode='oryx', sources=[], editing='', active=null, online=false, queued=0, pending=false, disk=null, archiveEnabled=false, historyRows=[], refreshId=0, estimateId=0, estimateTimer, lastObservedJob=null;
+let focusedJobId=null, submittedJob=null, focusPending=false;
 const expandedHistoryDetails=new Set();
+function showSection(section){
+ const admin=section==='admin';
+ $('control-room').hidden=admin;$('admin-view').hidden=!admin;
+ $('page-title').textContent=admin?'Admin':'Control Room';
+ for(const [id,current] of [['nav-control',!admin],['nav-admin',admin]]){
+  if(current)$(id).setAttribute('aria-current','page');else $(id).removeAttribute('aria-current');
+ }
+ closeActionMenu();
+}
+function collapseSource(collapsed){
+ $('capture-panel').dataset.collapsed=String(collapsed);
+ $('capture-content').hidden=collapsed;$('capture-another').hidden=!collapsed;
+ $('capture-another').setAttribute('aria-expanded',String(!collapsed));
+}
+function captureSubmitted(result,payload){
+ focusedJobId=result.job_id;focusPending=true;
+ submittedJob={job_id:result.job_id,source:payload.source,note:payload.note,
+  quality:payload.quality,output_format:payload.format,compression:payload.compression,
+  storage:payload.storage,requested_at:Date.now()/1000,state:'starting',
+  detail:'Capture diterima. Menunggu worker…'};
+ if(payload.source==='youtube')$('youtube-url').value='';
+ if(payload.source==='tiktok')$('tiktok-url').value='';
+ clearTimeout(estimateTimer);estimateId++;
+ $('size-estimate').textContent='Pilih sumber dulu untuk melihat perkiraan ukurannya.';
+ for(const id of ['filter-q','filter-source','filter-state','filter-date'])$(id).value='';
+ showSection('control');collapseSource(true);
+ renderHistory([submittedJob,...historyRows.filter(row=>row.job_id!==focusedJobId)]);
+ $('empty').hidden=true;
+}
 async function api(path, data){
  const response=await fetch('/api/'+path,{method:data===undefined?'GET':'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:data===undefined?undefined:JSON.stringify(data)});
  const contentType=response.headers.get('content-type')||'';
@@ -17,7 +47,7 @@ async function api(path, data){
  return result;
 }
 function notice(text){$('notice').textContent=text;$('notice').hidden=!text;}
-function showLogin(){$('workspace').hidden=true;$('login').hidden=false;csrf='';isAdmin=false;active=null;lastObservedJob=null;expandedHistoryDetails.clear();}
+function showLogin(){$('workspace').hidden=true;$('login').hidden=false;csrf='';isAdmin=false;active=null;lastObservedJob=null;focusedJobId=null;submittedJob=null;focusPending=false;collapseSource(false);showSection('control');expandedHistoryDetails.clear();}
 function controls(){const canMark=!!active&&active.state==='recording'&&active.is_live!==false;$('marker-controls').hidden=!canMark;$('mark').disabled=pending||!canMark;$('record').disabled=pending||!online||!disk?.can_record||!!active||queued>0||(mode==='oryx'&&!$('source').value);$('stop').disabled=pending||!active||['finalizing','stopping','ready','failed'].includes(active.state);renderOperationalStatus();}
 function bytes(n=0){return n>=1e9?(n/1e9).toFixed(2)+' GB':(n/1e6).toFixed(1)+' MB';}
 function stateName(state){return ({starting:'Menghubungkan',recording:'Berjalan',waiting:'Menunggu YouTube',stopping:'Menghentikan',finalizing:'Memproses',ready:'Siap',failed:'Gagal',interrupted:'Terputus'})[state]||state||'Siap';}
@@ -73,6 +103,7 @@ function renderDownloadProgress(job){
 }
 function renderOperationalStatus(){
  const job=active||lastObservedJob,connection=$('connection');
+ $('status-monitor').hidden=!job&&!queued;
  connection.textContent='●';connection.classList.toggle('online',online);connection.classList.toggle('offline',!online);
  connection.title=online?'Sistem siap':'Sistem offline';connection.setAttribute('aria-label',connection.title);
  $('status-monitor').dataset.tone=statusTone(job?.state);
@@ -121,6 +152,8 @@ function renderHistory(rows){
  $('results').replaceChildren();
  for(const row of rows){
   const tr=document.createElement('tr'),selectCell=document.createElement('td'),checkbox=document.createElement('input');
+  tr.dataset.jobId=row.job_id;
+  if(row.job_id===focusedJobId){tr.className='focused-job';tr.tabIndex=-1;tr.setAttribute('aria-label','Capture terbaru');}
   selectCell.className='select-cell';checkbox.type='checkbox';checkbox.className='history-select';checkbox.value=row.job_id;
   checkbox.checked=selection.has(row.job_id);checkbox.setAttribute('aria-label','Pilih '+(row.filename||'riwayat'));checkbox.onchange=updateDeleteControls;
   selectCell.append(checkbox);tr.append(selectCell);
@@ -152,6 +185,7 @@ function renderHistory(rows){
    trigger.title='Aksi lainnya';trigger.onclick=()=>toggleActionMenu(trigger,row);action.append(trigger);
   }
   tr.append(action);$('results').append(tr);
+  if(row.job_id===focusedJobId&&focusPending){tr.focus({preventScroll:true});tr.scrollIntoView({behavior:'smooth',block:'center'});focusPending=false;}
  }
  updateDeleteControls();
 }
@@ -172,6 +206,12 @@ async function refresh(){
   const history=await api('recordings?'+params);if(revision!==refreshId)return;
   const rows=history.recordings;
   const filtered=[...params.values()].some(Boolean);
+  // Admission can precede catalogue publication. Keep the accepted capture
+  // visible until the worker supplies its durable row, without retaining URLs.
+  if(submittedJob){
+   if(rows.some(row=>row.job_id===submittedJob.job_id))submittedJob=null;
+   else if(!filtered)rows.unshift(active?.job_id===submittedJob.job_id?{...submittedJob,...active}:submittedJob);
+  }
   if(!active&&lastObservedJob){
    let finished=rows.find(row=>row.job_id===lastObservedJob.job_id);
    if(!finished&&filtered&&!['ready','failed','interrupted'].includes(lastObservedJob.state)){
@@ -183,7 +223,7 @@ async function refresh(){
    else if(!['ready','failed','interrupted'].includes(lastObservedJob.state))lastObservedJob=null;
    renderOperationalStatus();
   }
-  $('result-count').textContent=history.total?history.total+' hasil':'Belum ada hasil';$('empty').hidden=!!rows.length;
+  $('result-count').textContent=rows.length?Math.max(history.total,rows.length)+' hasil':'Belum ada hasil';$('empty').hidden=!!rows.length;
   $('empty').querySelector('strong').textContent=filtered?'Belum ketemu hasil yang cocok.':'Belum ada hasil.';
   $('empty').querySelector('p').textContent=filtered?'Coba ubah filternya atau mulai rekaman baru.':'Hasil rekaman dan download kamu akan muncul di sini.';
   closeActionMenu();renderHistory(rows);
@@ -192,10 +232,12 @@ async function refresh(){
 async function enter(auth){isAdmin=!!auth?.is_admin;$('login').hidden=true;$('workspace').hidden=false;$('role-badge').textContent=isAdmin?'Admin':'Pengguna';$('admin-panel').hidden=!isAdmin;$('delete-selected').hidden=!isAdmin;updateFormatControls();await loadSources();await refresh();}
 $('login-form').onsubmit=async e=>{e.preventDefault();try{const auth=await api('login',{password:$('password').value});csrf=auth.csrf;$('password').value='';$('login-error').textContent='';await enter(auth);}catch(err){$('login-error').textContent=err.message;}};
 $('logout').onclick=async()=>{try{await api('logout',{});showLogin();}catch(e){notice(e.message);}};
+$('nav-control').onclick=()=>showSection('control');$('nav-admin').onclick=()=>showSection('admin');
+$('capture-another').onclick=()=>{collapseSource(false);(mode==='youtube'?$('youtube-url'):mode==='tiktok'?$('tiktok-url'):$('source')).focus();};
 $('tab-tiktok').onclick=()=>setMode('tiktok');$('tab-oryx').onclick=()=>setMode('oryx');$('tab-youtube').onclick=()=>setMode('youtube');$('source').onchange=()=>{editSource($('source').value);scheduleEstimate();controls();};$('new-source').onclick=()=>{$('source-manager').open=true;editSource('');$('source-name').focus();};
 $('source-form').onsubmit=async e=>{e.preventDefault();try{const saved=await api('sources',{id:editing,name:$('source-name').value,url:$('source-url').value});await loadSources();$('source').value=saved.id;editSource(saved.id);$('source-feedback').textContent='Sip, sumbernya sudah tersimpan dan siap dipakai.';controls();}catch(err){$('source-feedback').textContent=err.message;}};
 $('check').onclick=async()=>{$('check').disabled=true;$('source-feedback').textContent='Lagi mencoba terhubung…';try{const result=await api('check',{url:$('source-url').value});$('source-feedback').textContent='Berhasil tersambung · '+result.codecs.join(' / ');}catch(e){$('source-feedback').textContent=e.message;}finally{$('check').disabled=false;}};
-$('record').onclick=async()=>{pending=true;controls();notice('');try{await api('record',{source:mode,source_id:$('source').value,url:mode==='tiktok'?$('tiktok-url').value:$('youtube-url').value,note:$('note').value,storage:$('storage-target').value,quality:$('quality').value,format:$('media-format').value,compression:$('compression').value});await refresh();}catch(e){notice(e.message);}finally{pending=false;controls();}};
+$('record').onclick=async()=>{pending=true;controls();notice('');const payload={source:mode,source_id:$('source').value,url:mode==='tiktok'?$('tiktok-url').value:$('youtube-url').value,note:$('note').value,storage:$('storage-target').value,quality:$('quality').value,format:$('media-format').value,compression:$('compression').value};try{const result=await api('record',payload);captureSubmitted(result,payload);await refresh();}catch(e){collapseSource(false);notice(e.message);}finally{pending=false;controls();}};
 $('storage-target').onchange=updateStorageHint;
 $('quality').onchange=scheduleEstimate;$('compression').onchange=()=>{updateCompressionHint();scheduleEstimate();};$('media-format').onchange=()=>{updateFormatControls();scheduleEstimate();};$('youtube-url').oninput=scheduleEstimate;$('tiktok-url').oninput=scheduleEstimate;
 $('stop').onclick=async()=>{pending=true;controls();try{await api('stop',{job_id:active.job_id});notice('Lagi dihentikan. File-nya akan muncul sebentar lagi.');await refresh();}catch(e){notice(e.message);}finally{pending=false;controls();}};

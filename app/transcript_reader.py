@@ -31,47 +31,77 @@ def youtube_id(value):
 
 LABELS = {
     'program': 'program', 'acara': 'program', 'nama program': 'program',
-    'tanggal': 'date_time', 'date/time': 'date_time', 'date': 'date_time',
-    'hari/tanggal': 'date_time', 'hari, tanggal': 'date_time',
+    'tanggal': 'date', 'date/time': 'date', 'date': 'date',
+    'hari/tanggal': 'date', 'hari,tanggal': 'date',
     'waktu': 'time', 'jam': 'time', 'time': 'time',
     'tema': 'theme', 'theme': 'theme', 'topik': 'theme',
     'narasumber': 'guests', 'nara sumber': 'guests', 'guests': 'guests',
     'guest': 'guests', 'bintang tamu': 'guests',
     'presenter': 'presenter', 'penyiar': 'presenter', 'host': 'presenter',
     'pemandu': 'presenter', 'moderator': 'presenter',
+    'produser': 'producer', 'producer': 'producer',
+    'operator studio': 'studio_operator', 'studio operator': 'studio_operator',
+    'penanggung jawab': 'person_in_charge', 'person in charge': 'person_in_charge',
 }
 
 
+def _heading_label(value):
+    value = ' '.join(value.casefold().split())
+    return re.sub(r'\s*([,/])\s*', r'\1', value)
+
+
 def parse_source_metadata(description):
-    """Only extract explicitly labelled facts; the untouched description is authoritative."""
+    """Deterministic sections, with raw text authoritative and no positional inference.
+
+    Only aliases identify inline headings. Unknown labels require a standalone
+    ``Label:`` line; otherwise a colon remains ordinary section content.
+    """
+    raw = str(description or '')
     fields = {}
+    unknown = []
+    unparsed = []
     active = None
-    for line in str(description or '').splitlines():
+    for line in raw.splitlines():
         clean = re.sub(r'^\s*(?:[-•*]|\d+[.)])\s*', '', line).strip()
-        match = re.match(r'^([^:：]{1,40})\s*[:：]\s*(.*)$', clean)
-        key = LABELS.get(match[1].strip().casefold()) if match else None
+        clean = ' '.join(clean.split())
+        # A hashtag starts the description footer, including inline tags.
+        hashtag = re.search(r'(?<!\S)#[\w]', clean)
+        if hashtag:
+            clean = clean[:hashtag.start()].rstrip()
+        match = re.fullmatch(r'([^:：]{1,60})\s*[:：]\s*(.*)', clean)
+        key = LABELS.get(_heading_label(match[1])) if match else None
         if key:
-            active = key
+            active = fields.setdefault(key, [])
             value = match[2].strip()
             if value:
-                fields.setdefault(key, []).append(value)
-        elif active == 'guests' and clean and re.match(r'^\s*(?:[-•*]|\d+[.)])\s*', line):
-            fields.setdefault('guests', []).append(clean)
-        else:
-            active = None
+                active.append(value)
+        elif match and not match[2] and re.fullmatch(r'[^\W\d_][\w /,()-]*', match[1].strip()):
+            section = {'heading': match[1].strip(), 'lines': []}
+            unknown.append(section)
+            active = section['lines']
+        elif clean:
+            (active if active is not None else unparsed).append(clean)
+        if hashtag:
+            break
     result = {key: '\n'.join(values) for key, values in fields.items()
-              if key not in {'guests', 'time'}}
-    if fields.get('time'):
-        result['date_time'] = ' · '.join(filter(None, [
-            result.get('date_time'), '\n'.join(fields['time'])]))
+              if key != 'guests'}
+    result['date_time'] = ' · '.join(filter(None, [result.get('date'), result.get('time')]))
+    result['description'] = raw
+    result['unknown_sections'] = [{'heading': section['heading'],
+                                   'content': '\n'.join(section['lines'])}
+                                  for section in unknown]
+    result['unparsed'] = '\n'.join(unparsed)
     result['guests'] = []
     for value in fields.get('guests', []):
         # Preserve the original guest text; separate roles only when explicitly delimited.
-        match = re.match(r'^(.*?)\s*\(([^()]+)\)\s*$', value)
-        if not match:
-            match = re.match(r'^(.*?)\s+(?:[-–—]|\|)\s+(.+)$', value)
-        result['guests'].append({'name': match[1].strip() if match else value,
-                                 'role': match[2].strip() if match else '',
+        name, separator, role = value.partition(' - ')
+        if not separator:
+            match = re.match(r'^(.*?)\s*\(([^()]+)\)\s*$', value)
+            if not match:
+                match = re.match(r'^(.*?)\s+(?:[–—]|\|)\s+(.+)$', value)
+            name, role = (match[1], match[2]) if match else (value, '')
+        result['guests'].append({'name': name.strip(),
+                                 'role': role.strip(),
                                  'text': value})
     return result
 
@@ -96,6 +126,9 @@ def recording_info(row):
         'presenter': parsed.get('presenter') or '',
         'source': row.get('source_name') or source.get('channel') or row.get('source') or '',
         'description': description,
+        'secondary': {key: parsed[key] for key in
+                      ('producer', 'studio_operator', 'person_in_charge') if parsed.get(key)},
+        'unknown_sections': parsed['unknown_sections'],
     }
 
 

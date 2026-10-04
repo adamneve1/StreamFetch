@@ -124,3 +124,13 @@ test('reader displays unavailable metadata and disables absent timestamps for ol
   assert.equal(f.get('timestamp-mode').disabled,true);
   assert.equal(f.get('transcript-text').textContent,'Legacy');
 });
+test('secondary and unknown sections stay out of compact metadata and raw description stays accessible',async()=>{
+  const description='Produser: Ratna\nEditor:\nDina\nTema: Pendidikan';
+  const f=await fixture({info:{program:'Dialog',theme:'Pendidikan',guests:[],secondary:{producer:'Ratna'},unknown_sections:[{heading:'Editor',content:'Dina'}],description},segments,raw:'TXT',exports:['txt']});
+  assert.doesNotMatch(f.get('program-info').textContent,/Ratna|Dina|Editor|Produser/);
+  assert.equal(f.get('source-description').textContent,description);
+});
+test('desktop player sizing is capped and centered without changing the 16:9 embed',()=>{
+  const css=fs.readFileSync(require.resolve('../app/static/transcript.css'),'utf8');
+  assert.match(css,/\.reader-shell \.reader-player\{max-width:680px;width:100%;margin:8px auto 12px;aspect-ratio:16\/9\}/);
+});

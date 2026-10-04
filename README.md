@@ -6,6 +6,18 @@ Stream langsung diproses dengan FFmpeg, sedangkan YouTube diproses dengan `yt-dl
 
 Panel web menjadi antarmuka utama. Telegram tersedia sebagai kontrol opsional.
 
+Control Room menampilkan Source lalu History. Setelah capture diterima, Source
+otomatis menjadi tombol “＋ Capture another source”, URL yang dikirim dikosongkan,
+dan job baru disorot di History. Pilihan quality, format, kompresi, dan tujuan
+penyimpanan tetap tersimpan di form. Jika pengiriman gagal, input tetap utuh.
+Filter History direset setelah capture berhasil agar job baru terlihat.
+
+Navigasi Admin memisahkan pengelolaan sumber tersimpan, password (khusus admin),
+status penyimpanan, dan panduan konfigurasi sistem/default dari workflow capture.
+Pengaturan provider, model, concurrency, dan resource tetap dikelola melalui
+`.env`/Docker Compose; halaman ini tidak membuat API konfigurasi baru atau
+menampilkan kredensial. Hak akses API yang sudah ada tidak berubah.
+
 Project ini dibuat untuk kebutuhan workflow produksi dan broadcast internal, bukan sebagai layanan downloader publik.
 
 ## Arsitektur

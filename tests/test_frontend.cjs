@@ -29,6 +29,8 @@ class Element {
   setAttribute(name, value) { this.attributes[name] = String(value); }
   removeAttribute(name) { delete this.attributes[name]; if (name === 'value') this.value = ''; }
   addEventListener(name, callback) { this.listeners[name] = callback; }
+  focus() { this.focused = true; }
+  scrollIntoView() { this.scrolled = true; }
   querySelectorAll(selector) {
     const [base, pseudo] = selector.split(':');
     const matches = node => (base.startsWith('.') ? node.className.split(' ').includes(base.slice(1)) : node.tagName === base)
@@ -183,4 +185,79 @@ test('polling retains the terminal result even when history filters hide the com
   assert.equal(f.get('download-progress').hidden, true);
   assert.equal(f.get('results').children.length, 0);
   assert.equal(f.run('historyRows.length'), 0);
+});
+
+function captureAPI(f,fail=false){
+  const requests=[];
+  f.context.fetch=async(url,options)=>{
+    if(url==='/api/record'){
+      requests.push(JSON.parse(options.body));
+      return {ok:!fail,status:fail?409:202,headers:{get:()=> 'application/json'},json:async()=>fail?{error:'Masih ada capture berjalan'}:{job_id:'new-job'}};
+    }
+    return {ok:true,status:200,headers:{get:()=> 'application/json'},json:async()=>
+      url==='/api/status'?{active:null,online:true,queued:1,archive_enabled:true,disk:{can_record:true,free:100,total:200}}:
+      url==='/api/sources'?{sources:[]}:{recordings:[],total:0}};
+  };
+  return requests;
+}
+test('successful capture collapses Source, clears only submitted URL, preserves selections and focuses new job',async()=>{
+  const f=fixture(),requests=captureAPI(f);
+  f.run("mode='youtube';online=true;disk={can_record:true}");
+  f.get('youtube-url').value='https://youtu.be/abcdefghijk';f.get('tiktok-url').value='https://www.tiktok.com/@other/live';
+  f.get('quality').value='720';f.get('compression').value='compact';f.get('storage-target').value='archive';f.get('note').value='Dialog Batam';
+  f.get('filter-q').value='old job';
+  await f.get('record').onclick();
+  assert.equal(requests[0].url,'https://youtu.be/abcdefghijk');
+  assert.equal(f.get('capture-content').hidden,true);assert.equal(f.get('capture-another').hidden,false);
+  assert.equal(f.get('youtube-url').value,'');assert.match(f.get('tiktok-url').value,/@other/);
+  assert.equal(f.get('quality').value,'720');assert.equal(f.get('compression').value,'compact');
+  assert.equal(f.get('storage-target').value,'archive');assert.equal(f.get('media-format').value,'mp4');assert.equal(f.get('note').value,'Dialog Batam');
+  assert.equal(f.get('filter-q').value,'');
+  assert.equal(f.get('results').children.length,1);
+  assert.equal(f.get('results').children[0].dataset.jobId,'new-job');
+  assert.match(f.get('results').children[0].className,/focused-job/);
+  assert.equal(f.run('focusPending'),false);
+  f.get('capture-another').onclick();assert.equal(f.get('capture-content').hidden,false);
+  assert.equal(f.get('youtube-url').focused,true);
+});
+test('submission failure keeps Source expanded and every input intact',async()=>{
+  const f=fixture();captureAPI(f,true);
+  f.run("mode='tiktok';online=true;disk={can_record:true}");
+  f.get('tiktok-url').value='https://www.tiktok.com/@batam/live';f.get('quality').value='480';f.get('note').value='Judul';
+  await f.get('record').onclick();
+  assert.equal(f.get('capture-content').hidden,false);assert.equal(f.get('capture-another').hidden,true);
+  assert.match(f.get('tiktok-url').value,/@batam/);assert.equal(f.get('quality').value,'480');assert.equal(f.get('note').value,'Judul');
+  assert.match(f.get('notice').textContent,/Masih ada capture/);assert.equal(f.run('focusedJobId'),null);
+});
+test('TikTok clears submitted URL and live capture preserves reusable source selection',()=>{
+  const f=fixture();
+  f.get('tiktok-url').value='https://www.tiktok.com/@batam/live';f.get('source').value='studio';
+  f.run("captureSubmitted({job_id:'tiktok-job'},{source:'tiktok',quality:'best',format:'mp4',compression:'balanced',storage:'local'})");
+  assert.equal(f.get('tiktok-url').value,'');
+  assert.equal(f.get('results').children[0].focused,true);assert.equal(f.get('results').children[0].scrolled,true);
+  f.run("captureSubmitted({job_id:'live-job'},{source:'oryx',source_id:'studio',quality:'best',format:'mp4',compression:'balanced',storage:'local'})");
+  assert.equal(f.get('source').value,'studio');
+});
+test('Admin navigation separates advanced controls and returning preserves the capture form',async()=>{
+  const f=fixture();captureAPI(f);
+  await f.run('enter({is_admin:false})');
+  assert.equal(f.get('admin-panel').hidden,true);
+  f.get('youtube-url').value='draft';
+  f.get('nav-admin').onclick();
+  assert.equal(f.get('control-room').hidden,true);assert.equal(f.get('admin-view').hidden,false);
+  assert.equal(f.get('page-title').textContent,'Admin');assert.equal(f.get('nav-admin').attributes['aria-current'],'page');
+  f.get('nav-control').onclick();
+  assert.equal(f.get('control-room').hidden,false);assert.equal(f.get('admin-view').hidden,true);
+  assert.equal(f.get('youtube-url').value,'draft');
+  await f.run('enter({is_admin:true})');assert.equal(f.get('admin-panel').hidden,false);
+  f.run('showLogin()');assert.equal(f.get('control-room').hidden,false);assert.equal(f.get('capture-content').hidden,false);
+});
+test('Control Room markup places History immediately after Source and configuration only in Admin',()=>{
+  const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
+  assert.match(html,/<\/div><\/section>\s*<section id="history-panel"/);
+  const control=html.slice(html.indexOf('<section id="control-room"'),html.indexOf('<section id="admin-view"'));
+  const admin=html.slice(html.indexOf('<section id="admin-view"'));
+  for(const id of ['capture-panel','quality','media-format','compression','storage-target','history-panel','status-monitor','stop','marker-controls'])assert.ok(control.includes('id="'+id+'"'),id);
+  for(const id of ['password-form','source-form','disk-meter']){assert.ok(admin.includes('id="'+id+'"'));assert.ok(!control.includes('id="'+id+'"'));}
+  assert.ok(admin.includes('TRANSCRIPTION_PROVIDER'));assert.ok(!control.includes('TRANSCRIPTION_PROVIDER'));
 });

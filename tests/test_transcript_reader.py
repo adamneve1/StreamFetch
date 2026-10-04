@@ -71,9 +71,66 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(parsed['program'], 'Dialog Batam')
         self.assertEqual(parsed['date_time'], 'Minggu, 4 Oktober 2026 · 09.00 WIB')
         self.assertEqual(parsed['theme'], 'Pendidikan inklusif')
-        self.assertEqual(parsed['presenter'], 'Sari')
+        self.assertEqual(parsed['presenter'], 'Sari\nSeluruh deskripsi asli.\nhttps://example.com')
         self.assertEqual([(guest['name'], guest['role']) for guest in parsed['guests']],
                          [('Dr. Rina', 'Dosen'), ('Budi', 'Kepala sekolah')])
+
+    def test_reordered_rri_sections_secondary_fields_and_hashtag_footer(self):
+        description = ('Dialog RRI Batam\n\nOperator Studio : Agus\n'
+                       'Narasumber :\nDr. Rina - Dosen - Universitas Batam\nBudi\n'
+                       'Jam : 09:00 WIB\nProduser : Ratna\n'
+                       'Tema : Pendidikan\ninklusi: kesempatan untuk semua\n'
+                       'Penanggung Jawab : Kepala RRI\n'
+                       'Hari,Tanggal : Minggu, 4 Oktober 2026\nPresenter : Sari\n'
+                       '#rri #dialog\nFooter tambahan')
+        parsed = transcript_reader.parse_source_metadata(description)
+        self.assertEqual(parsed['date_time'], 'Minggu, 4 Oktober 2026 · 09:00 WIB')
+        self.assertEqual(parsed['theme'], 'Pendidikan\ninklusi: kesempatan untuk semua')
+        self.assertEqual(parsed['guests'][0]['name'], 'Dr. Rina')
+        self.assertEqual(parsed['guests'][0]['role'], 'Dosen - Universitas Batam')
+        self.assertEqual(parsed['guests'][1]['role'], '')
+        self.assertEqual(parsed['presenter'], 'Sari')
+        info = transcript_reader.recording_info({'source_metadata': {
+            'title': 'Judul YouTube', 'description': description}})
+        self.assertEqual(info['program'], 'Judul YouTube')
+        self.assertEqual(info['secondary'], {'producer': 'Ratna', 'studio_operator': 'Agus',
+                                             'person_in_charge': 'Kepala RRI'})
+        self.assertEqual(info['description'], description)
+
+    def test_alias_case_and_whitespace_variations(self):
+        parsed = transcript_reader.parse_source_metadata(
+            '  pRoGrAm  ： Dialog\r\n hArI ,  TaNgGaL : Minggu\r\n'
+            ' WaKtU : 09:00\n  ThEmE :  Pendidikan   inklusif\n'
+            ' gUeSt : Rina - Dosen\n  HoSt : Sari\n'
+            ' OPERATOR   STUDIO : Agus\n PENANGGUNG   JAWAB : Ratna')
+        self.assertEqual(parsed['program'], 'Dialog')
+        self.assertEqual(parsed['date_time'], 'Minggu · 09:00')
+        self.assertEqual(parsed['theme'], 'Pendidikan inklusif')
+        self.assertEqual(parsed['guests'][0]['role'], 'Dosen')
+        self.assertEqual(parsed['presenter'], 'Sari')
+        self.assertEqual(parsed['studio_operator'], 'Agus')
+        self.assertEqual(parsed['person_in_charge'], 'Ratna')
+
+    def test_multiline_values_unknown_sections_and_content_colons(self):
+        raw = ('Pembukaan: bukan heading metadata\nTema:\nBaris satu\n\n'
+               'Catatan: contoh nilai\nhttps://rri.co.id\n'
+               'Editor :\nDina\nCatatan: tetap isi editor\n'
+               'Penyiar: Sari #RRI\n#Batam')
+        parsed = transcript_reader.parse_source_metadata(raw)
+        self.assertEqual(parsed['theme'], 'Baris satu\nCatatan: contoh nilai\nhttps://rri.co.id')
+        self.assertEqual(parsed['unknown_sections'], [
+            {'heading': 'Editor', 'content': 'Dina\nCatatan: tetap isi editor'}])
+        self.assertEqual(parsed['unparsed'], 'Pembukaan: bukan heading metadata')
+        self.assertEqual(parsed['presenter'], 'Sari')
+        self.assertEqual(parsed['description'], raw)
+
+    def test_missing_sections_and_guest_name_hyphens_are_not_roles(self):
+        parsed = transcript_reader.parse_source_metadata('Narasumber:\nAnne-Marie\nRina\n#RRI')
+        self.assertEqual(parsed['date_time'], '')
+        self.assertNotIn('theme', parsed)
+        self.assertEqual([(guest['name'], guest['role']) for guest in parsed['guests']],
+                         [('Anne-Marie', ''), ('Rina', '')])
+        self.assertEqual(transcript_reader.recording_info({})['program'], 'Transcript')
 
     def test_raw_description_persisted_verbatim_and_returned(self):
         self.assertEqual(storage.recording('reader-job')['source_metadata']['description'],
