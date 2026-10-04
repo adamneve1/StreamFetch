@@ -66,7 +66,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "StreamFetch\n\n"
-        "Kirim link YouTube atau TikTok Live (@username/live) untuk merekam.\n\n"
+        "Kirim link YouTube, TikTok video/Live, atau Instagram Reel/post video.\n\n"
         "Perintah:\n"
         "/record - rekam live Oryx yang dikonfigurasi\n"
         "/stop - hentikan capture\n"
@@ -147,18 +147,24 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             url = storage.validate_tiktok_url(url)
             source = 'tiktok'
         except ValueError:
-            await update.message.reply_text('❌ Kirim URL YouTube atau https://www.tiktok.com/@username/live')
-            return
+            try:
+                url = storage.validate_instagram_url(url)
+                source = 'instagram'
+            except ValueError:
+                await update.message.reply_text('❌ Kirim URL YouTube, TikTok video/Live, atau Instagram Reel/post video.')
+                return
 
     job = {
         "job_id": uuid.uuid4().hex,
         "chat_id": update.effective_chat.id,
         "url": url,
         "source": source,
-        "source_name": "TikTok Live" if source == "tiktok" else "YouTube",
+        "source_name": {'tiktok': 'TikTok', 'instagram': 'Instagram', 'youtube': 'YouTube'}[source],
     }
 
-    if source == 'tiktok':
+    if source in {'tiktok', 'instagram'}:
+        job['is_live'] = source == 'tiktok' and storage.tiktok_is_live(url)
+    if job.get('is_live'):
         job['requested_at'] = time.time()
         try:
             result = r.eval(ADMIT_ORYX, 1, f"active:{job['chat_id']}", job['job_id'], json.dumps(job))

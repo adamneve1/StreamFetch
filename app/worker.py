@@ -260,7 +260,7 @@ def probe_media_file(path):
     }
 
 
-def finalize_to_compatible_mp4(path, compression="original"):
+def finalize_to_compatible_mp4(path, compression="original", allow_silent=False):
     """Finalize *path* as an MP4 using the selected size preset.
 
     Rules
@@ -293,7 +293,7 @@ def finalize_to_compatible_mp4(path, compression="original"):
     need_video_reencode = (preset["force_encode"]
                            or video_codec not in preset["codecs"]
                            or pix_fmt != "yuv420p")
-    need_audio_reencode = preset["force_encode"] or audio_codec != "aac"
+    need_audio_reencode = (preset["force_encode"] or audio_codec != "aac") and not (allow_silent and audio_codec == 'unknown')
     is_mp4 = "mp4" in container
 
     # Fast path: nothing to do at all.
@@ -373,7 +373,7 @@ def finalize_to_compatible_mp4(path, compression="original"):
     print(f"Temp   – audio codec: {tmp_audio}")
     print(f"Temp   – pix_fmt: {tmp_pix}")
 
-    if not compatible_media(tmp_probe, compression):
+    if not compatible_media(tmp_probe, compression, allow_silent=allow_silent):
         print("Finalized temp file does not meet compatibility requirements – aborting.")
         temp_path.unlink(missing_ok=True)
         return None
@@ -663,12 +663,12 @@ def update_youtube_metadata(job, info):
     job['live_status'] = info.get('live_status') or ('is_live' if job['is_live'] else 'not_live')
     job['was_live'] = info.get('was_live') is True or job['live_status'] in {'post_live', 'was_live'}
     job['title'] = info.get('title') or job.get('title', '')
-    if job.get('source') == 'youtube':
+    if job.get('source') in {'youtube', 'tiktok', 'instagram'}:
         metadata = dict(job.get('source_metadata') or {})
-        for key in ('title', 'description', 'channel', 'upload_date'):
+        for key in ('title', 'description', 'channel', 'upload_date', 'uploader', 'uploader_id', 'timestamp', 'duration', 'id'):
             if info.get(key) is not None:
                 metadata[key] = info[key]
-        if re.fullmatch(r'[A-Za-z0-9_-]{11}', str(info.get('id') or '')):
+        if job.get('source') == 'youtube' and re.fullmatch(r'[A-Za-z0-9_-]{11}', str(info.get('id') or '')):
             metadata['youtube_id'] = info['id']
         job['source_metadata'] = metadata
 
@@ -681,11 +681,11 @@ def inspection_error(output):
         (('impersonation target', 'impersonate'), 'browser_support',
          'Extractor membutuhkan dukungan browser impersonation. Rebuild image dengan dependensi curl-cffi.'),
         (('captcha', 'challenge'), 'challenge',
-         'TikTok meminta verifikasi browser. Akses dari server belum berhasil.'),
+         'Sumber meminta verifikasi browser. Akses dari server belum berhasil.'),
         (('not currently live', 'livestream has ended'), 'not_live',
          'TikTok melaporkan akun tidak live atau room live tidak terbaca. Pastikan akun sedang live; pembatasan akses juga dapat menyebabkan respons ini.'),
-        (('login required', 'log in', 'sign in', 'requiring login'), 'login_required',
-         'Sumber meminta login. Sesi browser diperlukan untuk mengakses siaran ini.'),
+        (('login required', 'log in', 'sign in', 'requiring login', 'login-required', 'logged-in'), 'login_required',
+         'Sumber meminta login atau membatasi akses. Video ini belum dapat diakses dari server.'),
         (('http error 403', 'http error 429'), 'access_denied',
          'Akses sumber ditolak atau dibatasi (HTTP 403/429). Coba lagi setelah beberapa saat.'),
         (('http error 400',), 'http_400',
@@ -694,7 +694,7 @@ def inspection_error(output):
         (('unable to download', 'name resolution', 'connection refused'), 'network',
          'Worker gagal mengunduh informasi sumber. Periksa koneksi jaringan server.'),
         (('unable to extract', 'no video formats', 'requested format is not available'), 'extractor',
-         'Extractor tidak menemukan informasi atau format siaran. Periksa akses sumber dan versi yt-dlp.'),
+         'Extractor tidak menemukan informasi atau format video. Periksa akses sumber dan versi yt-dlp.'),
     ]
     for needles, code, detail in cases:
         if any(needle in text for needle in needles):
@@ -703,8 +703,10 @@ def inspection_error(output):
 
 
 async def inspect_youtube(job):
-    process = await spawn(['yt-dlp', '--dump-single-json', '--skip-download',
-                           '--no-playlist', job['url']])
+    command = ['yt-dlp', '--dump-single-json', '--skip-download', '--no-playlist']
+    if job['source'] in {'tiktok', 'instagram'}:
+        command += ['--ignore-no-formats-error']
+    process = await spawn(command + [job['url']])
     log.info('job=%s source=%s inspect_pid=%s', job['job_id'], job['source'], process.pid)
     communication = asyncio.create_task(process.communicate())
     deadline = time.monotonic() + STARTUP_TIMEOUT
@@ -755,7 +757,7 @@ def capture_command(job):
         '--fragment-retries', '10', '--file-access-retries', '3',
         '--retry-sleep', 'fragment:exp=1:20', '--continue',
     ]
-    if job['source'] == 'youtube' and job.get('is_live') is False:
+    if job['source'] in {'youtube', 'tiktok', 'instagram'} and job.get('is_live') is False:
         # Report the current format separately: video and audio can each reach
         # 100%, so this is track progress, not overall download completion.
         command += [
@@ -766,6 +768,8 @@ def capture_command(job):
         # A post-live manifest is still changing. Do not silently accept holes;
         # the bounded outer retry will refresh metadata and resume the .part.
         command += ['--abort-on-unavailable-fragments']
+    if job.get('playlist_item'):
+        command += ['--playlist-items', str(job['playlist_item'])]
     if output_format == 'mp3':
         command += ['--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0']
     else:
@@ -815,7 +819,7 @@ async def capture(job, status, lease):
                 return
             text = line.decode(errors='replace').strip()
             parsed_progress = None
-            if job['source'] in {'youtube', 'tiktok'}:
+            if job['source'] in {'youtube', 'tiktok', 'instagram'}:
                 parsed_progress = parse_progress(text)
                 if parsed_progress:
                     activity['percent'] = parsed_progress['percent']
@@ -825,7 +829,7 @@ async def capture(job, status, lease):
                     activity['media'] = max(activity['media'], int(text.split('=', 1)[1]))
                 except ValueError:
                     pass
-            if text and not parsed_progress and job['source'] in {'youtube', 'tiktok'}:
+            if text and not parsed_progress and job['source'] in {'youtube', 'tiktok', 'instagram'}:
                 safe = safe_diagnostic(text)
                 if safe:
                     output_tail.append(f'{channel}: {safe}')
@@ -990,12 +994,12 @@ def durations_aligned(video_info, audio_info=None):
     return abs(video_duration - audio_duration) <= tolerance
 
 
-def compatible_media(info, compression="original"):
+def compatible_media(info, compression="original", allow_silent=False):
     try:
         preset = quality.video_preset(compression)
         return bool(info and 'mp4' in info['container']
                     and info['video_codec'] in preset['codecs']
-                    and info['audio_codec'] == 'aac'
+                    and (info['audio_codec'] == 'aac' or (allow_silent and info['audio_codec'] == 'unknown'))
                     and info['pix_fmt'] == 'yuv420p'
                     and float(info.get('duration') or 0) > 0
                     and durations_aligned(info))
@@ -1067,11 +1071,22 @@ def complete_recording(job):
         raise RuntimeError('No usable audio file; temporary media retained')
     separate_video = separate_audio = None
     separate_video_info = separate_audio_info = None
+    allow_silent = (job['source'] in {'tiktok', 'instagram'} and job.get('silent_video')
+                    and job.get('stop_reason') == 'completed')
     for path in candidates:
         info = probe_media_file(path)
         if not info:
             continue
         if info['video_codec'] != 'unknown' and info['audio_codec'] == 'unknown':
+            # Only accept silence explicitly confirmed by source metadata, not
+            # a missing audio fragment from an interrupted A/V download.
+            if allow_silent:
+                compression = quality.validate_preset(job.get('compression', 'original'))
+                final_path = finalize_to_compatible_mp4(path, compression, allow_silent=True)
+                if final_path and compatible_media(probe_media_file(final_path), compression, allow_silent=True):
+                    target = generate_final_filename(job.get('title', ''), note=job.get('note', ''))
+                    final_path.rename(target)
+                    return target
             if separate_video is None:
                 separate_video, separate_video_info = path, info
             continue
@@ -1159,19 +1174,33 @@ async def run_download(job):
         if not storage.disk_status(DOWNLOAD_DIR)['can_record']:
             await set_state(job, status, 'failed', 'Ruang disk downloads terlalu rendah atau tidak bisa diperiksa. Kosongkan ruang sebelum merekam.')
             return
-        if job['source'] not in {'youtube', 'oryx', 'tiktok'}:
+        if job['source'] not in {'youtube', 'oryx', 'tiktok', 'instagram'}:
             raise ValueError('Unsupported source type')
-        if job['source'] in {'oryx', 'tiktok'} and time.time() - job.get('requested_at', 0) > 10:
+        if job['source'] == 'tiktok':
+            job['url'] = storage.validate_tiktok_url(job['url'])
+            job['is_live'] = storage.tiktok_is_live(job['url'])
+        elif job['source'] == 'instagram':
+            job['url'] = storage.validate_instagram_url(job['url'])
+            job['is_live'] = False
+        if job['source'] in {'oryx', 'tiktok'} and job['is_live'] and time.time() - job.get('requested_at', 0) > 10:
             raise RuntimeError('Record request expired; please send /record again')
         if r.exists(f"stop:{job['job_id']}"):
             raise RuntimeError('Stopped before capture started')
-        if job['source'] in {'youtube', 'tiktok'}:
-            if job['source'] == 'tiktok':
-                job['url'] = storage.validate_tiktok_url(job['url'])
+        if job['source'] in {'youtube', 'tiktok', 'instagram'}:
+            tiktok_live = job['source'] == 'tiktok' and storage.tiktok_is_live(job['url'])
             stage = 'inspection'
             info = await inspect_youtube(job)
+            if job['source'] in {'tiktok', 'instagram'} and not tiktok_live:
+                try:
+                    info, job['playlist_item'] = storage.social_video(info, job['source'])
+                except ValueError as exc:
+                    raise SourceInspectionError('unsupported_media', str(exc)) from exc
+                if info.get('is_live') is True:
+                    raise SourceInspectionError('unsupported_live', 'URL ini bukan video biasa. Instagram Live tidak didukung.')
+                formats = info.get('formats') or [info]
+                job['silent_video'] = bool(formats) and all(fmt.get('acodec') == 'none' for fmt in formats)
             update_youtube_metadata(job, info)
-            if job['source'] == 'tiktok' and info.get('is_live') is not True:
+            if tiktok_live and info.get('is_live') is not True:
                 await set_state(job, status, 'failed', 'Akun TikTok belum live atau siaran tidak dapat diakses. Coba lagi saat akun sedang live.')
                 return
             if job['source'] == 'youtube' and job.get('live_status') == 'post_live':

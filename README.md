@@ -429,9 +429,22 @@ stopping → finalizing → ready
 
 Status `ready` hanya diberikan setelah MP4 berhasil divalidasi.
 
-### TikTok Live
+### TikTok dan Instagram
 
-Pilih tab **TikTok Live**, masukkan `https://www.tiktok.com/@username/live`, lalu klik **Mulai rekam**. Link yang sama bisa dikirim ke Telegram. Akun harus sedang live dan dapat diakses dari server. Link video biasa dan link pendek belum didukung.
+Pilih tab **TikTok** untuk video/post (`https://www.tiktok.com/@username/video/123`)
+atau Live (`https://www.tiktok.com/@username/live`). Live otomatis memakai perilaku
+rekaman yang ada; video biasa memakai download hingga selesai. Link pendek belum
+didukung. Pilih **Instagram** untuk Reel (`https://www.instagram.com/reel/ID/`)
+atau post video (`https://www.instagram.com/p/ID/`). Link yang sama dapat dikirim
+ke Telegram. Stories, Instagram Live, profile, dan foto tidak didukung. Post tanpa
+video menghasilkan pesan gagal yang jelas. Jika post berisi beberapa video, satu
+job mengambil video pertama yang didukung, tanpa mengunduh gambar.
+
+Semua sumber memakai worker yt-dlp, History, progress, cancellation, penyimpanan,
+dan transkripsi MP4 yang sama. Judul/deskripsi, uploader, tanggal/durasi, dan ID
+yang tersedia disimpan sebagai metadata sumber. Video privat, login, rate-limit,
+dan perubahan extractor dapat menyebabkan kegagalan yang ditampilkan di History;
+tidak ada konfigurasi akun/cookie sosial baru.
 
 Tekan **Stop** untuk finalisasi MP4. Penanda momen, katalog, dan filter sumber juga mendukung TikTok. Rekaman dimulai saat terhubung, tanpa mengambil bagian sebelum capture dimulai.
 

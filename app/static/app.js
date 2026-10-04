@@ -24,6 +24,7 @@ function captureSubmitted(result,payload){
   detail:'Capture diterima. Menunggu worker…'};
  if(payload.source==='youtube')$('youtube-url').value='';
  if(payload.source==='tiktok')$('tiktok-url').value='';
+ if(payload.source==='instagram')$('instagram-url').value='';
  clearTimeout(estimateTimer);estimateId++;
  $('size-estimate').textContent='Pilih sumber dulu untuk melihat perkiraan ukurannya.';
  for(const id of ['filter-q','filter-source','filter-state','filter-date'])$(id).value='';
@@ -51,8 +52,9 @@ function showLogin(){$('workspace').hidden=true;$('login').hidden=false;csrf='';
 function controls(){const canMark=!!active&&active.state==='recording'&&active.is_live!==false;$('marker-controls').hidden=!canMark;$('mark').disabled=pending||!canMark;$('record').disabled=pending||!online||!disk?.can_record||!!active||queued>0||(mode==='oryx'&&!$('source').value);$('stop').disabled=pending||!active||['finalizing','stopping','ready','failed'].includes(active.state);renderOperationalStatus();}
 function bytes(n=0){return n>=1e9?(n/1e9).toFixed(2)+' GB':(n/1e6).toFixed(1)+' MB';}
 function stateName(state){return ({starting:'Menghubungkan',recording:'Berjalan',waiting:'Menunggu YouTube',stopping:'Menghentikan',finalizing:'Memproses',ready:'Siap',failed:'Gagal',interrupted:'Terputus'})[state]||state||'Siap';}
-function jobStateName(job){return job?.source==='youtube'&&job.is_live===false&&job.state==='recording'?'Mengunduh':stateName(job?.state);}
-function sourceDisplayName(job){return job.source==='tiktok'&&(!job.source_name||job.source_name==='TikTok Live')?'TikTok':job.source_name||({youtube:'YouTube',oryx:'Oryx',tiktok:'TikTok'})[job.source]||job.source||'';}
+function isFiniteDownload(job){return ['youtube','tiktok','instagram'].includes(job?.source)&&job.is_live===false;}
+function jobStateName(job){return isFiniteDownload(job)&&job.state==='recording'?'Mengunduh':stateName(job?.state);}
+function sourceDisplayName(job){return job.source==='tiktok'&&(!job.source_name||job.source_name==='TikTok Live')?'TikTok':job.source_name||({youtube:'YouTube',oryx:'Oryx',tiktok:'TikTok',instagram:'Instagram'})[job.source]||job.source||'';}
 function statusTone(state){return ({starting:'working',recording:'working',waiting:'waiting',stopping:'waiting',finalizing:'working',ready:'success',failed:'error',interrupted:'error'})[state]||'idle';}
 function presetName(row){if(row.output_format==='mp3'||row.filename?.toLowerCase().endsWith('.mp3'))return 'Audio MP3';return ({original:'Original',balanced:'Seimbang',compact:'Hemat'})[row.compression]||'Preset tidak tercatat';}
 function duration(n=0){return [Math.floor(n/3600),Math.floor(n/60)%60,Math.floor(n)%60].map(x=>String(x).padStart(2,'0')).join(':');}
@@ -89,7 +91,7 @@ function renderTranscript(row,cell){
 }
 function updateStorageHint(){$('storage-hint').textContent=$('storage-target').value==='archive'?'File disimpan di lokal, lalu disalin ke arsip.':archiveEnabled?'File disimpan di folder downloads.':'File disimpan di folder downloads. Arsipnya belum aktif.';}
 function renderDownloadProgress(job){
- const download=job?.source==='youtube'&&job.is_live===false;
+ const download=isFiniteDownload(job);
  const visible=download&&['starting','recording','waiting','finalizing'].includes(job.state);
  $('download-progress').hidden=!visible;
  if(!visible)return;
@@ -109,8 +111,8 @@ function renderOperationalStatus(){
  connection.title=online?'Sistem siap':'Sistem offline';connection.setAttribute('aria-label',connection.title);
  $('status-monitor').dataset.tone=statusTone(job?.state);
  $('state').textContent=jobStateName(job);$('state').dataset.tone=statusTone(job?.state);
- $('status-panel-title').textContent=job?.source==='youtube'&&job.is_live===false?'Download':'Status';
- $('duration-label').textContent=job?.source==='youtube'&&job.is_live===false?'WAKTU PROSES':'DURASI';
+ $('status-panel-title').textContent=isFiniteDownload(job)?'Download':'Status';
+ $('duration-label').textContent=isFiniteDownload(job)?'WAKTU PROSES':'DURASI';
  $('status-title').textContent=job?.state==='ready'?'Selesai':job?jobStateName(job):'Siap';
  $('status-job-title').textContent=job?(job.filename||job.note||sourceDisplayName(job)):'';
  $('status-job-title').title=$('status-job-title').textContent;
@@ -123,7 +125,8 @@ function renderOperationalStatus(){
 function editSource(id){editing=id;const s=sources.find(x=>x.id===id);$('source-name').value=s?.name||'';$('source-url').value=s?.url||'';$('source-feedback').textContent='';}
 async function loadSources(){const previous=$('source').value; sources=(await api('sources')).sources;$('source').replaceChildren();for(const s of sources){const o=document.createElement('option');o.value=s.id;o.textContent=s.name;$('source').append(o);}if(!sources.length){const o=document.createElement('option');o.value='';o.textContent='Belum ada sumber — tambahkan dulu';$('source').append(o);}if(sources.some(x=>x.id===previous))$('source').value=previous;editSource($('source').value);scheduleEstimate();controls();}
 function estimateText(data){const detail=data.format==='mp3'?' · MP3':data.height?' · '+data.height+'p':'';const compressed=data.compression&&data.compression!=='original';if(data.is_live)return data.bytes_per_hour?'Perkiraan sumber '+bytes(data.bytes_per_hour)+' per jam'+detail+(compressed?' · hasil preset bisa berbeda':''):'Ukuran live bergantung pada durasi dan bitrate sumber'+detail;return data.estimated_bytes?(compressed?'Perkiraan ukuran sumber ':'Perkiraan ukuran ')+bytes(data.estimated_bytes)+detail+(compressed?' · hasil preset bisa berbeda':''):'Ukuran belum tersedia dari sumber'+detail;}
-async function estimateSize(){const requestId=++estimateId;const url=mode==='tiktok'?$('tiktok-url').value.trim():$('youtube-url').value.trim();if((mode==='oryx'&&!$('source').value)||(mode!=='oryx'&&!url)){$('size-estimate').textContent='Pilih sumber dulu untuk melihat perkiraan ukurannya.';return;}$('size-estimate').textContent='Lagi menghitung perkiraan ukuran…';try{const data=await api('estimate',{source:mode,source_id:$('source').value,url,quality:$('quality').value,format:$('media-format').value,compression:$('compression').value});if(requestId===estimateId)$('size-estimate').textContent=estimateText(data);}catch(e){if(requestId===estimateId)$('size-estimate').textContent=e.message;}}
+function sourceInput(){return mode==='oryx'?$('source'):$(mode+'-url');}
+async function estimateSize(){const requestId=++estimateId;const url=mode==='oryx'?'':sourceInput().value.trim();if((mode==='oryx'&&!$('source').value)||(mode!=='oryx'&&!url)){$('size-estimate').textContent='Pilih sumber dulu untuk melihat perkiraan ukurannya.';return;}$('size-estimate').textContent='Lagi menghitung perkiraan ukuran…';try{const data=await api('estimate',{source:mode,source_id:$('source').value,url,quality:$('quality').value,format:$('media-format').value,compression:$('compression').value});if(requestId===estimateId)$('size-estimate').textContent=estimateText(data);}catch(e){if(requestId===estimateId)$('size-estimate').textContent=e.message;}}
 function scheduleEstimate(){clearTimeout(estimateTimer);estimateTimer=setTimeout(estimateSize,500);}
 function updateCompressionHint(){
  const audio=mode==='youtube'&&$('media-format').value==='mp3';
@@ -133,7 +136,7 @@ function updateCompressionHint(){
  $('compression-spec').textContent=specs[$('compression').value];$('compression-details').hidden=audio;
 }
 function updateFormatControls(){const audio=mode==='youtube'&&$('media-format').value==='mp3';$('format-field').hidden=mode!=='youtube';$('media-options').classList.toggle('has-format',mode==='youtube');$('media-format').disabled=mode!=='youtube';$('quality').disabled=mode==='oryx'||audio;$('compression').disabled=audio;if(mode==='oryx'||audio)$('quality').value='best';if(audio)$('compression').value='original';updateCompressionHint();$('note').placeholder=mode==='youtube'?'Kosongkan untuk memakai judul asli':'Contoh: Batam menyapa';$('filename-hint').textContent='Nama file: DDMMYYNN - '+(mode==='youtube'?'Judul video':'Judul')+'.'+(audio?'mp3':'mp4');$('record').textContent=mode==='youtube'?'Download':'Mulai';}
-function setMode(value){mode=value;for(const source of ['youtube','tiktok','oryx'])$('tab-'+source).setAttribute('aria-pressed',String(source===mode));$('tiktok-fields').hidden=mode!=='tiktok';$('tab-tiktok').classList.toggle('selected',mode==='tiktok');$('oryx-fields').hidden=mode!=='oryx';$('youtube-fields').hidden=mode!=='youtube';$('tab-oryx').classList.toggle('selected',mode==='oryx');$('tab-youtube').classList.toggle('selected',mode==='youtube');if(mode!=='youtube')$('media-format').value='mp4';updateFormatControls();scheduleEstimate();controls();}
+function setMode(value){mode=value;for(const source of ['youtube','tiktok','instagram','oryx']){$('tab-'+source).setAttribute('aria-pressed',String(source===mode));$('tab-'+source).classList.toggle('selected',source===mode);$(source+'-fields').hidden=source!==mode;}if(mode!=='youtube')$('media-format').value='mp4';updateFormatControls();scheduleEstimate();controls();}
 function historyDetails(row){
  const details=document.createElement('details'),summary=document.createElement('summary'),body=document.createElement('div');
  details.className='recording-details';details.dataset.jobId=row.job_id;details.open=expandedHistoryDetails.has(row.job_id);
@@ -236,13 +239,13 @@ async function enter(auth){isAdmin=!!auth?.is_admin;$('login').hidden=true;$('wo
 $('login-form').onsubmit=async e=>{e.preventDefault();try{const auth=await api('login',{password:$('password').value});csrf=auth.csrf;$('password').value='';$('login-error').textContent='';await enter(auth);}catch(err){$('login-error').textContent=err.message;}};
 $('logout').onclick=async()=>{try{await api('logout',{});showLogin();}catch(e){notice(e.message);}};
 $('nav-control').onclick=()=>showSection('control');$('nav-admin').onclick=()=>showSection('admin');
-$('capture-another').onclick=()=>{collapseSource(false);(mode==='youtube'?$('youtube-url'):mode==='tiktok'?$('tiktok-url'):$('source')).focus();};
-$('tab-tiktok').onclick=()=>setMode('tiktok');$('tab-oryx').onclick=()=>setMode('oryx');$('tab-youtube').onclick=()=>setMode('youtube');$('source').onchange=()=>{editSource($('source').value);scheduleEstimate();controls();};$('new-source').onclick=()=>{$('source-manager').open=true;editSource('');$('source-name').focus();};
+$('capture-another').onclick=()=>{collapseSource(false);sourceInput().focus();};
+$('tab-instagram').onclick=()=>setMode('instagram');$('tab-tiktok').onclick=()=>setMode('tiktok');$('tab-oryx').onclick=()=>setMode('oryx');$('tab-youtube').onclick=()=>setMode('youtube');$('source').onchange=()=>{editSource($('source').value);scheduleEstimate();controls();};$('new-source').onclick=()=>{$('source-manager').open=true;editSource('');$('source-name').focus();};
 $('source-form').onsubmit=async e=>{e.preventDefault();try{const saved=await api('sources',{id:editing,name:$('source-name').value,url:$('source-url').value});await loadSources();$('source').value=saved.id;editSource(saved.id);$('source-feedback').textContent='Sip, sumbernya sudah tersimpan dan siap dipakai.';controls();}catch(err){$('source-feedback').textContent=err.message;}};
 $('check').onclick=async()=>{$('check').disabled=true;$('source-feedback').textContent='Lagi mencoba terhubung…';try{const result=await api('check',{url:$('source-url').value});$('source-feedback').textContent='Berhasil tersambung · '+result.codecs.join(' / ');}catch(e){$('source-feedback').textContent=e.message;}finally{$('check').disabled=false;}};
-$('record').onclick=async()=>{pending=true;controls();notice('');const payload={source:mode,source_id:$('source').value,url:mode==='tiktok'?$('tiktok-url').value:$('youtube-url').value,note:$('note').value,storage:$('storage-target').value,quality:$('quality').value,format:$('media-format').value,compression:$('compression').value};try{const result=await api('record',payload);captureSubmitted(result,payload);await refresh();}catch(e){collapseSource(false);notice(e.message);}finally{pending=false;controls();}};
+$('record').onclick=async()=>{pending=true;controls();notice('');const payload={source:mode,source_id:$('source').value,url:mode==='oryx'?'':sourceInput().value,note:$('note').value,storage:$('storage-target').value,quality:$('quality').value,format:$('media-format').value,compression:$('compression').value};try{const result=await api('record',payload);captureSubmitted(result,payload);await refresh();}catch(e){collapseSource(false);notice(e.message);}finally{pending=false;controls();}};
 $('storage-target').onchange=updateStorageHint;
-$('quality').onchange=scheduleEstimate;$('compression').onchange=()=>{updateCompressionHint();scheduleEstimate();};$('media-format').onchange=()=>{updateFormatControls();scheduleEstimate();};$('youtube-url').oninput=scheduleEstimate;$('tiktok-url').oninput=scheduleEstimate;
+$('quality').onchange=scheduleEstimate;$('compression').onchange=()=>{updateCompressionHint();scheduleEstimate();};$('media-format').onchange=()=>{updateFormatControls();scheduleEstimate();};$('youtube-url').oninput=scheduleEstimate;$('tiktok-url').oninput=scheduleEstimate;$('instagram-url').oninput=scheduleEstimate;
 $('stop').onclick=async()=>{pending=true;controls();try{await api('stop',{job_id:active.job_id});notice('Lagi dihentikan. File-nya akan muncul sebentar lagi.');await refresh();}catch(e){notice(e.message);}finally{pending=false;controls();}};
 setInterval(()=>{const job=active||lastObservedJob;$('duration').textContent=duration(job?.state==='recording'&&job.started_at?Math.max(0,Date.now()/1000-job.started_at):job?.elapsed||0);},1000);
 (async()=>{try{const auth=await api('session');csrf=auth.csrf;await enter(auth);}catch{showLogin();}})();

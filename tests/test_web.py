@@ -28,7 +28,7 @@ class WebTests(unittest.TestCase):
 
     def test_tiktok_admission_and_validation(self):
         self.redis.set('worker:heartbeat', 1)
-        for url in ('https://tiktok.com.evil.test/@a/live', 'https://www.tiktok.com/@a/video/123',
+        for url in ('https://tiktok.com.evil.test/@a/live', 'https://www.tiktok.com/@a/video/not-an-id',
                     'https://evil.test/https://www.tiktok.com/@a/live', 'https://www.tiktok.com/@a',
                     'https://user:pass@www.tiktok.com/@a/live'):
             self.assertEqual(self.post('record', {'source': 'tiktok', 'url': url}).status_code, 400)
@@ -36,7 +36,7 @@ class WebTests(unittest.TestCase):
         result = self.post('record', {'source': 'tiktok', 'url': 'https://www.tiktok.com/@tester/live?share=1'})
         self.assertEqual(result.status_code, 202)
         job = json.loads(self.redis.lindex('download_queue', 0))
-        self.assertEqual(job['source_name'], 'TikTok Live')
+        self.assertEqual(job['source_name'], 'TikTok')
         self.assertEqual(job['url'], 'https://www.tiktok.com/@tester/live')
         self.assertEqual(self.post('stop', {'job_id': job['job_id']}).status_code, 200)
 
@@ -48,6 +48,39 @@ class WebTests(unittest.TestCase):
         missing = self.client.get('/api/missing')
         self.assertEqual(missing.status_code, 404)
         self.assertTrue(missing.is_json)
+
+    def test_social_url_detection_validation_and_job_options(self):
+        for source, url, live in [('tiktok', 'https://tiktok.com/@a/video/123?share=1', False),
+                                  ('tiktok', 'https://tiktok.com/@a/live', True),
+                                  ('tiktok', 'https://tiktok.com/@a/photo/123', False),
+                                  ('instagram', 'https://instagram.com/reel/AbC_123/?igsh=abc', False),
+                                  ('instagram', 'https://www.instagram.com/p/AbC-123/', False)]:
+            with self.subTest(url=url):
+                self.redis.flushall()
+                self.redis.set('worker:heartbeat', 1)
+                response = self.post('record', dict(source=source, url=url, quality='720', compression='balanced'))
+                self.assertEqual(response.status_code, 202)
+                job = json.loads(self.redis.lindex('download_queue', 0))
+                self.assertEqual(job['source'], source)
+                self.assertEqual(job['is_live'], live)
+                self.assertEqual(job['quality'], '720')
+                self.assertEqual(job['compression'], 'balanced')
+                self.assertNotIn('?', job['url'])
+        for url in ['https://instagram.com/stories/abc/123/', 'https://instagram.com/abc/live/',
+                    'https://instagram.com/abc/', 'https://instagram.com.evil/p/abc/',
+                    'https://user:pass@instagram.com/p/abc/', 'https://instagram.com:8888/p/abc/']:
+            self.assertEqual(self.post('record', dict(source='instagram', url=url)).status_code, 400)
+
+    def test_instagram_video_estimate_and_image_only_error(self):
+        from types import SimpleNamespace
+        video = dict(duration=60, filesize=1000, formats=[dict(url='https://cdn.example/v.mp4', ext='mp4')])
+        for metadata, expected in [(video, 200), ({'formats': []}, 400)]:
+            with patch.object(web.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=json.dumps(metadata).encode())) as run:
+                response = self.post('estimate', dict(source='instagram', url='https://instagram.com/p/ABC/'))
+            self.assertEqual(response.status_code, expected)
+            self.assertIn('--ignore-no-formats-error', run.call_args.args[0])
+            if expected == 400:
+                self.assertIn('tidak berisi video', response.json['error'])
 
     def test_roles_password_change_and_admin_only_delete(self):
         user = self.app.test_client()

@@ -19,7 +19,7 @@ from types import SimpleNamespace
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', '123456:TEST_TOKEN')
 
 import fakeredis
-from app import bot, quality, worker
+from app import bot, quality, worker, storage, transcription_queue
 
 
 class CaptureTests(unittest.IsolatedAsyncioTestCase):
@@ -220,6 +220,98 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.redis.get('state:test-job'), 'failed')
         self.assertIsNone(self.redis.get('capture:owner'))
 
+    async def test_social_videos_use_finite_capture_and_persist_metadata(self):
+        for source, url in [('tiktok', 'https://www.tiktok.com/@tester/video/123'),
+                            ('instagram', 'https://www.instagram.com/reel/ABC123/')]:
+            with self.subTest(source=source):
+                job = self.job(source)
+                job['job_id'] = source + '-job'
+                self.redis.set('capture:owner', job['job_id'], ex=30)
+                job.update(url=url, origin='web', requested_at=time.time() - 60)
+                path = self.root / (source + '.mp4')
+                self.media(path)
+                info = dict(id='ABC123', title='Dialog Batam', description='Original description',
+                            uploader='RRI Batam', channel='rribatam', upload_date='20261005', duration=1,
+                            formats=[dict(url='https://cdn.example/video.mp4', ext='mp4', vcodec='h264')])
+                with patch.object(worker, 'inspect_youtube', AsyncMock(return_value=info)), \
+                     patch.object(worker, 'capture', AsyncMock(return_value='completed')) as capture, \
+                     patch.object(worker, 'complete_recording', return_value=path):
+                    await worker.run_download(job)
+                capture.assert_awaited_once()
+                self.assertFalse(job['is_live'])
+                saved = storage.recording(job['job_id'])
+                self.assertEqual(saved['state'], 'ready')
+                self.assertEqual(saved['source'], source)
+                self.assertEqual(saved['source_metadata']['description'], 'Original description')
+                self.assertEqual(saved['source_metadata']['uploader'], 'RRI Batam')
+                self.assertNotIn('youtube_id', saved['source_metadata'])
+                self.assertEqual(transcription_queue.enqueue(self.redis, job['job_id']), ('queued', True))
+
+    async def test_instagram_unsupported_media_and_auth_errors_do_not_capture(self):
+        for info in [{'formats': []}, {'entries': [{'url': 'https://cdn.example/photo.jpg', 'ext': 'jpg', 'height': 1080}]}]:
+            job = self.job('instagram')
+            job['url'] = 'https://instagram.com/p/ABC/'
+            with patch.object(worker, 'inspect_youtube', AsyncMock(return_value=info)), \
+                 patch.object(worker, 'capture', AsyncMock()) as capture:
+                await worker.run_download(job)
+            capture.assert_not_called()
+            public = json.loads(self.redis.get('web:job:test-job'))
+            self.assertEqual(public['state'], 'failed')
+            self.assertIn('tidak berisi video', public['detail'])
+        for diagnostic in [b'ERROR: login required', b'ERROR: HTTP Error 429', b'ERROR: Unable to extract video']:
+            job = self.job('instagram')
+            job['url'] = 'https://instagram.com/p/ABC/'
+            error = worker.inspection_error(diagnostic)
+            with patch.object(worker, 'inspect_youtube', AsyncMock(side_effect=error)), \
+                 patch.object(worker, 'capture', AsyncMock()) as capture:
+                await worker.run_download(job)
+            capture.assert_not_called()
+            self.assertEqual(json.loads(self.redis.get('web:job:test-job'))['detail'], error.detail)
+
+    async def test_social_cancellation_and_telegram_finite_admission(self):
+        job = self.job('instagram')
+        job['url'] = 'https://instagram.com/p/ABC/'
+        self.redis.set('stop:test-job', 1)
+        with patch.object(worker, 'inspect_youtube', AsyncMock()) as inspect:
+            await worker.run_download(job)
+        inspect.assert_not_called()
+        for url, source in [('https://www.tiktok.com/@tester/video/123', 'tiktok'),
+                            ('https://instagram.com/reel/ABC/', 'instagram')]:
+            self.redis.delete('active:123')
+            update = self.update()
+            update.message.text = url
+            await bot.handle_url(update, SimpleNamespace(user_data={}))
+            queued = json.loads(self.redis.lindex('download_queue', -1))
+            self.assertEqual(queued['source'], source)
+            self.assertFalse(queued['is_live'])
+
+    def test_instagram_carousel_selects_only_first_video_and_retains_post_metadata(self):
+        photo = {'url': 'https://cdn.example/photo.jpg', 'ext': 'jpg', 'height': 1080}
+        video = {'id': 'video1', 'formats': [{'url': 'https://cdn.example/v.mp4', 'vcodec': 'h264'}]}
+        selected, index = storage.social_video({'description': 'Post caption', 'entries': [photo, video, video]}, 'instagram')
+        self.assertEqual(index, 2)
+        self.assertEqual(selected['description'], 'Post caption')
+        command, _ = worker.capture_command(dict(source='instagram', job_id='carousel', is_live=False,
+                                                 url='https://instagram.com/p/ABC/', playlist_item=index))
+        self.assertEqual(command[command.index('--playlist-items') + 1], '2')
+        self.assertIn('--progress-template', command)
+        with self.assertRaises(ValueError):
+            storage.social_video({'formats': [{'url': 'https://cdn.example/audio.m4a', 'vcodec': 'none'}]}, 'tiktok')
+
+    def test_confirmed_silent_social_video_is_not_confused_with_missing_audio_fragment(self):
+        path = self.root / 'silent-video.mp4'
+        subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=s=64x64:d=0.5',
+                        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(path)], check=True)
+        info = worker.probe_media_file(path)
+        self.assertFalse(worker.compatible_media(info))
+        self.assertTrue(worker.compatible_media(info, allow_silent=True))
+        with patch.object(worker, 'generate_final_filename', return_value=self.root / 'final.mp4'):
+            job = dict(job_id='silent', source='instagram', silent_video=True, stop_reason='operator_stop')
+            with self.assertRaises(worker.MediaValidationError):
+                worker.complete_recording(job)
+            job['stop_reason'] = 'completed'
+            self.assertEqual(worker.complete_recording(job).name, 'final.mp4')
+
     async def test_tiktok_bot_admission(self):
         self.redis.set('worker:heartbeat', '1')
         update = self.update()
@@ -260,13 +352,13 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('--abort-on-unavailable-fragments', command)
         self.assertIn('%(format_id)s', command[command.index('-o') + 1])
 
-    def test_track_progress_template_is_only_enabled_for_youtube_downloads(self):
-        for source, is_live in (('youtube', False), ('youtube', True), ('tiktok', True)):
+    def test_track_progress_template_is_enabled_for_finite_downloads(self):
+        for source, is_live in (('youtube', False), ('youtube', True), ('tiktok', True), ('tiktok', False), ('instagram', False)):
             with self.subTest(source=source, is_live=is_live):
                 command, _ = worker.capture_command(dict(
                     job_id='progress-job', source=source, is_live=is_live,
                     url='https://youtu.be/test'))
-                self.assertEqual('--progress-template' in command, source == 'youtube' and not is_live)
+                self.assertEqual('--progress-template' in command, not is_live)
                 if '--progress-template' in command:
                     template = command[command.index('--progress-template') + 1]
                     self.assertIn('%(info.vcodec)s|%(info.acodec)s', template)

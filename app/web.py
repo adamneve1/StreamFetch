@@ -256,16 +256,23 @@ def create_app(client=None):
                 url = storage.validate_url(str(data.get('url', '')).strip(), youtube=True)
             elif source == 'tiktok':
                 url = storage.validate_tiktok_url(str(data.get('url', '')).strip())
+            elif source == 'instagram':
+                url = storage.validate_instagram_url(str(data.get('url', '')).strip())
             else:
                 raise ValueError('Pilih dulu sumber yang mau dicek.')
-            result = subprocess.run([
+            command = [
                 'yt-dlp', '--dump-single-json', '--skip-download', '--no-playlist',
                 '--no-warnings', '-f',
-                quality.ytdlp_selector(selected_quality, output_format), url,
-            ], capture_output=True, timeout=25)
+                quality.ytdlp_selector(selected_quality, output_format),
+            ]
+            if source in {'tiktok', 'instagram'}:
+                command += ['--ignore-no-formats-error']
+            result = subprocess.run(command + [url], capture_output=True, timeout=25)
             if result.returncode:
                 return jsonify(error='Ukuran belum bisa diperkirakan dari sumber ini.'), 422
             metadata = json.loads(result.stdout)
+            if source in {'tiktok', 'instagram'} and not (source == 'tiktok' and storage.tiktok_is_live(url)):
+                metadata, _ = storage.social_video(metadata, source)
             return jsonify(**quality.selected_media_info(metadata), quality=selected_quality,
                            format=output_format, compression=compression)
         except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
@@ -306,7 +313,10 @@ def create_app(client=None):
                 raise ValueError('Pilih sumber live terlebih dahulu.')
             job.update(stream_url=storage.validate_url(selected['url']), source_name=selected['name'])
         elif source == 'tiktok':
-            job.update(url=storage.validate_tiktok_url(data.get('url', '').strip()), source_name='TikTok Live')
+            url = storage.validate_tiktok_url(data.get('url', '').strip())
+            job.update(url=url, source_name='TikTok', is_live=storage.tiktok_is_live(url))
+        elif source == 'instagram':
+            job.update(url=storage.validate_instagram_url(data.get('url', '').strip()), source_name='Instagram', is_live=False)
         elif source == 'youtube':
             job.update(url=storage.validate_url(data.get('url', '').strip(), youtube=True), source_name='YouTube')
         else:

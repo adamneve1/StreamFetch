@@ -51,14 +51,47 @@ def validate_url(url, youtube=False):
 
 def validate_tiktok_url(url):
     if not isinstance(url, str) or len(url) > 4096 or any(c.isspace() for c in url):
-        raise ValueError('Masukkan link TikTok Live: https://www.tiktok.com/@username/live')
+        raise ValueError('Masukkan link TikTok video/post atau Live: https://www.tiktok.com/@username/video/123 atau /live')
     parsed = urlsplit(url)
     if (parsed.scheme not in {'http', 'https'}
             or parsed.hostname not in {'tiktok.com', 'www.tiktok.com', 'm.tiktok.com'}
             or parsed.username or parsed.password or parsed.port not in {None, 80, 443}
-            or not re.fullmatch(r'/@[A-Za-z0-9_.]+/live/?', parsed.path)):
-        raise ValueError('Masukkan link TikTok Live: https://www.tiktok.com/@username/live')
+            or not re.fullmatch(r'/@[A-Za-z0-9_.]+/(?:live|(?:video|photo)/\d+)/?', parsed.path)):
+        raise ValueError('Masukkan link TikTok video/post atau Live: https://www.tiktok.com/@username/video/123 atau /live')
     return 'https://www.tiktok.com' + parsed.path.rstrip('/')
+
+
+def tiktok_is_live(url):
+    return urlsplit(validate_tiktok_url(url)).path.endswith('/live')
+
+
+def validate_instagram_url(url):
+    message = 'Masukkan link Instagram Reel atau post video: https://www.instagram.com/reel/ID/ atau /p/ID/.'
+    if not isinstance(url, str) or len(url) > 4096 or any(c.isspace() for c in url):
+        raise ValueError(message)
+    parsed = urlsplit(url)
+    if (parsed.scheme not in {'http', 'https'} or parsed.hostname not in {'instagram.com', 'www.instagram.com'}
+            or parsed.username or parsed.password or parsed.port not in {None, 80, 443}
+            or not re.fullmatch(r'/(?:reel|reels|p|tv)/[A-Za-z0-9_-]+/?', parsed.path)):
+        raise ValueError(message)
+    return 'https://www.instagram.com' + parsed.path.rstrip('/') + '/'
+
+
+def social_video(info, source):
+    """Select one video per job; image-only posts never enter capture."""
+    entries = info.get('entries') if isinstance(info, dict) else None
+    candidates = list(enumerate(entries, 1)) if isinstance(entries, list) else [(None, info)]
+    for index, entry in candidates:
+        if not isinstance(entry, dict):
+            continue
+        formats = entry.get('formats') or [entry]
+        if any(isinstance(fmt, dict) and fmt.get('url') and fmt.get('vcodec') != 'none'
+               and fmt.get('ext') not in {'jpg', 'jpeg', 'png', 'webp', 'gif', 'mhtml'}
+               and (fmt.get('vcodec') or fmt.get('height') or fmt.get('ext') in {'mp4', 'webm', 'mov', 'm3u8'})
+               for fmt in formats):
+            # Post-level description/uploader remains available on carousel entries.
+            return {**{k: v for k, v in info.items() if k != 'entries'}, **entry}, index
+    raise ValueError(('Instagram' if source == 'instagram' else 'TikTok') + ' post ini tidak berisi video yang didukung. Foto/gambar tidak diunduh.')
 
 
 def sources():
@@ -101,7 +134,8 @@ def save_recording(job, state, detail=''):
     data.update(state=state, detail=detail)
     if isinstance(job.get('source_metadata'), dict):
         data['source_metadata'] = {key: job['source_metadata'][key]
-                                   for key in ('title', 'description', 'channel', 'upload_date', 'youtube_id')
+                                   for key in ('title', 'description', 'channel', 'upload_date', 'youtube_id',
+                                               'uploader', 'uploader_id', 'timestamp', 'duration', 'id')
                                    if key in job['source_metadata']}
     with connection() as db:
         if 'source_metadata' not in data:

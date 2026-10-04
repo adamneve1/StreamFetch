@@ -275,15 +275,34 @@ test('StreamFetch branding retains the existing mark and removes old user-facing
 test('segmented sources preserve mode behavior and expose the selected state accessibly',()=>{
   const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
   assert.ok(html.indexOf('id="tab-youtube"')<html.indexOf('id="tab-tiktok"'));
-  assert.ok(html.indexOf('id="tab-tiktok"')<html.indexOf('id="tab-oryx"'));
+  assert.ok(html.indexOf('id="tab-tiktok"')<html.indexOf('id="tab-instagram"'));
+  assert.ok(html.indexOf('id="tab-instagram"')<html.indexOf('id="tab-oryx"'));
   const f=fixture();
-  for(const source of ['youtube','tiktok','oryx']){
+  for(const source of ['youtube','tiktok','instagram','oryx']){
     f.run(`setMode('${source}')`);
-    for(const tab of ['youtube','tiktok','oryx'])assert.equal(f.get('tab-'+tab).attributes['aria-pressed'],String(tab===source));
+    for(const tab of ['youtube','tiktok','instagram','oryx'])assert.equal(f.get('tab-'+tab).attributes['aria-pressed'],String(tab===source));
     assert.equal(f.get(source+'-fields').hidden,false);
   }
   assert.equal(f.run("sourceDisplayName({source:'tiktok',source_name:'TikTok Live'})"),'TikTok');
+  assert.equal(f.run("sourceDisplayName({source:'instagram'})"),'Instagram');
   assert.equal(f.run("sourceDisplayName({source:'oryx',source_name:'PRO 2 RRI BATAM'})"),'PRO 2 RRI BATAM');
+});
+test('Instagram source input, submission collapse, and finite social progress reuse existing UI',()=>{
+  const f=fixture();f.run("setMode('instagram')");
+  f.get('instagram-url').value='https://instagram.com/reel/ABC/';
+  assert.equal(f.run('sourceInput().value'),'https://instagram.com/reel/ABC/');
+  f.get('quality').value='720';
+  f.run("captureSubmitted({job_id:'insta-job'},{source:'instagram',quality:'720',format:'mp4',compression:'balanced'})");
+  assert.equal(f.get('instagram-url').value,'');
+  assert.equal(f.get('capture-content').hidden,true);
+  assert.equal(f.get('quality').value,'720');
+  for(const source of ['tiktok','instagram']){
+    f.context.job={source,is_live:false,state:'recording',progress_percent:50,progress_phase:'video'};
+    f.run('renderDownloadProgress(job)');
+    assert.equal(f.get('download-progress').hidden,false);
+    assert.equal(f.run('jobStateName(job)'),'Mengunduh');
+  }
+  assert.equal(f.run("isFiniteDownload({source:'tiktok',is_live:true})"),false);
 });
 test('compact jobs retain every state, title, full diagnostics, metadata and secondary stop control',()=>{
   const f=fixture();
