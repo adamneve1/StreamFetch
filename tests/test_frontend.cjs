@@ -315,10 +315,50 @@ test('compact jobs retain every state, title, full diagnostics, metadata and sec
     assert.equal(f.get('active-source').textContent,'TikTok');
   }
   const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8');
-  assert.match(css,/\.workspace-page #status-monitor\{width:fit-content;max-width:100%/);
-  assert.match(css,/padding:10px 12px;border:1px solid #36363b;border-radius:12px/);
-  assert.match(css,/\.workspace-page #stop\{height:30px/);
+  assert.match(css,/grid-template-areas:'state content action' '\. metadata action' 'markers markers markers'/);
+  assert.match(css,/\.workspace-page #status-monitor>\.panel-heading\{display:flex;grid-area:state/);
+  assert.match(css,/\.workspace-page #stop\{height:auto;min-height:32px/);
   assert.match(css,/\.workspace-page #capture-panel \.capture-options \.form-grid\{display:contents\}/);
+});
+
+test('shell groups labelled destinations separately from secondary utilities and keeps navigation state',()=>{
+  const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
+  const header=html.match(/<header class="app-header">.*?<\/header>/)[0];
+  assert.match(header,/<nav class="workspace-nav" aria-label="Primary navigation">/);
+  for(const [id,label,target] of [['nav-control','Workspace','control-room'],['nav-admin','Settings','admin-view']]){
+    const button=header.match(new RegExp('<button id="'+id+'".*?</button>'))[0];
+    assert.match(button,new RegExp('aria-label="'+label+'"'));assert.match(button,new RegExp('aria-controls="'+target+'"'));
+    assert.match(button,new RegExp('<span class="nav-label">'+label+'</span>'));
+    assert.match(button,/<svg.*aria-hidden="true"/);
+  }
+  assert.ok(header.indexOf('</nav>')<header.indexOf('id="logout"'));
+  assert.match(header,/id="logout".*aria-label="Keluar"/);
+  assert.doesNotMatch(header,/header-right|>●</);
+  const f=fixture();
+  f.get('nav-admin').onclick();assert.equal(f.get('nav-admin').attributes['aria-current'],'page');assert.equal(f.get('nav-control').attributes['aria-current'],undefined);
+  f.get('nav-control').onclick();assert.equal(f.get('nav-control').attributes['aria-current'],'page');assert.equal(f.get('nav-admin').attributes['aria-current'],undefined);
+});
+
+test('shell retains meaningful online/offline status and long job state without altering actions',()=>{
+  const f=fixture();
+  f.run("online=false;renderOperationalStatus()");assert.equal(f.get('connection').textContent,'Offline');assert.equal(f.get('connection').attributes['aria-label'],'Sistem offline');
+  f.context.longTitle='JudulTanpaSpasi'.repeat(30);
+  f.run("online=true;active={job_id:'long',source:'instagram',state:'recording',is_live:false,note:longTitle,progress_percent:50};controls()");
+  assert.equal(f.get('connection').textContent,'Online');assert.equal(f.get('connection').attributes['aria-label'],'Sistem siap');
+  assert.equal(f.get('state').textContent,'Mengunduh');assert.equal(f.get('status-job-title').title,f.context.longTitle);
+  assert.equal(f.get('download-progress').hidden,false);assert.equal(f.get('stop').disabled,false);
+  f.run("active.state='finalizing';controls()");assert.equal(f.get('stop').disabled,true);
+});
+
+test('mobile shell and island use dedicated composition, touch targets, and local history scrolling',()=>{
+  const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8');
+  const shell=css.slice(css.indexOf('/* Application shell:'));
+  assert.match(shell,/\.app-header\{grid-template-columns:minmax\(0,1fr\) auto auto/);
+  assert.match(shell,/width:44px;min-height:44px/);assert.match(shell,/env\(safe-area-inset-left\)/);
+  assert.match(shell,/grid-template-areas:'state action' 'content content' 'metadata metadata' 'markers markers'/);
+  assert.match(shell,/grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/);
+  assert.match(shell,/\.workspace-page \.table-scroll\{overflow-x:auto;overscroll-behavior-x:contain\}/);
+  assert.match(shell,/overflow-wrap:anywhere/);assert.doesNotMatch(shell,/backdrop-filter:blur|overflow-x:hidden/);
 });
 
 test('Settings gear is labelled and existing configuration is grouped without changing IDs',()=>{

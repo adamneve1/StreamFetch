@@ -107,7 +107,7 @@ function renderDownloadProgress(job){
 function renderOperationalStatus(){
  const job=active||lastObservedJob,connection=$('connection');
  $('status-monitor').hidden=!job&&!queued;
- connection.textContent='●';connection.classList.toggle('online',online);connection.classList.toggle('offline',!online);
+ connection.textContent=online?'Online':'Offline';connection.classList.toggle('online',online);connection.classList.toggle('offline',!online);
  connection.title=online?'Sistem siap':'Sistem offline';connection.setAttribute('aria-label',connection.title);
  $('status-monitor').dataset.tone=statusTone(job?.state);
  $('state').textContent=jobStateName(job);$('state').dataset.tone=statusTone(job?.state);

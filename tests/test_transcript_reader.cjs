@@ -55,10 +55,12 @@ class Node {
   setAttribute(name,value){this[name]=value;}
   scrollIntoView(){this.scrolled=true;}
 }
-async function fixture(data,window={}){
+async function fixture(data,window={},video={}){
   const html=fs.readFileSync(require.resolve('../app/static/transcript.html'),'utf8');
   const nodes=new Map([...html.matchAll(/id="([^"]+)"/g)].map(match=>[match[1],new Node()]));
   nodes.get('timestamp-mode').value='segment';
+  nodes.get('reader-player').hidden=true;nodes.get('local-player').hidden=true;
+  Object.assign(nodes.get('local-player'),video);
   let init;const copies=[],requests=[];
   const head=new Node();
   const context=vm.createContext({window,document:{head,getElementById:id=>nodes.get(id),createElement:()=>new Node(),createTextNode:text=>{const node=new Node();node.textContent=text;return node;},addEventListener:(_,callback)=>init=callback},location:{origin:'https://streamfetch.example',pathname:'/api/recordings/old/transcript/view'},navigator:{clipboard:{writeText:async text=>copies.push(text)}},fetch:async url=>{requests.push(url);return {ok:true,json:async()=>data};}});
@@ -97,6 +99,58 @@ test('seek rejects unavailable players and invalid timestamps',()=>{
   assert.equal(reader.seekTranscript(null,1),false);
   assert.equal(reader.seekTranscript({seekTo:()=>assert.fail()},NaN),false);
   assert.equal(reader.seekTranscript({seekTo:()=>assert.fail()},-1),false);
+});
+test('TikTok and Instagram local players seek through the same transcript controls without external widgets',async()=>{
+  for(const source of ['TikTok','Instagram']){
+    const f=await fixture({media_url:'/api/files/video.mp4?inline=1',info:{program:source},segments,raw:'TXT',exports:['txt']});
+    const video=f.get('local-player');let plays=0;
+    video.play=()=>{plays++;return Promise.resolve();};video.duration=100;video.videoWidth=1920;video.videoHeight=1080;
+    assert.equal(video.hidden,false);assert.equal(video.src,'/api/files/video.mp4?inline=1');
+    assert.equal(f.get('youtube-player').hidden,true);assert.equal(f.head.children.length,0);
+    const timestamps=descendants(f.get('transcript-text')).filter(node=>node.className==='reader-timestamp');
+    timestamps[0].listeners.click();assert.equal(video.currentTime,undefined);
+    video.listeners.loadedmetadata();assert.equal(video.currentTime,1.25);assert.equal(plays,1);
+    timestamps[1].listeners.click();assert.equal(video.currentTime,65);assert.equal(plays,2);
+    f.get('timestamp-mode').value='none';f.get('timestamp-mode').listeners.change();
+    assert.equal(video.currentTime,65);assert.equal(f.requests.length,1);
+  }
+});
+test('YouTube remains primary when a stored media URL is also available',async()=>{
+  let options;
+  const f=await fixture({youtube_id:'abcdefghijk',media_url:'/api/files/video.mp4?inline=1',info:{program:'YT'},segments,raw:'TXT',exports:[]},
+    {YT:{Player:function(id,config){options=config;this.seekTo=()=>{};}}});
+  assert.equal(options.videoId,'abcdefghijk');assert.equal(f.get('local-player').src,undefined);
+});
+test('player adapters expose current time, cap local seeks, and tolerate rejected autoplay',async()=>{
+  const calls=[],video={currentTime:0,duration:10,play:()=>Promise.reject(Error('Autoplay denied'))};
+  const local=reader.localPlayerAdapter(video);assert.equal(reader.seekTranscript(local,20),true);
+  assert.equal(local.getCurrentTime(),10);await Promise.resolve();
+  const youtube=reader.youtubePlayerAdapter({seekTo:(...args)=>calls.push(args),getCurrentTime:()=>65});
+  reader.seekTranscript(youtube,3);assert.deepEqual(calls,[[3,true]]);assert.equal(youtube.getCurrentTime(),65);
+});
+test('portrait metadata enables bounded natural-aspect playback without changing YouTube sizing',async()=>{
+  const f=await fixture({media_url:'/api/files/video.mp4?inline=1',info:{program:'Portrait'},segments,raw:'TXT',exports:[]});
+  const video=f.get('local-player');video.videoWidth=1080;video.videoHeight=1920;video.listeners.loadedmetadata();
+  assert.match(f.get('reader-player').className,/portrait/);
+  video.videoWidth=1920;video.videoHeight=1080;video.listeners.loadedmetadata();
+  assert.doesNotMatch(f.get('reader-player').className,/portrait/);
+  const css=fs.readFileSync(require.resolve('../app/static/transcript.css'),'utf8');
+  assert.match(css,/\.reader-player\.portrait video\{width:auto;height:min\(320px,40dvh\)/);
+  assert.match(css,/object-fit:contain/);assert.match(css,/\.local-video\.portrait\{width:fit-content;max-width:100%;aspect-ratio:auto/);
+});
+test('missing or failed local media leaves reader search, timestamps, copy, and exports usable',async()=>{
+  const data={media_url:'/api/files/video.mp4?inline=1',info:{program:'Local'},segments,raw:'TXT',exports:['txt']};
+  const f=await fixture(data);const video=f.get('local-player');let paused=false;video.pause=()=>{paused=true;};
+  video.listeners.error();assert.equal(paused,true);assert.equal(f.get('reader-player').hidden,true);
+  assert.match(f.get('player-status').textContent,/Transkrip tetap tersedia/);
+  assert.equal(descendants(f.get('transcript-text')).filter(node=>node.className==='reader-timestamp').length,0);
+  f.get('transcript-search').value='Halo';f.get('transcript-search').listeners.input();assert.equal(f.get('search-count').textContent,'1 / 1 matches');
+  await f.get('copy-transcript').listeners.click();assert.match(f.copies[0],/Halo dunia/);
+  assert.equal(f.get('transcript-exports').children.length,1);
+  const missing=await fixture({...data,media_url:null});assert.equal(missing.get('reader-player').hidden,true);
+  const external=await fixture({...data,media_url:'https://instagram.com/video.mp4'});assert.equal(external.get('local-player').src,undefined);
+  const unsupported=await fixture(data,{}, {canPlayType:()=>''});assert.equal(unsupported.get('reader-player').hidden,true);
+  assert.match(unsupported.get('transcript-text').textContent,/Halo dunia/);
 });
 test('reader renders metadata safely and preserves full original description',async()=>{
   const info={program:'<script>Program</script>',theme:'Tema',date_time:'4 Oktober',guests:[{name:'Rina',role:'Dosen'}],presenter:'Sari',description:'Full original\n<script>unsafe</script>'};
@@ -171,4 +225,16 @@ test('non-YouTube timestamps remain readable, exports omit absent files, and dis
   f.get('timestamp-mode').value='none';f.get('timestamp-mode').listeners.change();
   assert.equal(f.get('transcript-text').textContent,'Siaran panjang');
   assert.equal(f.requests.length,1);
+});
+test('reader shares compact shell and narrow toolbar gives search its own row',()=>{
+  const html=fs.readFileSync(require.resolve('../app/static/transcript.html'),'utf8');
+  const css=fs.readFileSync(require.resolve('../app/static/transcript.css'),'utf8');
+  assert.match(html,/<body class="reader-page">/);
+  assert.match(html,/<header class="app-header reader-header">/);
+  assert.match(html,/<a class="reader-back" href="\/">← Workspace<\/a>/);
+  const responsive=css.slice(css.indexOf('/* Keep the reader shell'));
+  assert.match(responsive,/\.reader-tools \.reader-toolbar\{display:grid;grid-template-columns:minmax\(0,1fr\)/);
+  assert.match(responsive,/\.reader-tools \.reader-search-controls button\{min-width:44px/);
+  assert.match(responsive,/\.reader-raw-toggle input\{width:auto;flex:none\}/);
+  assert.match(responsive,/env\(safe-area-inset-bottom\)/);
 });

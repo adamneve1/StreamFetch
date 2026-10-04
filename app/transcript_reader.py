@@ -1,7 +1,7 @@
 """Source metadata and legacy transcript sidecars for the read-only reader."""
 import re
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 
 def youtube_id(value):
@@ -185,7 +185,15 @@ def reader_data(row, root):
             source.get('youtube_id'), row.get('youtube_id'),
             source.get('webpage_url'), row.get('url'))
             if (identifier := youtube_id(value))), None)
+    filename = row.get('filename')
+    media_url = None
+    if (row.get('state') == 'ready' and isinstance(filename, str)
+            and Path(filename).name == filename and filename.lower().endswith('.mp4')):
+        media = root / filename
+        if media.parent.resolve() == root and not media.is_symlink() and media.is_file():
+            media_url = '/api/files/' + quote(filename, safe='') + '?inline=1'
     return {'job_id': row['job_id'], 'info': recording_info(row), 'youtube_id': video_id,
+            'media_url': media_url,
             'segments': segments, 'raw': files['txt'] if files['txt'] is not None
             else '\n'.join(segment['text'] for segment in segments),
             'exports': [kind for kind, content in files.items() if content is not None],

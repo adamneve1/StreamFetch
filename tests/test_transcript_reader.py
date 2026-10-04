@@ -197,6 +197,39 @@ class ReaderTests(unittest.TestCase):
         row['transcript']['txt_filename'] = 'link.txt'
         self.assertEqual(transcript_reader.reader_data(row, self.root)['exports'], [])
 
+    def test_local_media_url_for_supported_sources_and_missing_media(self):
+        filename = 'Video Batam #1.mp4'
+        self.root.joinpath(filename).write_bytes(b'0123456789')
+        for source in ('tiktok', 'instagram', 'oryx', 'youtube'):
+            row = dict(self.row, source=source, state='ready', filename=filename)
+            data = transcript_reader.reader_data(row, self.root)
+            self.assertEqual(data['media_url'], '/api/files/Video%20Batam%20%231.mp4?inline=1')
+        for filename, state in [('missing.mp4', 'ready'), ('reader.txt', 'ready'), ('../secret.mp4', 'ready'),
+                                ('Video Batam #1.mp4', 'failed')]:
+            self.assertIsNone(transcript_reader.reader_data(dict(self.row, filename=filename, state=state), self.root)['media_url'])
+        self.root.joinpath('symlink.mp4').symlink_to(self.root / 'Video Batam #1.mp4')
+        self.assertIsNone(transcript_reader.reader_data(dict(self.row, filename='symlink.mp4', state='ready'), self.root)['media_url'])
+
+    def test_existing_media_route_auth_inline_range_and_download_compatibility(self):
+        self.root.joinpath('reader.mp4').write_bytes(b'0123456789')
+        url = self.data().json['media_url']
+        response = self.client.get(url, headers={'Range': 'bytes=2-5'})
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(response.data, b'2345')
+        self.assertEqual(response.headers['Content-Range'], 'bytes 2-5/10')
+        self.assertEqual(response.mimetype, 'video/mp4')
+        self.assertTrue(response.headers['Content-Disposition'].startswith('inline;'))
+        self.assertEqual(self.client.get(url, headers={'Range': 'bytes=20-30'}).status_code, 416)
+        self.assertTrue(self.client.get('/api/files/reader.mp4').headers['Content-Disposition'].startswith('attachment;'))
+        self.assertEqual(web.create_app(self.redis).test_client().get(url).status_code, 401)
+        self.root.joinpath('reader.mp4').unlink()
+        self.assertIsNone(self.data().json['media_url'])
+        self.assertEqual(self.client.get(url).status_code, 404)
+
+    def test_local_media_route_rejects_symlink_even_for_ready_recording(self):
+        self.root.joinpath('reader.mp4').symlink_to(self.root / 'reader.txt')
+        self.assertEqual(self.client.get('/api/files/reader.mp4?inline=1').status_code, 404)
+
     def test_reader_is_authenticated_and_never_enqueues(self):
         anonymous = web.create_app(self.redis).test_client()
         self.assertEqual(anonymous.get('/api/recordings/reader-job/transcript/view').status_code, 401)

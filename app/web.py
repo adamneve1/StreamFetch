@@ -455,7 +455,11 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
     def download(filename):
         if not any(row.get('filename') == filename and row['state'] == 'ready' for row in storage.recordings()):
             return jsonify(error='File rekaman tidak ditemukan atau belum siap.'), 404
-        return send_from_directory(Path(os.getenv('DOWNLOAD_DIR', '/downloads')), filename, as_attachment=True)
+        root = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve()
+        path = root / filename
+        if Path(filename).name != filename or path.parent.resolve() != root or path.is_symlink():
+            return jsonify(error='File rekaman tidak ditemukan.'), 404
+        return send_from_directory(root, filename, as_attachment=request.args.get('inline') != '1', conditional=True)
 
     def remove_recording(row):
         """Delete a local final file and its catalogue row, never its archive."""

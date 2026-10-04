@@ -36,34 +36,68 @@ function nextMatchIndex(current,delta,count){return count?(current+delta+count)%
 
 function seekTranscript(player,seconds){
   if(!player||!Number.isFinite(seconds)||seconds<0)return false;
-  player.seekTo(seconds,true);return true;
+  player.seekTo(seconds);return true;
+}
+function youtubePlayerAdapter(player){
+  return {seekTo:seconds=>player.seekTo(seconds,true),getCurrentTime:()=>player.getCurrentTime()};
+}
+function localPlayerAdapter(video){
+  return {seekTo:seconds=>{video.currentTime=Number.isFinite(video.duration)?Math.min(seconds,video.duration):seconds;
+    const playing=video.play();if(playing&&playing.catch)playing.catch(()=>{});
+  },getCurrentTime:()=>video.currentTime};
 }
 
-if(typeof module!=='undefined')module.exports={readerTimestamp,readerDisplayTimestamp,timestampLabel,formatInfo,formatTranscript,findMatches,nextMatchIndex,seekTranscript};
+if(typeof module!=='undefined')module.exports={readerTimestamp,readerDisplayTimestamp,timestampLabel,formatInfo,formatTranscript,findMatches,nextMatchIndex,seekTranscript,youtubePlayerAdapter,localPlayerAdapter};
 if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',async()=>{
   const $=id=>document.getElementById(id);
   const status=$('reader-status'),content=$('reader-content'),article=$('transcript-text');
   const base=location.pathname.replace(/\/(?:view)?$/,'');
-  let data,matchNodes=[],current=-1,player=null,playerReady=false,pendingSeek=null;
+  let data,matchNodes=[],current=-1,player=null,playerReady=false,pendingSeek=null,hasPlayer=false;
   function notify(message){status.textContent=message;}
   function seek(seconds){
-    if(playerReady){seekTranscript(player,seconds);return;}
+    if(!hasPlayer||!Number.isFinite(seconds)||seconds<0)return;
+    if(playerReady){try{seekTranscript(player,seconds);}catch{playerFailed();}return;}
     pendingSeek=seconds;$('player-status').hidden=false;$('player-status').textContent='Video masih dimuat. Posisi akan dibuka saat siap.';
   }
-  function initPlayer(videoId){
-    if(!/^[A-Za-z0-9_-]{11}$/.test(videoId||''))return;
+  function playerLoaded(){
+    playerReady=true;$('player-status').hidden=true;
+    if(pendingSeek!==null){const seconds=pendingSeek;pendingSeek=null;seek(seconds);}
+  }
+  function playerFailed(){
+    hasPlayer=false;playerReady=false;pendingSeek=null;player=null;
+    $('reader-player').hidden=true;$('player-status').hidden=false;
+    $('player-status').textContent='Video tidak dapat diputar di sini. Transkrip tetap tersedia.';
+    if($('local-player').pause)$('local-player').pause();
+    render();
+  }
+  function initPlayer(videoId,mediaUrl){
+    if(!/^[A-Za-z0-9_-]{11}$/.test(videoId||'')){
+      if(typeof mediaUrl!=='string'||!/^\/api\/files\/[^/?#]+\?inline=1$/.test(mediaUrl))return;
+      const video=$('local-player');hasPlayer=true;
+      if(video.canPlayType&&!video.canPlayType('video/mp4')){playerFailed();return;}
+      $('youtube-player').hidden=true;video.hidden=false;
+      $('reader-player').classList.toggle('local-video',true);$('reader-player').hidden=false;
+      player=localPlayerAdapter(video);
+      video.addEventListener('loadedmetadata',()=>{
+        if(!hasPlayer)return;
+        $('reader-player').classList.toggle('portrait',video.videoHeight>video.videoWidth);
+        playerLoaded();
+      });
+      video.addEventListener('error',playerFailed);video.src=mediaUrl;
+      return;
+    }
+    hasPlayer=true;
     $('reader-player').hidden=false;
     function createPlayer(){
-      player=new window.YT.Player('youtube-player',{
+      player=youtubePlayerAdapter(new window.YT.Player('youtube-player',{
         videoId,playerVars:{playsinline:1,origin:location.origin},
-        events:{onReady:()=>{playerReady=true;$('player-status').hidden=true;if(pendingSeek!==null){seekTranscript(player,pendingSeek);pendingSeek=null;}},
-          onError:()=>{playerReady=false;$('reader-player').hidden=true;$('player-status').hidden=false;$('player-status').textContent='Video tidak dapat diputar di sini. Transkrip tetap tersedia.';}}
-      });
+        events:{onReady:playerLoaded,onError:playerFailed}
+      }));
     }
     if(window.YT&&window.YT.Player){createPlayer();return;}
     window.onYouTubeIframeAPIReady=createPlayer;
     const script=document.createElement('script');script.src='https://www.youtube.com/iframe_api';
-    script.addEventListener('error',()=>{$('reader-player').hidden=true;$('player-status').hidden=false;$('player-status').textContent='Video tidak dapat dimuat. Transkrip tetap tersedia.';});document.head.append(script);
+    script.addEventListener('error',playerFailed);document.head.append(script);
   }
   function highlightedText(parent,text,query){
     let last=0;
@@ -90,8 +124,8 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
         const row=document.createElement('section');row.className='reader-segment';
         const label=timestampLabel(segment,mode,true);
         if(label){
-          const timestamp=document.createElement(data.youtube_id?'button':'time');timestamp.textContent=label;
-          if(data.youtube_id){timestamp.type='button';timestamp.className='reader-timestamp';timestamp.setAttribute('aria-label','Seek to '+label);timestamp.addEventListener('click',()=>seek(segment.start));}
+          const timestamp=document.createElement(hasPlayer?'button':'time');timestamp.textContent=label;
+          if(hasPlayer){timestamp.type='button';timestamp.className='reader-timestamp';timestamp.setAttribute('aria-label','Seek to '+label);timestamp.addEventListener('click',()=>seek(segment.start));}
           row.append(timestamp);
         }
         else if(mode!=='none'){const empty=document.createElement('span');row.append(empty);}
@@ -123,7 +157,7 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
     data=await response.json();document.title=data.info.program+' · StreamFetch';
     $('reader-title').textContent=data.info.program;
     $('reader-source').textContent=[data.info.source,data.language,data.info.date_time_label==='Source upload date'?'Source upload date: '+data.info.date_time:''].filter(Boolean).join(' · ');
-    initPlayer(data.youtube_id);
+    initPlayer(data.youtube_id,data.media_url);
     showInfo(data.info);
     for(const kind of data.exports){const link=document.createElement('a');link.href=base+'/'+kind;link.textContent='Export '+kind.toUpperCase();$('transcript-exports').append(link);}
     $('reader-export-menu').hidden=!data.exports.length;
