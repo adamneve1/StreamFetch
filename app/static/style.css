@@ -246,11 +246,13 @@ footer{padding:18px 2px 4px}
 @media(max-width:480px){.workspace-page .login-card{padding:24px}.workspace-page .login-brand{margin-bottom:24px}}
 /* Wide Source cards keep a short, connected reading path through the form. */
 @media(min-width:1100px){
- .workspace-page #capture-content{width:100%;max-width:1160px}
- .workspace-page #capture-panel .source-field{max-width:760px}.workspace-page #capture-panel #oryx-fields{max-width:380px}
- .workspace-page #capture-panel .capture-options{max-width:760px;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 20px}
+ .workspace-page #workspace[data-destination=workspace] main{max-width:1480px}
+ .workspace-page #capture-panel{max-width:1240px}
+ .workspace-page #capture-content{width:100%;max-width:none}
+ .workspace-page #capture-panel .source-field{max-width:none}.workspace-page #capture-panel #oryx-fields{max-width:380px}
+ .workspace-page #capture-panel .capture-options{max-width:none;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 20px}
  .workspace-page #capture-panel #format-field{grid-column:1/-1;width:100%;max-width:calc((100% - 20px)/2)}
- .workspace-page #capture-panel .capture-footer{max-width:760px;justify-content:flex-start;margin-top:16px;padding-top:12px;border-top:1px solid var(--line)}
+ .workspace-page #capture-panel .capture-footer{max-width:none;justify-content:flex-start;margin-top:16px;padding-top:12px;border-top:1px solid var(--line)}
  .workspace-page #capture-panel #record{min-width:128px}
 }
 /* Only admission/island geometry is owned by Flip; ordinary controls stay CSS. */
@@ -271,3 +273,35 @@ footer{padding:18px 2px 4px}
 .workspace-page .login-credit a{display:inline-flex;align-items:center;min-height:44px;color:inherit;text-decoration:none;opacity:.72;transition:opacity .15s}
 .workspace-page .login-credit a:hover,.workspace-page .login-credit a:focus-visible{opacity:1}
 .workspace-page .login-credit a:focus-visible{outline:2px solid #629d45;outline-offset:3px;border-radius:3px}
+/* The island is a two-row signal, not a second job-details panel. */
+.workspace-page #status-monitor{--state-accent:var(--green);grid-template-columns:auto minmax(0,1fr) auto auto;grid-template-areas:'state title summary action' 'progress progress progress progress' 'detail detail detail details';align-items:center;width:fit-content;min-width:min(100%,480px);max-width:min(100%,600px);gap:10px 12px;padding:16px;border-radius:12px;min-height:80px}
+.workspace-page #status-monitor[data-phase=starting],.workspace-page #status-monitor[data-phase=queued]{max-width:min(100%,540px)}
+.workspace-page #status-monitor[data-phase=downloading],.workspace-page #status-monitor[data-phase=transcribing]{min-width:min(100%,560px);max-width:min(100%,680px)}
+.workspace-page #status-monitor .island-state{grid-area:state;display:flex;align-items:center;gap:7px;white-space:nowrap;font-size:12px;font-weight:650}
+.island-dot{width:6px;height:6px;flex:none;background:#a8db55;border-radius:50%}
+.workspace-page #status-monitor[data-tone=error] .island-dot{background:#e59d92}
+.workspace-page #status-monitor #status-job-title{grid-area:title;display:block;max-width:32ch;min-width:0;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;font-size:12px;font-weight:500;line-height:1.5;color:#e4e4e7}
+.island-summary{grid-area:summary;display:flex;justify-content:flex-end;gap:8px;white-space:nowrap;font-size:11px;font-variant-numeric:tabular-nums}
+.workspace-page #status-monitor #progress-value{margin:0;color:#d8f2ab;font-weight:650}
+.workspace-page #status-monitor #duration{color:#aaaab2}
+.workspace-page #status-monitor #stop{grid-area:action;min-height:32px;font-size:10px;padding:6px 8px}
+.workspace-page #status-monitor #download-progress{grid-area:progress;margin:0;min-width:0}
+.workspace-page #status-monitor progress{display:block;height:3px;width:100%;margin:0}
+.workspace-page #status-monitor #status-detail{grid-area:detail;margin:0;font-size:11px;line-height:1.4;color:#b7b7bd}
+.workspace-page #status-monitor #island-details{grid-area:details;padding:5px 0;font-size:11px;white-space:nowrap;color:#e4e4e7;text-decoration:underline;text-underline-offset:3px}
+.workspace-page #status-monitor[data-phase=completed]{min-width:0;min-height:0;max-width:min(100%,360px);padding:12px;gap:8px;grid-template-areas:'state title summary action'}
+.workspace-page #status-monitor[data-phase=completed] #status-job-title{max-width:22ch}
+.workspace-page #history-panel>.marker-controls{max-width:640px;margin:0 0 16px;padding:12px;border:1px solid var(--line);border-radius:8px}
+@media(max-width:680px){
+ .workspace-page #status-monitor{width:100%;min-width:0;max-width:100%;padding:12px;gap:8px;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:'state action' 'title summary' 'progress progress' 'detail details'}
+ .workspace-page #status-monitor[data-phase=starting],.workspace-page #status-monitor[data-phase=queued],.workspace-page #status-monitor[data-phase=downloading],.workspace-page #status-monitor[data-phase=transcribing]{min-width:0;max-width:100%}
+ .workspace-page #status-monitor #stop,.workspace-page #status-monitor #island-details{min-height:44px}
+ .workspace-page #status-monitor[data-phase=completed]{width:fit-content;max-width:100%;grid-template-areas:'state title' 'summary action'}
+ .workspace-page #status-monitor[data-phase=completed] #status-job-title{max-width:20ch}
+}
+/* The animated surface is decorative only: the real form never collapses or clips. */
+.workspace-page .login-card{position:relative;isolation:isolate;background:transparent;border-color:transparent;box-shadow:none}
+.login-surface{position:absolute;inset:-1px;z-index:-1;pointer-events:none;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 2px 12px #18292706}
+.workspace-page .login-logo{display:block;overflow:visible}
+#login-wordmark{display:inline-block}
+.workspace-page .auth-exit-snapshot{position:fixed;z-index:100;pointer-events:none;margin:0}

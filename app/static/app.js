@@ -5,6 +5,7 @@ let focusedJobId=null, submittedJob=null, focusPending=false;
 const expandedHistoryDetails=new Set();
 function showSection(section){
  const admin=section==='admin';
+ $('workspace').dataset.destination=admin?'settings':'workspace';
  $('control-room').hidden=admin;$('admin-view').hidden=!admin;
  $('page-title').textContent=admin?'Settings':'StreamFetch';
  for(const [id,current] of [['nav-control',!admin],['nav-admin',admin]]){
@@ -103,21 +104,36 @@ function renderDownloadProgress(job){
  const visible=download&&['starting','recording','waiting','finalizing'].includes(job.state);
  $('download-progress').hidden=!visible;
  if(!visible){motion?.progress($('progress-bar'),null);return;}
- const phase=({video:'Mengunduh video',audio:'Mengunduh audio',media:'Mengunduh video dan audio'})[job.progress_phase]||'Mengunduh';
- const label=job.state==='waiting'?'Menunggu YouTube':job.state==='starting'?'Menyiapkan download':job.state==='finalizing'?'Menggabungkan dan memproses':phase;
- const attempt=job.download_attempt?' · Percobaan '+job.download_attempt+(job.download_attempts?'/'+job.download_attempts:''):'';
- $('progress-label').textContent=label+attempt;
+ const label=job.state==='finalizing'?'Memproses':'Progress capture';
  const percent=job.state==='recording'&&typeof job.progress_percent==='number'&&Number.isFinite(job.progress_percent)?Math.min(100,Math.max(0,job.progress_percent)):null;
  if(motion)motion.progress($('progress-bar'),percent);
  else if(percent===null)$('progress-bar').removeAttribute('value');else $('progress-bar').value=percent;
- $('progress-value').textContent=percent===null?'':percent.toFixed(1)+'%';
+ $('progress-value').textContent=percent===null?'':Math.round(percent)+'%';
  $('progress-bar').setAttribute('aria-label',label);
+}
+function islandTitle(job){
+ const saved=historyRows.find(row=>row.job_id===job?.job_id);
+ return [job?.note,job?.source_metadata?.title,job?.title,saved?.note,saved?.source_metadata?.title,saved?.title,job?.source_name]
+  .find(value=>typeof value==='string'&&value.trim())?.trim()||'Capture baru';
+}
+function islandTime(job,transcript){
+ const estimate=transcript?.eta_seconds??job?.eta_seconds;
+ if(Number.isFinite(estimate)&&estimate>=0){
+  const age=transcript?.updated_at?Math.max(0,Date.now()/1000-transcript.updated_at):0;
+  const seconds=Math.max(0,estimate-age);
+  return seconds<60?'~'+Math.max(5,Math.ceil(seconds/5)*5)+'s':'~'+Math.ceil(seconds/60)+'m';
+ }
+ const elapsed=transcript?.status==='queued'?null:transcript?.status==='transcribing'?
+  (transcript.started_at?Math.max(0,Date.now()/1000-transcript.started_at):null):
+  job?.state==='recording'&&job.started_at?Math.max(0,Date.now()/1000-job.started_at):job?.elapsed;
+ if(!Number.isFinite(elapsed)||elapsed<=0)return '';
+ return elapsed<60?Math.floor(elapsed)+'s':duration(elapsed).replace(/^00:/,'');
 }
 function renderOperationalStatus(){
  const job=active||submittedJob||lastObservedJob,connection=$('connection');
  const transcript=job?.state==='ready'?job.transcript:null;
  const phase=transcript?.status==='transcribing'?'transcribing':transcript?.status==='queued'?'queued':transcript?.status==='failed'?'failed':
-  ({starting:'queued',waiting:'queued',recording:'downloading',stopping:'processing',finalizing:'processing',ready:'completed',failed:'failed',interrupted:'failed'})[job?.state]||(queued?'queued':'hidden');
+  ({starting:'starting',waiting:'queued',recording:'downloading',stopping:'processing',finalizing:'processing',ready:'completed',failed:'failed',interrupted:'failed'})[job?.state]||(queued?'queued':'hidden');
  const canStop=!!active&&!['finalizing','stopping','ready','failed'].includes(active.state);
  const canMark=!!active&&active.state==='recording'&&active.is_live!==false;
  const change=()=>{
@@ -127,35 +143,43 @@ function renderOperationalStatus(){
  connection.textContent=online?'Online':'Offline';connection.classList.toggle('online',online);connection.classList.toggle('offline',!online);
  connection.title=online?'Sistem siap':'Sistem offline';connection.setAttribute('aria-label',connection.title);
  $('status-monitor').dataset.tone=statusTone(job?.state);
- $('state').textContent=jobStateName(job);$('state').dataset.tone=statusTone(job?.state);
- $('status-panel-title').textContent=isFiniteDownload(job)?'Download':'Status';
- $('duration-label').textContent=isFiniteDownload(job)?'WAKTU PROSES':'DURASI';
- $('status-title').textContent=job?.state==='ready'?'Selesai':job?jobStateName(job):'Siap';
- $('status-job-title').textContent=job?(job.filename||job.note||sourceDisplayName(job)):'';
+ $('state').textContent=({starting:'Menyiapkan',queued:'Menunggu',downloading:isFiniteDownload(job)?'Mengunduh':'Merekam',processing:'Memproses',transcribing:'Transkripsi',completed:'Selesai',failed:'Gagal'})[phase]||'';
+ $('state').dataset.tone=statusTone(job?.state);
+ $('stop').textContent=['starting','waiting'].includes(job?.state)?'Batal':'Hentikan';
+ $('status-job-title').textContent=job?islandTitle(job):queued+' capture';
  $('status-job-title').title=$('status-job-title').textContent;
- $('status-detail').textContent=job?.detail||(!job?'Pilih sumber, lalu kita mulai.':'');
- $('size').textContent=bytes(job?.size);
- $('active-source').textContent=job?sourceDisplayName(job)+(job.origin?' · '+(job.origin==='web'?'Web':'Telegram'):''):'';
- $('queue').textContent=queued?queued+' antrean':'';$('monitor-footer').hidden=!job&&!queued;
- if(!job&&queued){$('state').textContent='Menunggu';$('status-detail').textContent='Capture menunggu worker…';}
+ $('status-detail').hidden=phase!=='failed';
+ $('status-detail').textContent=phase==='failed'?(transcript?.status==='failed'?'Transkripsi gagal.':'Capture gagal.') : '';
+ $('island-details').hidden=phase!=='failed'||!(job?.detail||transcript?.error||historyRows.some(row=>row.job_id===job?.job_id));
+ $('duration').textContent=['completed','failed'].includes(phase)?'':islandTime(job,transcript);
+ $('progress-value').textContent='';
  if(!transcript||!['queued','transcribing'].includes(transcript.status))renderDownloadProgress(job);
  if(transcript&&['queued','transcribing'].includes(transcript.status)){
-  $('state').textContent=transcript.status==='queued'?'Waiting':'Generating';
   $('state').dataset.tone='working';$('status-monitor').dataset.tone='working';
-  $('status-detail').textContent=transcript.status==='queued'?'Waiting in queue':transcriptETA(transcript);
-  $('download-progress').hidden=false;$('progress-label').textContent='Transcript';
+  $('download-progress').hidden=true;
+  if(transcript.status==='transcribing')$('download-progress').hidden=false;
   $('progress-bar').setAttribute('aria-label','Transcript progress');
   const percent=transcript.status==='transcribing'&&Number.isFinite(transcript.progress_percent)?Math.min(100,Math.max(0,transcript.progress_percent)):null;
   if(motion)motion.progress($('progress-bar'),percent);else if(percent!==null)$('progress-bar').value=percent;else $('progress-bar').removeAttribute('value');
   $('progress-value').textContent=percent===null?'':Math.round(percent)+'%';
  }else if(transcript?.status==='failed'){
-  $('state').textContent='Failed';$('state').dataset.tone='error';$('status-monitor').dataset.tone='error';
-  $('status-detail').textContent=transcript.error||'Transcription failed';
+  $('state').dataset.tone='error';$('status-monitor').dataset.tone='error';
  }
  };
  // Percent/ETA/detail changes aren't structural and never start a new Flip.
- const key=[job?.job_id||'queue',job?.state,transcript?.status,canStop,canMark].join(':');
+ const key=[job?.job_id||'queue',job?.state,transcript?.status,canStop].join(':');
  if(motion)motion.island($('status-monitor'),key,phase,change);else change();
+}
+async function showIslandDetails(){
+ const job=active||submittedJob||lastObservedJob;if(!job)return;
+ if(!historyRows.some(row=>row.job_id===job.job_id)){
+  for(const id of ['filter-q','filter-source','filter-state','filter-date'])$(id).value='';
+  await refresh();
+ }
+ const row=[...$('results').children].find(row=>row.dataset.jobId===job.job_id);
+ const details=row?.querySelector('.recording-details');
+ if(details){expandedHistoryDetails.add(job.job_id);details.open=true;row.tabIndex=-1;row.focus({preventScroll:true});row.scrollIntoView({behavior:motion?.reduced()?'auto':'smooth',block:'center'});}
+ else notice(job.transcript?.error||job.detail||'Detail belum tersedia.');
 }
 function editSource(id){editing=id;const s=sources.find(x=>x.id===id);$('source-name').value=s?.name||'';$('source-url').value=s?.url||'';$('source-feedback').textContent='';}
 async function loadSources(){const previous=$('source').value; sources=(await api('sources')).sources;$('source').replaceChildren();for(const s of sources){const o=document.createElement('option');o.value=s.id;o.textContent=s.name;$('source').append(o);}if(!sources.length){const o=document.createElement('option');o.value='';o.textContent='Belum ada sumber — tambahkan dulu';$('source').append(o);}if(sources.some(x=>x.id===previous))$('source').value=previous;editSource($('source').value);scheduleEstimate();controls();}
@@ -267,14 +291,17 @@ async function refresh(){
   $('result-count').textContent=rows.length?Math.max(history.total,rows.length)+' hasil':'Belum ada hasil';$('empty').hidden=!!rows.length;
   $('empty').querySelector('strong').textContent=filtered?'Belum ketemu hasil yang cocok.':'Belum ada hasil.';
   $('empty').querySelector('p').textContent=filtered?'Coba ubah filternya atau mulai rekaman baru.':'Hasil rekaman dan download kamu akan muncul di sini.';
-  closeActionMenu();renderHistory(rows);
+  closeActionMenu();renderHistory(rows);renderOperationalStatus();
  }catch(error){online=false;controls();notice(error.message);}
 }
-async function enter(auth){isAdmin=!!auth?.is_admin;$('login').hidden=true;$('workspace').hidden=false;motion?.loginSuccess?.($('workspace'));$('role-badge').textContent=isAdmin?'Admin':'Pengguna';$('admin-panel').hidden=!isAdmin;$('delete-selected').hidden=!isAdmin;updateFormatControls();await loadSources();await refresh();}
+async function enter(auth){isAdmin=!!auth?.is_admin;motion?.loginSuccess?.($('workspace'));$('login').hidden=true;$('workspace').hidden=false;$('role-badge').textContent=isAdmin?'Admin':'Pengguna';$('admin-panel').hidden=!isAdmin;$('delete-selected').hidden=!isAdmin;updateFormatControls();await loadSources();await refresh();}
 let loginBusy=false;
 function loginLoading(busy){loginBusy=busy;$('login-form').setAttribute('aria-busy',String(busy));$('login-submit').disabled=busy;$('login-submit').textContent=busy?'Masuk…':'Masuk';}
 $('login-form').onsubmit=async e=>{e.preventDefault();if(loginBusy)return;loginLoading(true);$('login-error').textContent='';$('password').removeAttribute('aria-invalid');try{const auth=await api('login',{password:$('password').value});csrf=auth.csrf;$('password').value='';await enter(auth);}catch(err){$('login-error').textContent=err.message;$('password').setAttribute('aria-invalid','true');motion?.loginError?.($('login-error'));$('password').focus({preventScroll:true});}finally{loginLoading(false);}};
-$('password').oninput=()=>{$('password').removeAttribute('aria-invalid');$('login-error').textContent='';};
+$('password').oninput=()=>{motion?.loginInteract?.();$('password').removeAttribute('aria-invalid');$('login-error').textContent='';};
+$('password').addEventListener('pointerdown',()=>motion?.loginInteract?.());
+$('password').addEventListener('keydown',()=>motion?.loginInteract?.());
+$('island-details').onclick=showIslandDetails;
 $('logout').onclick=async()=>{try{await api('logout',{});showLogin();}catch(e){notice(e.message);}};
 $('nav-control').onclick=()=>showSection('control');$('nav-admin').onclick=()=>showSection('admin');
 $('capture-another').onclick=()=>{collapseSource(false);sourceInput().focus();};
@@ -285,7 +312,7 @@ $('record').onclick=async()=>{if(pending)return;pending=true;$('record').textCon
 $('storage-target').onchange=updateStorageHint;
 $('quality').onchange=scheduleEstimate;$('compression').onchange=()=>{updateCompressionHint();scheduleEstimate();};$('media-format').onchange=()=>{updateFormatControls();scheduleEstimate();};$('youtube-url').oninput=scheduleEstimate;$('tiktok-url').oninput=scheduleEstimate;$('instagram-url').oninput=scheduleEstimate;
 $('stop').onclick=async()=>{pending=true;controls();try{await api('stop',{job_id:active.job_id});notice('Lagi dihentikan. File-nya akan muncul sebentar lagi.');await refresh();}catch(e){notice(e.message);}finally{pending=false;controls();}};
-setInterval(()=>{const job=active||lastObservedJob;$('duration').textContent=duration(job?.state==='recording'&&job.started_at?Math.max(0,Date.now()/1000-job.started_at):job?.elapsed||0);},1000);
+setInterval(()=>{const job=active||submittedJob||lastObservedJob;if(!['completed','failed'].includes($('status-monitor').dataset.phase))$('duration').textContent=islandTime(job,job?.transcript);},1000);
 motion?.loginReveal?.($('login'));
 (async()=>{try{const auth=await api('session');csrf=auth.csrf;await enter(auth);}catch{showLogin();}})();
 async function poll(){await refresh();setTimeout(poll,2500);}setTimeout(poll,2500);

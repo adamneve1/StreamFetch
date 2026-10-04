@@ -83,31 +83,33 @@ test('ETA is rounded, ages from its last update, and handles legacy missing esti
   assert.equal(f.run('transcriptETA({eta_seconds:120,updated_at:Date.now()/1000-100})'),'Less than a minute remaining');
 });
 
-test('download progress shows the real track and attempt, and resets when unknown', () => {
+test('island progress omits track helpers and attempts, and resets when unknown', () => {
   const f = fixture();
   f.run(`renderDownloadProgress({source:'youtube',is_live:false,state:'recording',progress_phase:'audio',progress_percent:42.5,download_attempt:2,download_attempts:3})`);
   assert.equal(f.get('download-progress').hidden, false);
-  assert.equal(f.get('progress-label').textContent, 'Mengunduh audio · Percobaan 2/3');
-  assert.equal(f.get('progress-value').textContent, '42.5%');
+  assert.equal(f.get('progress-bar').attributes['aria-label'], 'Progress capture');
+  assert.equal(f.get('progress-value').textContent, '43%');
   assert.equal(f.get('progress-bar').value, 42.5);
   f.run(`renderDownloadProgress({source:'youtube',is_live:false,state:'recording',progress_percent:null})`);
   assert.equal(f.get('progress-value').textContent, '');
   assert.equal(f.get('progress-bar').value, '');
   f.run(`renderDownloadProgress({source:'youtube',is_live:false,state:'finalizing',progress_percent:100})`);
   assert.equal(f.get('progress-value').textContent, '');
-  assert.equal(f.get('progress-label').textContent, 'Menggabungkan dan memproses');
+  assert.equal(f.get('progress-bar').attributes['aria-label'], 'Memproses');
   f.run(`renderDownloadProgress({source:'youtube',is_live:true,state:'recording'})`);
   assert.equal(f.get('download-progress').hidden, true);
 });
 
-test('status uses semantic colors and retains the entire diagnostic text', () => {
+test('island uses semantic colors and concise feedback while History retains diagnostics', () => {
   const f = fixture();
   for (const [state, tone] of [['recording', 'working'], ['waiting', 'waiting'], ['ready', 'success'], ['failed', 'error']]) {
-    f.context.job = { source: 'youtube', is_live: false, state, detail: 'YouTube belum siap.\nFile parsial tetap disimpan. '.repeat(10) };
+    f.context.job = { job_id:'diagnostic',source: 'youtube', is_live: false, state, detail: 'YouTube belum siap.\nFile parsial tetap disimpan. '.repeat(10) };
     f.run('active=job; renderOperationalStatus()');
     assert.equal(f.get('status-monitor').dataset.tone, tone);
-    assert.equal(f.get('status-detail').textContent, f.context.job.detail);
-    assert.equal(f.get('duration-label').textContent, 'WAKTU PROSES');
+    assert.equal(f.get('status-detail').textContent, state==='failed'?'Capture gagal.':'');
+    assert.equal(f.get('status-detail').hidden,state!=='failed');
+    f.run('renderHistory([job])');
+    assert.equal(f.get('results').querySelector('.recording-detail-body').children[0].textContent,f.context.job.detail);
   }
 });
 
@@ -174,12 +176,12 @@ test('polling retains the terminal result even when history filters hide the com
   });
   f.run(`csrf='test'; mode='youtube'`);
   await f.run('refresh()');
-  assert.equal(f.get('status-title').textContent, 'Mengunduh');
+  assert.equal(f.get('state').textContent, 'Mengunduh');
   f.get('filter-state').value = 'recording';
   activeJob = null; row = { ...job, state: 'ready', filename: 'result.mp4', detail: 'File siap digunakan.' };
   await f.run('refresh()');
   assert.equal(f.get('status-monitor').dataset.tone, 'success');
-  assert.equal(f.get('status-detail').textContent, 'File siap digunakan.');
+  assert.equal(f.get('status-detail').textContent, '');
   assert.equal(f.get('record').disabled, false);
   assert.equal(f.get('stop').disabled, true);
   assert.equal(f.get('download-progress').hidden, true);
@@ -310,9 +312,9 @@ test('compact jobs retain every state, title, full diagnostics, metadata and sec
     f.context.rows=[{job_id:'job',state,source:'tiktok',source_name:'TikTok Live',note:'Dialog Batam',detail:'Detail lengkap',filename:state==='ready'?'dialog.mp4':undefined}];
     f.run('renderHistory(rows);active=rows[0];renderOperationalStatus()');
     assert.equal(f.get('results').querySelector('.recording-heading').querySelector('.status-badge').textContent,f.run('jobStateName(rows[0])'));
-    assert.equal(f.get('status-job-title').textContent,state==='ready'?'dialog.mp4':'Dialog Batam');
-    assert.equal(f.get('status-detail').textContent,'Detail lengkap');
-    assert.equal(f.get('active-source').textContent,'TikTok');
+    assert.equal(f.get('status-job-title').textContent,'Dialog Batam');
+    assert.equal(f.get('status-detail').textContent,['failed','interrupted'].includes(state)?'Capture gagal.':'');
+    assert.equal(f.get('results').querySelector('.recording-detail-body').children[0].textContent,'Detail lengkap');
   }
   const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8');
   assert.match(css,/grid-template-areas:'state content action' '\. metadata action' 'markers markers markers'/);
@@ -440,12 +442,13 @@ test('wide Source form bounds input/options and connects the action row without 
   const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8');
   const wide=css.slice(css.indexOf('/* Wide Source cards')).split('/* Only admission')[0];
   assert.match(wide,/@media\(min-width:1100px\)/);
-  assert.match(wide,/#capture-content\{width:100%;max-width:1160px\}/);
-  assert.match(wide,/\.source-field\{max-width:760px\}/);
+  assert.match(wide,/#capture-panel\{max-width:1240px\}/);
+  assert.match(wide,/#capture-content\{width:100%;max-width:none\}/);
+  assert.match(wide,/\.source-field\{max-width:none\}/);
   assert.match(wide,/#oryx-fields\{max-width:380px\}/);
-  assert.match(wide,/\.capture-options\{max-width:760px;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(wide,/\.capture-options\{max-width:none;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(wide,/#format-field\{grid-column:1\/-1/);
-  assert.match(wide,/\.capture-footer\{max-width:760px;justify-content:flex-start/);
+  assert.match(wide,/\.capture-footer\{max-width:none;justify-content:flex-start/);
   assert.doesNotMatch(wide,/display:none|position:absolute/);
   const f=fixture();f.get('quality').value='720';f.get('storage-target').value='archive';f.get('note').value='Dialog';
   for(const source of ['youtube','tiktok','instagram']){f.run(`setMode('${source}')`);assert.equal(f.get('quality').value,'720');assert.equal(f.get('storage-target').value,'archive');assert.equal(f.get('note').value,'Dialog');}
@@ -477,7 +480,7 @@ test('accepted submission morphs Source only after admission and immediately pub
  const admission=motion.calls.find(c=>c[0]==='source');
  assert.equal(admission[1],true);assert.equal(admission[2].accepted,true);
  assert.equal(admission[2].job.dataset.jobId,'accepted');
- assert.equal(f.get('status-job-title').textContent,'YouTube');
+ assert.equal(f.get('status-job-title').textContent,'Capture baru');
  assert.equal(f.get('capture-panel').attributes['aria-busy'],'false');
  f.get('capture-another').onclick();
  assert.equal(motion.calls.filter(c=>c[0]==='source').at(-1)[1],false);
@@ -507,19 +510,68 @@ test('rejected submission never runs the accepted morph or discards input',async
 });
 test('island maps capture and transcript phases without exposing provider details',()=>{
  const motion=motionSpy(),f=fixture(motion);
- for(const [state,transcript,phase] of [['starting',null,'queued'],['recording',null,'downloading'],['finalizing',null,'processing'],['ready',{status:'queued'},'queued'],['ready',{status:'transcribing',progress_percent:35,eta_seconds:120,provider:'cloudflare'},'transcribing'],['ready',{status:'completed'},'completed'],['ready',{status:'failed',error:'Try again'},'failed']]){
+ for(const [state,transcript,phase] of [['starting',null,'starting'],['recording',null,'downloading'],['finalizing',null,'processing'],['ready',{status:'queued'},'queued'],['ready',{status:'transcribing',progress_percent:35,eta_seconds:120,provider:'cloudflare'},'transcribing'],['ready',{status:'completed'},'completed'],['ready',{status:'failed',error:'Try again'},'failed']]){
   f.context.job={job_id:'island',source:'instagram',is_live:false,state,transcript};
   f.run('active=job;controls()');
   assert.equal(motion.calls.filter(c=>c[0]==='island').at(-1)[2],phase);
   assert.doesNotMatch(f.get('status-detail').textContent,/cloudflare/i);
  }
 });
+test('island prefers real media titles including persisted metadata over filenames and platform labels',()=>{
+ const f=fixture();
+ f.run("historyRows=[{job_id:'title',source_metadata:{title:'Dialog RRI Batam'}}]");
+ assert.equal(f.run("islandTitle({job_id:'title',source:'youtube',filename:'/downloads/output.mp4'})"),'Dialog RRI Batam');
+ assert.equal(f.run("islandTitle({job_id:'title',note:'Judul operator',source_metadata:{title:'Media title'}})"),'Judul operator');
+ assert.equal(f.run("islandTitle({source_metadata:{title:'Reel title'},source:'instagram'})"),'Reel title');
+ f.run("historyRows=[{job_id:'legacy',title:'Legacy title'}]");
+ assert.equal(f.run("islandTitle({job_id:'legacy',source:'tiktok'})"),'Legacy title');
+ assert.equal(f.run("islandTitle({source:'youtube',filename:'output.mp4'})"),'Capture baru');
+});
+test('island time is compact, rounded, and follows transcription rather than old capture duration',()=>{
+ const f=fixture();
+ assert.equal(f.run('islandTime({eta_seconds:18})'),'~20s');
+ assert.equal(f.run('islandTime({}, {eta_seconds:61})'),'~2m');
+ assert.equal(f.run('islandTime({}, {eta_seconds:90,updated_at:Date.now()/1000-72})'),'~20s');
+ assert.equal(f.run('islandTime({elapsed:42})'),'42s');
+ assert.equal(f.run('islandTime({elapsed:125})'),'02:05');
+ assert.equal(f.run("islandTime({elapsed:7200},{status:'queued'})"),'');
+ assert.equal(f.run("islandTime({elapsed:7200},{status:'transcribing',started_at:Date.now()/1000-12})"),'12s');
+ assert.equal(f.run('islandTime({})'),'');
+});
+test('island keeps live marker and Stop permissions while removing normal diagnostics',()=>{
+ const f=fixture();
+ f.run("active={job_id:'live',source:'youtube',note:'Batam live',state:'recording',is_live:true,detail:'Percobaan 1/1 · Menggabungkan video/audio',filename:'/downloads/out.mp4'};renderOperationalStatus()");
+ assert.equal(f.get('marker-controls').hidden,false);assert.equal(f.get('stop').hidden,false);assert.equal(f.get('stop').disabled,false);
+ assert.equal(f.get('state').textContent,'Merekam');assert.equal(f.get('status-detail').hidden,true);
+ f.run("active.state='finalizing';controls()");
+ assert.equal(f.get('marker-controls').hidden,true);assert.equal(f.get('stop').hidden,true);assert.equal(f.get('stop').disabled,true);
+ assert.equal(f.get('state').textContent,'Memproses');
+ assert.equal(f.get('status-detail').textContent,'');
+});
+test('failed island opens existing History diagnostics without inventing a second detail view',async()=>{
+ const f=fixture();
+ f.run("active={job_id:'failure',state:'failed',source:'instagram',detail:'Extractor diagnostic'};historyRows=[active];renderHistory(historyRows);controls()");
+ assert.equal(f.get('island-details').hidden,false);assert.equal(f.get('status-detail').textContent,'Capture gagal.');
+ await f.get('island-details').onclick();
+ const row=f.get('results').children[0];
+ assert.equal(row.querySelector('.recording-details').open,true);assert.equal(row.focused,true);assert.equal(row.scrolled,true);
+ f.run('renderHistory(historyRows)');assert.equal(f.get('results').querySelector('.recording-details').open,true);
+});
+test('minimal island markup omits duplicate metadata and moves live markers outside the signal',()=>{
+ const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
+ const island=html.split('id="status-monitor"')[1].split('</section>')[0];
+ for(const id of ['state','status-job-title','progress-value','duration','stop','progress-bar','island-details'])assert.ok(island.includes('id="'+id+'"'),id);
+ assert.doesNotMatch(island,/monitor-footer|marker-controls|active-source|WAKTU PROSES|UKURAN|progress-caption|status-title/);
+ const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8').split('/* The island is a two-row signal')[1];
+ assert.match(css,/width:fit-content/);assert.match(css,/max-width:min\(100%,680px\)/);assert.match(css,/\[data-phase=completed\]\{min-width:0;min-height:0;max-width:min\(100%,360px\)/);
+ assert.match(css,/white-space:nowrap;text-overflow:ellipsis;overflow:hidden/);
+});
 test('transcription started from History is observed by the same island without changing queue requests',async()=>{
  const motion=motionSpy(),f=fixture(motion);const calls=[];
  f.context.fetch=async(url,options)=>{calls.push([url,JSON.parse(options.body)]);return {ok:true,status:202,headers:{get:()=> 'application/json'},json:async()=>({})};};
  await f.run("generateTranscript({job_id:'old-recording',state:'ready',source:'tiktok',filename:'old.mp4'})");
  assert.deepEqual(calls,[['/api/recordings/old-recording/transcript',{}]]);
- assert.equal(f.get('state').textContent,'Waiting');assert.equal(f.get('status-job-title').textContent,'old.mp4');
+ assert.equal(f.get('state').textContent,'Menunggu');assert.equal(f.get('status-job-title').textContent,'Capture baru');
  assert.equal(motion.calls.filter(c=>c[0]==='island').at(-1)[2],'queued');
 });
 test('GSAP and Flip load locally and only the workspace opts into the motion system',()=>{

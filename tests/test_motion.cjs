@@ -7,13 +7,13 @@ function fixture(reduced=false,available=true){
  const element=()=>({dataset:{},style:{},children:[],hidden:false,value:0,
   setAttribute(name,value){this[name]=value;},removeAttribute(name){delete this[name];},
   append(node){this.children.push(node);},remove(){this.removed=true;},
-  querySelectorAll(){return [];},querySelector(selector){return this.queries?.[selector]||this.action;},
-  cloneNode(){const clone=element();clone.action=element();return clone;},
-  getBoundingClientRect(){return {width:640};},offsetLeft:12,offsetTop:12});
+  querySelectorAll(selector){return selector==='input'?this.inputs||[]:[];},querySelector(selector){return this.queries?.[selector]||this.action;},
+  cloneNode(){const clone=element();clone.action=element();clone.inputs=[element()];clone.inputs[0].value='not-to-be-retained';return clone;},
+  getBoundingClientRect(){return {width:640,left:20,top:30};},offsetLeft:12,offsetTop:12});
  const panel=element(),content=element(),compact=element(),island=element(),bar=element(),job=element();
- const shell=element(),form=element(),brand=element(),label=element(),password=element(),button=element(),credit=element(),error=element(),workspace=element();
+ const shell=element(),form=element(),brand=element(),label=element(),password=element(),button=element(),credit=element(),error=element(),workspace=element(),mark=element(),ring=element(),wordmark=element(),surface=element(),body=element();
  form.queries={'.login-brand':brand,label};
- const ids={'capture-content':content,'capture-another':compact,'login-form':form,password,'login-submit':button,'login-credit':credit};
+ const ids={'capture-content':content,'capture-another':compact,'login-form':form,password,'login-submit':button,'login-credit':credit,'login-mark':mark,'login-ring':ring,'login-wordmark':wordmark,'login-surface':surface,login:shell};
  panel.dataset.collapsed='false';compact.hidden=true;island.hidden=true;
  island.children=[element(),element(),element()];
  const tween=(target,vars)=>{
@@ -21,12 +21,12 @@ function fixture(reduced=false,available=true){
  };
  const media={matches:reduced,addEventListener(type,fn){listeners.media=fn;}};
  const gsap={registerPlugin(){},to:tween,fromTo(target,from,vars){const t=tween(target,vars);t.from=from;return t;},
-  timeline(vars){const timeline={vars,to(target,vars){tween(target,vars);return this;},fromTo(target,from,vars,position){const t=tween(target,vars);t.from=from;t.position=position;return this;}};timelines.push(timeline);return timeline;},
+  timeline(vars){const timeline={vars,to(target,vars,position){const t=tween(target,vars);t.position=position;return this;},fromTo(target,from,vars,position){const t=tween(target,vars);t.from=from;t.position=position;return this;}};timelines.push(timeline);return timeline;},
   context(fn){const c={animations:[],reverted:false,revert(){this.reverted=true;for(const t of this.animations)t.kill();}};
    contexts.push(c);current=c;fn();current=null;return c;}};
  const Flip={getState(targets,vars){const s={targets,vars,collapsed:panel.dataset.collapsed,phase:island.dataset.phase};states.push(s);return s;},
   from(state,vars){const t=tween(state.targets,vars);flips.push({state,vars,t});return t;}};
- const env={document:{getElementById:id=>ids[id]},
+ const env={document:{getElementById:id=>ids[id],body},
   gsap:available?gsap:null,Flip:available?Flip:null,matchMedia:()=>media,
   setTimeout(fn){timers.set(++timerId,fn);return timerId;},clearTimeout(id){timers.delete(id);},
   addEventListener(type,fn){listeners[type]=fn;}};
@@ -36,7 +36,7 @@ function fixture(reduced=false,available=true){
  },{accepted,job});
  const status=(key,phase)=>motion.island(island,key,phase,()=>{island.hidden=false;island.detail=phase;});
  const tick=()=>{const callbacks=[...timers.values()];timers.clear();callbacks.forEach(fn=>fn());};
- return {motion,source,status,tick,flips,states,tweens,contexts,timelines,timers,listeners,media,panel,content,compact,island,bar,job,Flip,shell,form,brand,label,password,button,credit,error,workspace};
+ return {motion,source,status,tick,flips,states,tweens,contexts,timelines,timers,listeners,media,panel,content,compact,island,bar,job,Flip,shell,form,brand,label,password,button,credit,error,workspace,mark,ring,wordmark,surface,body};
 }
 test('Source admission snapshots before mutation, morphs surface, and keeps snapshot inert',()=>{
  const f=fixture();f.source(true,true);
@@ -114,31 +114,43 @@ test('a failed geometry read cannot turn accepted admission into a rejected subm
  f.source(true,true);f.status('job','failed');
  assert.equal(f.content.hidden,true);assert.equal(f.island.hidden,false);assert.equal(f.flips.length,0);
 });
-test('login reveal coordinates restrained elements within 520ms without Flip',()=>{
+test('login signature anchors the mark, pulses its existing ring once, and settles within 820ms',()=>{
  const f=fixture();f.motion.loginReveal(f.shell);
- assert.equal(f.flips.length,0);assert.equal(f.tweens.length,4);
- const [surface,brand,fields,credit]=f.tweens;
- assert.equal(surface.target,f.form);assert.equal(surface.from.scale,.99);
- assert.equal(brand.from.y,10);assert.equal(fields.from.y,8);assert.equal(fields.vars.stagger,.045);
+ assert.equal(f.flips.length,0);assert.equal(f.tweens.length,7);
+ const [mark,pulse,settle,wordmark,surface,fields,credit]=f.tweens;
+ assert.equal(mark.target,f.mark);assert.equal(mark.from.scale,.88);assert.ok(mark.from.x<=10);
+ assert.equal(pulse.target,f.ring);assert.equal(settle.target,f.ring);assert.equal(settle.vars.scale,1);
+ assert.equal(f.tweens.some(t=>t.vars.repeat||t.vars.yoyo),false);
+ assert.equal(wordmark.from.clipPath,'inset(0 100% 0 0)');
+ assert.equal(surface.target,f.surface);assert.match(surface.from.clipPath,/72%/);
+ assert.equal(fields.from.y,4);assert.equal(fields.vars.stagger,.035);
  assert.deepEqual(fields.target,[f.label,f.password,f.button]);
- assert.equal(credit.target,f.credit);assert.equal(credit.position+credit.vars.duration,.52);
+ assert.equal(credit.target,f.credit);assert.ok(Math.abs(credit.position+credit.vars.duration-.82)<.001);
  f.timelines[0].vars.onComplete();assert.equal(f.contexts[0].reverted,true);
 });
 test('login errors settle entrance, animate feedback without shake, and replace stale error motion',()=>{
  const f=fixture();f.motion.loginReveal(f.shell);f.motion.loginError(f.error);
- assert.equal(f.contexts[0].reverted,true);const old=f.tweens.at(-1);
+ assert.equal(f.contexts[0].reverted,true);const old=f.tweens.at(-1),oldTimeline=f.timelines.at(-1);
  assert.equal(old.from.y,3);assert.equal(old.vars.duration,.16);assert.equal(old.vars.x,undefined);
  f.motion.loginError(f.error);assert.equal(old.killed,true);
- old.vars.onComplete();assert.equal(f.contexts.at(-1).reverted,false);
- f.tweens.at(-1).vars.onComplete();assert.equal(f.contexts.at(-1).reverted,true);
+ oldTimeline.vars.onComplete();assert.equal(f.contexts.at(-1).reverted,false);
+ f.timelines.at(-1).vars.onComplete();assert.equal(f.contexts.at(-1).reverted,true);
 });
 test('success settles immediately without promise, timer, or architecture change',()=>{
  const f=fixture();f.motion.loginReveal(f.shell);f.motion.loginError(f.error);
  const result=f.motion.loginSuccess(f.workspace);
  assert.equal(result,undefined);assert.equal(f.timers.size,0);
- assert.equal(f.contexts[1].reverted,true);assert.equal(f.tweens.at(-1).target,f.workspace);
- assert.equal(f.tweens.at(-1).vars.duration,.12);
+ assert.equal(f.contexts[1].reverted,true);
+ const ghost=f.body.children[0];assert.equal(ghost.inert,true);assert.equal(ghost['aria-hidden'],'true');assert.ok(!ghost.inputs[0].value);
+ assert.equal(f.tweens.find(t=>t.target===f.workspace).vars.duration,.2);
+ assert.equal(f.tweens.at(-1).position+f.tweens.at(-1).vars.duration,.2);
  f.motion.reset();assert.equal(f.contexts.at(-1).reverted,true);
+ assert.equal(ghost.removed,true);
+});
+test('typing or pointer interaction immediately settles signature motion without gating the password',()=>{
+ const f=fixture();f.motion.loginReveal(f.shell);f.motion.loginInteract();
+ assert.equal(f.contexts[0].reverted,true);assert.equal(f.tweens.every(t=>t.killed),true);
+ assert.equal(f.password.hidden,false);assert.equal(f.password.disabled,undefined);
 });
 test('login reduced motion and unavailable GSAP preserve visible, immediately usable controls',()=>{
  for(const f of [fixture(true),fixture(false,false)]){

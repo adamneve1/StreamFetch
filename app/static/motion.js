@@ -8,36 +8,62 @@
  let islandKey='',dismissedKey='',dismissTimer;
  if(available)gsap.registerPlugin(Flip);
  const reduced=()=>!!media?.matches;
- function choreograph(name,element,animate){
+ function choreograph(name,element,animate,ghost){
   settle(name);
   if(!gsap||reduced())return;
-  const region={element};regions.set(name,region);
+  const region={element,ghost};regions.set(name,region);
   const cleanup=()=>{if(regions.get(name)===region)settle(name);};
   try{region.context=gsap.context(()=>animate(cleanup));}catch{cleanup();}
  }
  function loginReveal(shell){
   choreograph('login',shell,done=>{
    const form=env.document.getElementById('login-form');
-   const brand=form.querySelector('.login-brand');
+   const mark=env.document.getElementById('login-mark'),ring=env.document.getElementById('login-ring');
+   const wordmark=env.document.getElementById('login-wordmark'),surface=env.document.getElementById('login-surface');
    const fields=[form.querySelector('label'),env.document.getElementById('password'),env.document.getElementById('login-submit')].filter(Boolean);
    const credit=env.document.getElementById('login-credit');
-   // One short composition, not a decorative sequence. All controls remain usable.
+   // The surface alone is masked: inputs remain in flow, focusable, and usable.
    gsap.timeline({onComplete:done,defaults:{ease:'power3.out'}})
-    .fromTo(form,{opacity:0,scale:.99},{opacity:1,scale:1,duration:.32},0)
-    .fromTo(brand,{opacity:0,y:10},{opacity:1,y:0,duration:.34},.02)
-    .fromTo(fields,{opacity:0,y:8},{opacity:1,y:0,duration:.3,stagger:.045},.08)
-    .fromTo(credit,{opacity:0,y:8},{opacity:1,y:0,duration:.22},.3);
+    .fromTo(mark,{opacity:0,scale:.88,x:10,y:6},{opacity:1,scale:1,x:0,y:0,duration:.3},0)
+    .fromTo(ring,{scale:1,svgOrigin:'32 32'},{scale:1.075,svgOrigin:'32 32',duration:.12,ease:'power2.out'},.1)
+    .to(ring,{scale:1,duration:.18,ease:'power2.inOut'},.22)
+    .fromTo(wordmark,{clipPath:'inset(0 100% 0 0)',x:-3},{clipPath:'inset(0 0% 0 0)',x:0,duration:.28},.16)
+    .fromTo(surface,{clipPath:'inset(0 0 72% 0 round 12px)',opacity:.5},{clipPath:'inset(0 0 0% 0 round 12px)',opacity:1,duration:.38},.21)
+    .fromTo(fields,{opacity:0,y:4},{opacity:1,y:0,duration:.22,stagger:.035},.4)
+    .fromTo(credit,{opacity:0,y:4},{opacity:1,y:0,duration:.18},.64);
   });
  }
  function loginError(element){
   // A fast response during entrance should settle the form before showing feedback.
   settle('login');
-  choreograph('login-error',element,done=>gsap.fromTo(element,{opacity:0,y:3},{opacity:1,y:0,duration:.16,ease:'power2.out',onComplete:done}));
+  choreograph('login-error',element,done=>gsap.timeline({onComplete:done})
+   .fromTo(env.document.getElementById('password'),{borderColor:'#dfe5df'},{borderColor:'#b65e55',duration:.16},0)
+   .fromTo(element,{opacity:0,y:3},{opacity:1,y:0,duration:.16,ease:'power2.out'},0));
  }
+ function loginInteract(){settle('login');settle('login-error');}
  function loginSuccess(workspace){
   settle('login');settle('login-error');
-  // enter() reveals the workspace immediately; this settle never gates authentication.
-  choreograph('login-success',workspace,done=>gsap.fromTo(workspace,{opacity:.94,y:2},{opacity:1,y:0,duration:.12,ease:'power2.out',onComplete:done}));
+  if(!gsap||reduced())return;
+  const form=env.document.getElementById('login-form');
+  // A non-interactive visual exit keeps navigation immediate. Never retain passwords.
+  const ghost=env.document.getElementById('login')?.hidden?null:form.cloneNode(true);
+  if(ghost){
+   const rect=form.getBoundingClientRect();ghost.removeAttribute('id');ghost.inert=true;ghost.setAttribute('aria-hidden','true');
+   for(const input of ghost.querySelectorAll('input')){input.value='';input.removeAttribute('value');}
+   for(const node of ghost.querySelectorAll('[id]'))node.removeAttribute('id');
+   ghost.className+=' auth-exit-snapshot';Object.assign(ghost.style,{left:rect.left+'px',top:rect.top+'px',width:rect.width+'px'});
+   env.document.body.append(ghost);
+  }
+  // enter() does not await this timeline, and the snapshot cannot intercept input.
+  choreograph('login-success',workspace,done=>{
+   const timeline=gsap.timeline({onComplete:done,defaults:{ease:'power2.out'}})
+    .fromTo(workspace,{opacity:.96},{opacity:1,duration:.2},0);
+   if(ghost)timeline
+    .to([...ghost.querySelectorAll('label,input,button')],{opacity:0,y:-3,duration:.12},0)
+    .to(ghost.querySelector('.login-surface'),{clipPath:'inset(0 0 72% 0 round 12px)',opacity:0,duration:.18},0)
+    .to(ghost.querySelector('.login-brand span'),{clipPath:'inset(0 100% 0 0)',duration:.12},.04)
+    .to(ghost.querySelector('.login-logo'),{opacity:0,scale:.96,duration:.1},.1);
+  },ghost);
  }
  function settle(name){
   const region=regions.get(name);if(!region)return;
@@ -130,5 +156,5 @@
   for(const [element,state] of progressTweens){state.tween?.kill();element.value=state.value;}
  });
  env.addEventListener?.('resize',()=>{for(const name of [...regions.keys()])settle(name);});
- return {source,island,progress,reset,reduced,loginReveal,loginError,loginSuccess};
+ return {source,island,progress,reset,reduced,loginReveal,loginError,loginSuccess,loginInteract};
 });
