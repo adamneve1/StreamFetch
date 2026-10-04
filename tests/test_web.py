@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch, AsyncMock
 from pathlib import Path
 import fakeredis
-from app import web, storage, worker
+from app import web, storage, worker, telegram_store
 
 
 class WebTests(unittest.TestCase):
@@ -25,6 +25,86 @@ class WebTests(unittest.TestCase):
 
     def post(self, path, data):
         return self.client.post('/api/' + path, json=data, headers={'X-CSRF-Token': self.csrf})
+
+    def save_watch(self, identifier='watch', **fields):
+        value = dict(id=identifier, user_id=7, chat_id=77, channel='https://www.youtube.com/@rribatam',
+                     start=100, end=200, mode='first', auto_transcribe=False, status='active')
+        value.update(fields)
+        telegram_store.save_watch(value)
+        return value
+
+    def test_admin_watches_use_shared_ledger_with_derived_status_and_no_private_chat_data(self):
+        self.save_watch('waiting', start=160, end=200)
+        self.save_watch('active', mode='every', auto_transcribe=True)
+        self.save_watch('expired', end=150)
+        self.save_watch('finished', status='finished')
+        self.save_watch('cancelled', status='cancelled')
+        with patch.object(web, 'time') as clock:
+            clock.time.return_value = 150
+            response = self.client.get('/api/admin/watches')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json['active_count'], 2)
+        rows = {row['id']: row for row in response.json['watches']}
+        self.assertEqual({key: row['status'] for key, row in rows.items()},
+                         dict(waiting='waiting', active='active', expired='expired', finished='finished', cancelled='cancelled'))
+        self.assertTrue(rows['active']['auto_transcribe'])
+        self.assertEqual(rows['active']['mode'], 'every')
+        self.assertNotIn('user_id', response.text)
+        self.assertNotIn('chat_id', response.text)
+        self.assertEqual(next(w for w in telegram_store.watches() if w['id'] == 'expired')['status'], 'active')
+        self.assertEqual(self.redis.llen('download_queue'), 0)
+        with patch.object(web, 'time') as clock:
+            clock.time.return_value = 160
+            self.assertEqual(next(w for w in self.client.get('/api/admin/watches').json['watches']
+                                  if w['id'] == 'waiting')['status'], 'active')
+
+    def test_watch_apis_require_admin_auth_csrf_and_do_not_offer_web_creation(self):
+        self.save_watch()
+        anonymous = self.app.test_client()
+        self.assertEqual(anonymous.get('/api/admin/watches').status_code, 401)
+        self.assertEqual(anonymous.post('/api/admin/watches/watch/cancel', json={}).status_code, 401)
+        user = self.app.test_client()
+        token = user.post('/api/login', json={'password': 'test-password'}).json['csrf']
+        self.assertEqual(user.get('/api/admin/watches').status_code, 403)
+        self.assertEqual(user.post('/api/admin/watches/watch/cancel', json={},
+                                  headers={'X-CSRF-Token': token}).status_code, 403)
+        self.assertEqual(self.client.post('/api/admin/watches/watch/cancel', json={}).status_code, 403)
+        self.assertEqual(self.post('admin/watches', {}).status_code, 405)
+        self.assertEqual(telegram_store.watches()[0]['status'], 'active')
+
+    def test_web_cancel_persists_for_telegram_restart_without_stopping_capture_or_tasks(self):
+        self.save_watch(mode='every')
+        task = dict(job=dict(job_id='capture', requested_at=150), dispatch='pending')
+        self.assertTrue(telegram_store.claim_video('watch', 'abcdefghijk', task))
+        self.redis.set('capture:owner', 'capture')
+        self.redis.rpush('download_queue', 'existing-task')
+        self.assertEqual(self.post('admin/watches/watch/cancel', {}).status_code, 200)
+        self.assertEqual(self.post('admin/watches/watch/cancel', {}).status_code, 200)
+        restarted = web.create_app(self.redis).test_client()
+        restarted.post('/api/login', json={'password': 'admin-password'})
+        self.assertEqual(restarted.get('/api/admin/watches').json['watches'][0]['status'], 'cancelled')
+        self.assertEqual(telegram_store.watches()[0]['last_capture']['video_id'], 'abcdefghijk')
+        self.assertFalse(telegram_store.claim_video('watch', 'bbbbbbbbbbb', task))
+        self.assertEqual(self.redis.get('capture:owner'), 'capture')
+        self.assertEqual(self.redis.lrange('download_queue', 0, -1), ['existing-task'])
+        self.assertEqual(self.redis.keys('stop:*'), [])
+        self.assertEqual(len(telegram_store.tasks()), 1)
+        self.assertEqual(self.post('admin/watches/missing/cancel', {}).status_code, 404)
+
+    def test_watch_last_capture_uses_existing_recording_metadata_and_legacy_watches_are_safe(self):
+        self.save_watch('legacy')
+        self.save_watch('captured', mode='every')
+        storage.save_recording(dict(job_id='capture', source_metadata={'title': 'Dialog Batam'}), 'ready')
+        task = dict(job=dict(job_id='capture', requested_at=150), dispatch='pending')
+        self.assertTrue(telegram_store.claim_video('captured', 'abcdefghijk', task))
+        with patch.object(web, 'time') as clock:
+            clock.time.return_value = 150
+            rows = {row['id']: row for row in self.client.get('/api/admin/watches').json['watches']}
+        self.assertIsNone(rows['legacy']['last_capture'])
+        self.assertEqual(rows['captured']['last_capture']['title'], 'Dialog Batam')
+        self.assertEqual(rows['captured']['last_capture']['state'], 'ready')
+        self.assertFalse(telegram_store.claim_video('captured', 'abcdefghijk', task))
+        self.assertEqual(telegram_store.watches()[1]['last_capture']['video_id'], 'abcdefghijk')
 
     def test_tiktok_admission_and_validation(self):
         self.redis.set('worker:heartbeat', 1)

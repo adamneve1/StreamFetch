@@ -289,13 +289,9 @@ class Controls:
                 return
             await update.effective_message.reply_text('/cancelwatch ID · lihat /watchlist')
             return
-        for watch in telegram_store.watches():
-            if (watch['id'] == context.args[0] and watch['user_id'] == update.effective_user.id
-                    and watch['chat_id'] == update.effective_chat.id):
-                watch['status'] = 'cancelled'
-                telegram_store.save_watch(watch)
-                await update.effective_message.reply_text('Discovery dibatalkan. Capture yang sudah dimulai tetap berjalan.')
-                return
+        if telegram_store.cancel_watch(context.args[0], update.effective_user.id, update.effective_chat.id):
+            await update.effective_message.reply_text('Discovery dibatalkan. Capture yang sudah dimulai tetap berjalan.')
+            return
         await update.effective_message.reply_text('Watch tidak ditemukan.')
 
     @authorized

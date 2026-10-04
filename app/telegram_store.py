@@ -24,6 +24,21 @@ def save_watch(watch):
                    (watch['id'], json.dumps(watch)))
 
 
+def cancel_watch(watch_id, user_id=None, chat_id=None):
+    """Cancel discovery in the shared ledger without touching queued/running jobs."""
+    with storage.connection() as db:
+        tables(db)
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute('SELECT data FROM telegram_watches WHERE id=?', (watch_id,)).fetchone()
+        watch = json.loads(row['data']) if row else None
+        if not watch or (user_id is not None and watch['user_id'] != user_id) or (
+                chat_id is not None and watch['chat_id'] != chat_id):
+            return None
+        watch['status'] = 'cancelled'
+        db.execute('UPDATE telegram_watches SET data=? WHERE id=?', (json.dumps(watch), watch_id))
+        return watch
+
+
 def tasks():
     with storage.connection() as db:
         tables(db)
@@ -48,8 +63,12 @@ def claim_video(watch_id, video_id, task):
             return False
         inserted = db.execute('INSERT OR IGNORE INTO telegram_tasks VALUES (?, ?)',
                               ('capture:' + video_id, json.dumps(task))).rowcount
-        if inserted and watch['mode'] == 'first':
-            watch['status'] = 'finished'
+        if inserted:
+            job = task.get('job') or {}
+            watch['last_capture'] = dict(video_id=video_id, job_id=job.get('job_id'),
+                                         detected_at=job.get('requested_at'))
+            if watch['mode'] == 'first':
+                watch['status'] = 'finished'
             db.execute('UPDATE telegram_watches SET data=? WHERE id=?', (json.dumps(watch), watch_id))
         return bool(inserted)
 

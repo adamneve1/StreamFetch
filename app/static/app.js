@@ -3,6 +3,7 @@ const motion=window.StreamFetchMotion;
 let csrf='', isAdmin=false, mode='oryx', sources=[], editing='', active=null, online=false, queued=0, pending=false, disk=null, archiveEnabled=false, historyRows=[], refreshId=0, estimateId=0, estimateTimer, lastObservedJob=null;
 let focusedJobId=null, submittedJob=null, focusPending=false;
 const expandedHistoryDetails=new Set();
+let watchRefreshId=0,watchLoading=false;
 function showSection(section){
  const admin=section==='admin';
  $('workspace').dataset.destination=admin?'settings':'workspace';
@@ -12,6 +13,44 @@ function showSection(section){
   if(current)$(id).setAttribute('aria-current','page');else $(id).removeAttribute('aria-current');
  }
  closeActionMenu();
+ if(admin&&isAdmin)loadWatches();
+}
+function watchWindow(watch){
+ const options={timeZone:'Asia/Jakarta'};
+ const date=new Intl.DateTimeFormat('id-ID',{...options,day:'2-digit',month:'short',year:'numeric'});
+ const clock=new Intl.DateTimeFormat('en-GB',{...options,hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
+ if(!Number.isFinite(watch.start)||!Number.isFinite(watch.end))return '—';
+ return date.format(new Date(watch.start*1000))+' · '+clock.format(new Date(watch.start*1000))+'–'+clock.format(new Date(watch.end*1000))+' WIB';
+}
+function renderWatches(data){
+ $('watch-count').textContent=data.active_count+' aktif';$('watch-list').replaceChildren();
+ $('watch-feedback').textContent=data.watches.length?'':'Belum ada watch.';
+ for(const watch of data.watches){
+  const row=document.createElement('li');row.className='watch-row';
+  const copy=document.createElement('div');copy.className='watch-copy';
+  const name=watch.name||watch.channel.replace(/^https?:\/\/(?:www\.)?youtube\.com\//,'');
+  const title=document.createElement('strong');title.textContent=name;title.title=watch.channel;
+  const window=document.createElement('small');window.textContent=watchWindow(watch)+' · '+(watch.mode==='every'?'Every live':'First live')+' · Auto-transcribe '+(watch.auto_transcribe?'on':'off');
+  copy.append(title,window);
+  if(watch.last_capture){const last=document.createElement('small');last.textContent='Terakhir: '+(watch.last_capture.title||watch.last_capture.video_id||watch.last_capture.job_id||'—')+(watch.last_capture.state?' · '+stateName(watch.last_capture.state):'');last.title=last.textContent;last.className='watch-last';copy.append(last);}
+  const state=document.createElement('span');state.className='badge neutral';state.textContent=({waiting:'Waiting',active:'Active',expired:'Expired',finished:'Selesai',cancelled:'Dibatalkan'})[watch.status]||watch.status;
+  row.append(copy,state);
+  if(['waiting','active'].includes(watch.status)){const cancel=document.createElement('button');cancel.type='button';cancel.className='quiet watch-cancel';cancel.textContent='Batalkan';cancel.setAttribute('aria-label','Batalkan watch '+name);cancel.onclick=()=>cancelWatch(watch,cancel);row.append(cancel);}
+  $('watch-list').append(row);
+ }
+}
+async function loadWatches(force=false){
+ if(!isAdmin||(watchLoading&&!force))return;
+ const requestId=++watchRefreshId;watchLoading=true;
+ try{const data=await api('admin/watches');if(requestId===watchRefreshId&&isAdmin)renderWatches(data);}
+ catch(error){if(requestId===watchRefreshId&&isAdmin)$('watch-feedback').textContent=error.message;}
+ finally{if(requestId===watchRefreshId)watchLoading=false;}
+}
+async function cancelWatch(watch,button){
+ if(button.disabled||!isAdmin)return;button.disabled=true;
+ try{await api('admin/watches/'+encodeURIComponent(watch.id)+'/cancel',{});await loadWatches(true);}
+ catch(error){$('watch-feedback').textContent=error.message;}
+ finally{button.disabled=false;}
 }
 function collapseSource(collapsed,options={}){
  const change=()=>{
@@ -145,7 +184,6 @@ function renderOperationalStatus(){
  $('status-monitor').dataset.tone=statusTone(job?.state);
  $('state').textContent=({starting:'Menyiapkan',queued:'Menunggu',downloading:isFiniteDownload(job)?'Mengunduh':'Merekam',processing:'Memproses',transcribing:'Transkripsi',completed:'Selesai',failed:'Gagal'})[phase]||'';
  $('state').dataset.tone=statusTone(job?.state);
- $('stop').textContent=['starting','waiting'].includes(job?.state)?'Batal':'Hentikan';
  $('status-job-title').textContent=job?islandTitle(job):queued+' capture';
  $('status-job-title').title=$('status-job-title').textContent;
  $('status-detail').hidden=phase!=='failed';
@@ -294,7 +332,7 @@ async function refresh(){
   closeActionMenu();renderHistory(rows);renderOperationalStatus();
  }catch(error){online=false;controls();notice(error.message);}
 }
-async function enter(auth){isAdmin=!!auth?.is_admin;motion?.loginSuccess?.($('workspace'));$('login').hidden=true;$('workspace').hidden=false;$('role-badge').textContent=isAdmin?'Admin':'Pengguna';$('admin-panel').hidden=!isAdmin;$('delete-selected').hidden=!isAdmin;updateFormatControls();await loadSources();await refresh();}
+async function enter(auth){isAdmin=!!auth?.is_admin;motion?.loginSuccess?.($('workspace'));$('login').hidden=true;$('workspace').hidden=false;$('role-badge').textContent=isAdmin?'Admin':'Pengguna';$('admin-panel').hidden=!isAdmin;$('watches-panel').hidden=!isAdmin;$('delete-selected').hidden=!isAdmin;updateFormatControls();await loadSources();await refresh();}
 let loginBusy=false;
 function loginLoading(busy){loginBusy=busy;$('login-form').setAttribute('aria-busy',String(busy));$('login-submit').disabled=busy;$('login-submit').textContent=busy?'Masuk…':'Masuk';}
 $('login-form').onsubmit=async e=>{e.preventDefault();if(loginBusy)return;loginLoading(true);$('login-error').textContent='';$('password').removeAttribute('aria-invalid');try{const auth=await api('login',{password:$('password').value});csrf=auth.csrf;$('password').value='';await enter(auth);}catch(err){$('login-error').textContent=err.message;$('password').setAttribute('aria-invalid','true');motion?.loginError?.($('login-error'));$('password').focus({preventScroll:true});}finally{loginLoading(false);}};
@@ -302,6 +340,7 @@ $('password').oninput=()=>{motion?.loginInteract?.();$('password').removeAttribu
 $('password').addEventListener('pointerdown',()=>motion?.loginInteract?.());
 $('password').addEventListener('keydown',()=>motion?.loginInteract?.());
 $('island-details').onclick=showIslandDetails;
+$('watch-refresh').onclick=()=>loadWatches(true);
 $('logout').onclick=async()=>{try{await api('logout',{});showLogin();}catch(e){notice(e.message);}};
 $('nav-control').onclick=()=>showSection('control');$('nav-admin').onclick=()=>showSection('admin');
 $('capture-another').onclick=()=>{collapseSource(false);sourceInput().focus();};
@@ -315,7 +354,7 @@ $('stop').onclick=async()=>{pending=true;controls();try{await api('stop',{job_id
 setInterval(()=>{const job=active||submittedJob||lastObservedJob;if(!['completed','failed'].includes($('status-monitor').dataset.phase))$('duration').textContent=islandTime(job,job?.transcript);},1000);
 motion?.loginReveal?.($('login'));
 (async()=>{try{const auth=await api('session');csrf=auth.csrf;await enter(auth);}catch{showLogin();}})();
-async function poll(){await refresh();setTimeout(poll,2500);}setTimeout(poll,2500);
+async function poll(){await refresh();if(isAdmin&&!$('admin-view').hidden)loadWatches();setTimeout(poll,2500);}setTimeout(poll,2500);
 
 $('mark').onclick=async()=>{pending=true;controls();try{await api('markers',{job_id:active.job_id,note:$('marker-note').value});$('marker-note').value='';await refresh();}catch(e){notice(e.message);}finally{pending=false;controls();}};
 let searchTimer;

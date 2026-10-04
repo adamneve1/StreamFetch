@@ -63,10 +63,10 @@ test('rapid repeated Source interaction replaces motion and ignores obsolete com
 });
 test('island structural phases Flip the persistent object and its content positions',()=>{
  const f=fixture();
- for(const phase of ['queued','downloading','processing','transcribing','completed','failed'])f.status('job',phase);
- assert.equal(f.flips.length,6);assert.equal(f.island.dataset.phase,'failed');
+ for(const phase of ['starting','queued','downloading','processing','transcribing','completed','failed'])f.status('job',phase);
+ assert.equal(f.flips.length,7);assert.equal(f.island.dataset.phase,'failed');
  assert.equal(f.flips[0].state.targets[0],f.island);assert.equal(f.flips[0].state.targets.length,4);
- assert.equal(f.states[1].phase,'queued');assert.equal(f.timers.size,0);
+ assert.equal(f.states[1].phase,'starting');assert.equal(f.timers.size,0);
 });
 test('progress and ETA-only polling never start a full Flip and replace progress tweens',()=>{
  const f=fixture();f.status('job','downloading');f.motion.progress(f.bar,20);

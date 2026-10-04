@@ -87,6 +87,8 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload['url'], self.live()['url'])
         self.assertEqual(payload['source'], 'youtube')
         self.assertEqual(store.watches()[0]['status'], 'finished')
+        self.assertEqual(store.watches()[0]['last_capture']['video_id'], 'abcdefghijk')
+        self.assertEqual(store.watches()[0]['last_capture']['job_id'], payload['job_id'])
         self.assertIn('Live terdeteksi', self.sender.send_message.call_args.args[1])
 
     async def test_every_mode_discovers_later_live_but_deduplicates_ids_after_restart(self):
@@ -96,6 +98,20 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
                 await tc.Controls(self.redis).tick(self.sender, now)
         self.assertEqual(self.redis.llen('download_queue'), 2)
         self.assertEqual(store.watches()[0]['status'], 'active')
+        self.assertEqual(store.watches()[0]['last_capture']['video_id'], 'bbbbbbbbbbb')
+
+    async def test_shared_admin_cancellation_during_discovery_blocks_claim_after_restart(self):
+        self.watch(mode='every')
+        def discover(channel):
+            store.cancel_watch('watch1')
+            return [self.live()]
+        with patch.object(tc, 'discover_live', side_effect=discover) as discovery:
+            await self.controls.tick(self.sender, 150)
+            await tc.Controls(self.redis).tick(self.sender, 160)
+        self.assertEqual(discovery.call_count, 1)
+        self.assertEqual(self.redis.llen('download_queue'), 0)
+        self.assertEqual(store.watches()[0]['status'], 'cancelled')
+        self.assertEqual(self.redis.keys('stop:*'), [])
 
     async def test_expiry_stops_discovery_not_capture_and_notifies_once(self):
         self.watch('every')

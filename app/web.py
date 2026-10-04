@@ -14,10 +14,11 @@ from flask import Flask, jsonify, request, session, send_from_directory
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 try:
-    from . import quality, storage, transcript_reader, transcription_queue
+    from . import quality, storage, telegram_store, transcript_reader, transcription_queue
 except ImportError:
     import quality
     import storage
+    import telegram_store
     import transcript_reader
     import transcription_queue
 
@@ -172,6 +173,37 @@ def create_app(client=None):
         storage.save_setting(target + '_auth_version', version)
         if target == 'admin':
             session['auth_version'] = version
+        return jsonify(ok=True)
+
+    @app.get('/api/admin/watches')
+    def list_watches():
+        denied = require_admin()
+        if denied:
+            return denied
+        now = time.time()
+        rows = []
+        for watch in telegram_store.watches():
+            status = watch['status']
+            if status == 'active':
+                status = 'expired' if now >= watch['end'] else 'waiting' if now < watch['start'] else 'active'
+            last = watch.get('last_capture')
+            if last:
+                recording = storage.recording(last.get('job_id')) or {}
+                last = dict(last, title=(recording.get('source_metadata') or {}).get('title') or recording.get('note'),
+                            state=recording.get('state'))
+            rows.append(dict(id=watch['id'], channel=watch['channel'], name=watch.get('channel_name'),
+                             start=watch['start'], end=watch['end'], mode=watch['mode'],
+                             auto_transcribe=watch['auto_transcribe'], status=status, last_capture=last))
+        rows.sort(key=lambda row: (row['status'] not in {'waiting', 'active'}, -row['start']))
+        return jsonify(watches=rows, active_count=sum(row['status'] in {'waiting', 'active'} for row in rows))
+
+    @app.post('/api/admin/watches/<watch_id>/cancel')
+    def cancel_watch(watch_id):
+        denied = require_admin()
+        if denied:
+            return denied
+        if not telegram_store.cancel_watch(watch_id):
+            return jsonify(error='Watch tidak ditemukan.'), 404
         return jsonify(ok=True)
 
     @app.post('/api/logout')

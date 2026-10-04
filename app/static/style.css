@@ -273,18 +273,31 @@ footer{padding:18px 2px 4px}
 .workspace-page .login-credit a{display:inline-flex;align-items:center;min-height:44px;color:inherit;text-decoration:none;opacity:.72;transition:opacity .15s}
 .workspace-page .login-credit a:hover,.workspace-page .login-credit a:focus-visible{opacity:1}
 .workspace-page .login-credit a:focus-visible{outline:2px solid #629d45;outline-offset:3px;border-radius:3px}
+/* One continuous Source selector, aligned with the bounded form grid. */
+.workspace-page #capture-panel .tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));width:100%}
+.workspace-page #capture-panel .tab{min-width:0;text-align:center;font-weight:400;line-height:1.4;letter-spacing:0}
+.workspace-page #capture-panel .tab.selected{font-weight:500}
+.workspace-page #capture-panel .panel-heading h2{font-weight:600}
+.workspace-page #capture-panel label{font-weight:500;line-height:1.4;letter-spacing:0}
+.workspace-page #capture-panel input,.workspace-page #capture-panel select{font-weight:400;line-height:1.4}
+.workspace-page #capture-panel .hint,.workspace-page #capture-panel .preset-details{font-weight:400;letter-spacing:0}
+.workspace-page #capture-panel #record{font-weight:500;line-height:1.4}
 /* The island is a two-row signal, not a second job-details panel. */
-.workspace-page #status-monitor{--state-accent:var(--green);grid-template-columns:auto minmax(0,1fr) auto auto;grid-template-areas:'state title summary action' 'progress progress progress progress' 'detail detail detail details';align-items:center;width:fit-content;min-width:min(100%,480px);max-width:min(100%,600px);gap:10px 12px;padding:16px;border-radius:12px;min-height:80px}
+.workspace-page #status-monitor{--state-accent:var(--green);grid-template-columns:auto minmax(0,1fr) auto auto;grid-template-areas:'state title summary action' 'progress progress progress progress' 'detail detail detail details';align-items:center;width:fit-content;min-width:min(100%,480px);max-width:min(100%,600px);gap:8px 12px;padding:12px;border-radius:12px;min-height:80px}
 .workspace-page #status-monitor[data-phase=starting],.workspace-page #status-monitor[data-phase=queued]{max-width:min(100%,540px)}
-.workspace-page #status-monitor[data-phase=downloading],.workspace-page #status-monitor[data-phase=transcribing]{min-width:min(100%,560px);max-width:min(100%,680px)}
-.workspace-page #status-monitor .island-state{grid-area:state;display:flex;align-items:center;gap:7px;white-space:nowrap;font-size:12px;font-weight:650}
+.workspace-page #status-monitor[data-phase=downloading],.workspace-page #status-monitor[data-phase=processing],.workspace-page #status-monitor[data-phase=transcribing]{width:100%;min-width:0;max-width:100%}
+.workspace-page #status-monitor .island-state{grid-area:state;display:flex;align-items:center;gap:7px;white-space:nowrap;font-size:12px;font-weight:600;line-height:1.5;letter-spacing:0}
 .island-dot{width:6px;height:6px;flex:none;background:#a8db55;border-radius:50%}
 .workspace-page #status-monitor[data-tone=error] .island-dot{background:#e59d92}
 .workspace-page #status-monitor #status-job-title{grid-area:title;display:block;max-width:32ch;min-width:0;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;font-size:12px;font-weight:500;line-height:1.5;color:#e4e4e7}
-.island-summary{grid-area:summary;display:flex;justify-content:flex-end;gap:8px;white-space:nowrap;font-size:11px;font-variant-numeric:tabular-nums}
-.workspace-page #status-monitor #progress-value{margin:0;color:#d8f2ab;font-weight:650}
+.workspace-page #status-monitor:is([data-phase=downloading],[data-phase=processing],[data-phase=transcribing]) #status-job-title{max-width:none}
+.island-summary{grid-area:summary;display:flex;justify-content:flex-end;align-items:baseline;gap:8px;white-space:nowrap;font-size:11px;font-weight:400;line-height:1.5;letter-spacing:0;font-variant-numeric:tabular-nums}
+.workspace-page #status-monitor #progress-value{margin:0;color:#d8f2ab;font-weight:500}
 .workspace-page #status-monitor #duration{color:#aaaab2}
-.workspace-page #status-monitor #stop{grid-area:action;min-height:32px;font-size:10px;padding:6px 8px}
+.workspace-page #status-monitor #stop{grid-area:action;display:grid;place-items:center;width:44px;min-width:44px;height:44px;min-height:44px;padding:0;background:transparent;border-color:transparent;color:#d5aaa5}
+.workspace-page #status-monitor #stop svg{display:block;width:16px;height:16px}
+.workspace-page #status-monitor #stop:hover:not(:disabled){background:#35282a;border-color:#584344;filter:none}
+.workspace-page #status-monitor #stop:focus-visible{outline:2px solid #c8877e;outline-offset:2px;background:#35282a}
 .workspace-page #status-monitor #download-progress{grid-area:progress;margin:0;min-width:0}
 .workspace-page #status-monitor progress{display:block;height:3px;width:100%;margin:0}
 .workspace-page #status-monitor #status-detail{grid-area:detail;margin:0;font-size:11px;line-height:1.4;color:#b7b7bd}
@@ -293,7 +306,7 @@ footer{padding:18px 2px 4px}
 .workspace-page #status-monitor[data-phase=completed] #status-job-title{max-width:22ch}
 .workspace-page #history-panel>.marker-controls{max-width:640px;margin:0 0 16px;padding:12px;border:1px solid var(--line);border-radius:8px}
 @media(max-width:680px){
- .workspace-page #status-monitor{width:100%;min-width:0;max-width:100%;padding:12px;gap:8px;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:'state action' 'title summary' 'progress progress' 'detail details'}
+ .workspace-page #status-monitor{min-width:0;max-width:100%;padding:12px;gap:8px;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:'state action' 'title summary' 'progress progress' 'detail details'}
  .workspace-page #status-monitor[data-phase=starting],.workspace-page #status-monitor[data-phase=queued],.workspace-page #status-monitor[data-phase=downloading],.workspace-page #status-monitor[data-phase=transcribing]{min-width:0;max-width:100%}
  .workspace-page #status-monitor #stop,.workspace-page #status-monitor #island-details{min-height:44px}
  .workspace-page #status-monitor[data-phase=completed]{width:fit-content;max-width:100%;grid-template-areas:'state title' 'summary action'}
@@ -305,3 +318,12 @@ footer{padding:18px 2px 4px}
 .workspace-page .login-logo{display:block;overflow:visible}
 #login-wordmark{display:inline-block}
 .workspace-page .auth-exit-snapshot{position:fixed;z-index:100;pointer-events:none;margin:0}
+/* Telegram discovery management shares the quiet Settings list styling. */
+.watch-list{list-style:none;margin:0;padding:0;max-height:360px;overflow:auto}
+.watch-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:8px 12px;padding:12px 0;border-top:1px solid var(--line)}
+.watch-copy{min-width:0}.watch-copy strong{display:block;font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.watch-copy small{display:block;margin-top:3px;font-size:11px;line-height:1.5;color:var(--muted)}
+.watch-copy .watch-last{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.watch-cancel{min-height:44px;font-size:11px;padding:6px 10px;color:#a54f40}.watch-cancel:hover:not(:disabled){background:#fff6f4;filter:none}
+#watch-feedback:empty{display:none}#watches-panel>.panel-heading{margin-bottom:8px}#watches-panel>p{margin-bottom:12px}
+@media(max-width:680px){.watch-row{grid-template-columns:minmax(0,1fr) auto}.watch-copy{grid-column:1/-1}.watch-row .badge{justify-self:start}#watch-refresh{min-height:44px}.watch-copy small{overflow-wrap:anywhere}}

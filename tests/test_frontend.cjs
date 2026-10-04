@@ -465,6 +465,53 @@ function motionSpy(){
   progress(panel,value){if(value===null)panel.removeAttribute('value');else panel.value=value;},
  };
 }
+test('Settings Watches show shared schedules, compact WIB metadata, terminal states and last item safely',()=>{
+ const f=fixture();
+ f.context.watches=[{id:'active',channel:'https://www.youtube.com/@rribatam',name:'<script>RRI Batam</script>',start:Date.UTC(2026,9,5,1)/1000,end:Date.UTC(2026,9,5,3)/1000,mode:'every',auto_transcribe:true,status:'active',last_capture:{title:'Dialog Batam',state:'ready'}},
+  {id:'waiting',channel:'@channel',start:100,end:200,mode:'first',auto_transcribe:false,status:'waiting'},
+  ...['expired','finished','cancelled'].map(status=>({id:status,channel:'@old',start:100,end:200,mode:'first',auto_transcribe:false,status}))];
+ f.run('renderWatches({watches,active_count:2})');
+ assert.equal(f.get('watch-count').textContent,'2 aktif');
+ const rows=f.get('watch-list').children;assert.equal(rows.length,5);
+ assert.equal(rows[0].querySelector('strong').textContent,'<script>RRI Batam</script>');assert.equal(rows[0].querySelector('script'),null);
+ assert.match(rows[0].textContent,/08:00–10:00 WIB · Every live · Auto-transcribe on/);
+ assert.match(rows[0].textContent,/Terakhir: Dialog Batam · Siap/);
+ assert.match(rows[1].textContent,/First live · Auto-transcribe off/);
+ assert.equal(f.get('watch-list').querySelectorAll('button').length,2);
+ assert.equal(rows[0].querySelector('button').attributes['aria-label'],'Batalkan watch <script>RRI Batam</script>');
+ assert.equal(f.run('watchWindow({})'),'—');
+ f.run('renderWatches({watches:[],active_count:0})');assert.equal(f.get('watch-feedback').textContent,'Belum ada watch.');
+});
+test('Watches load only for admins, handle list errors locally, and expose no web creation form',async()=>{
+ const f=fixture(),calls=[];
+ f.context.fetch=async url=>{calls.push(url);return {ok:false,status:503,headers:{get:()=> 'application/json'},json:async()=>({error:'Watch unavailable'})};};
+ await f.run('loadWatches()');assert.deepEqual(calls,[]);
+ f.run("isAdmin=true;showSection('admin')");await new Promise(setImmediate);
+ assert.deepEqual(calls,['/api/admin/watches']);assert.equal(f.get('watch-feedback').textContent,'Watch unavailable');
+ assert.equal(f.get('notice').textContent,'');
+ const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
+ const panel=html.split('id="watches-panel"')[1].split('</section>')[0];
+ assert.match(panel,/hidden/);assert.match(panel,/Watches/);assert.doesNotMatch(panel,/<form|<input|<select/);
+});
+test('Watches visibility follows login roles and cancellation reuses the admin API without stopping capture',async()=>{
+ const f=fixture();captureAPI(f);await f.run('enter({is_admin:false})');assert.equal(f.get('watches-panel').hidden,true);
+ await f.run('enter({is_admin:true})');assert.equal(f.get('watches-panel').hidden,false);
+ f.run("renderWatches({active_count:1,watches:[{id:'watch',channel:'@rri',start:100,end:200,status:'active',mode:'first',auto_transcribe:false}]})");
+ const calls=[];f.context.fetch=async(url,options)=>{calls.push([url,options.method]);return {ok:true,status:200,headers:{get:()=> 'application/json'},json:async()=>url.endsWith('/cancel')?{ok:true}:{active_count:0,watches:[{id:'watch',channel:'@rri',start:100,end:200,status:'cancelled',mode:'first',auto_transcribe:false}]}};};
+ const button=f.get('watch-list').querySelector('button');const pending=button.onclick();assert.equal(button.disabled,true);await pending;
+ assert.deepEqual(calls,[['/api/admin/watches/watch/cancel','POST'],['/api/admin/watches','GET']]);
+ assert.equal(f.get('watch-count').textContent,'0 aktif');assert.equal(f.get('watch-list').querySelector('button'),null);
+});
+test('failed cancellation preserves watch controls, and a stale list cannot overwrite post-cancel data',async()=>{
+ const f=fixture();f.run("isAdmin=true;renderWatches({active_count:1,watches:[{id:'watch',channel:'@rri',start:100,end:200,status:'active',mode:'first'}]})");
+ f.context.fetch=async()=>({ok:false,status:500,headers:{get:()=> 'application/json'},json:async()=>({error:'Try again'})});
+ const button=f.get('watch-list').querySelector('button');await button.onclick();assert.equal(button.disabled,false);assert.equal(f.get('watch-feedback').textContent,'Try again');
+ let resolveOld;f.context.fetch=()=>new Promise(resolve=>{resolveOld=resolve;});const old=f.run('loadWatches()');
+ f.context.fetch=async()=>({ok:true,status:200,headers:{get:()=> 'application/json'},json:async()=>({watches:[],active_count:0})});
+ await f.run('loadWatches(true)');
+ resolveOld({ok:true,status:200,headers:{get:()=> 'application/json'},json:async()=>({watches:[],active_count:99})});await old;
+ assert.equal(f.get('watch-count').textContent,'0 aktif');
+});
 test('accepted submission morphs Source only after admission and immediately publishes the job',async()=>{
  const motion=motionSpy(),f=fixture(motion);let accept;
  f.run("mode='youtube';online=true;disk={can_record:true}");
@@ -563,8 +610,46 @@ test('minimal island markup omits duplicate metadata and moves live markers outs
  for(const id of ['state','status-job-title','progress-value','duration','stop','progress-bar','island-details'])assert.ok(island.includes('id="'+id+'"'),id);
  assert.doesNotMatch(island,/monitor-footer|marker-controls|active-source|WAKTU PROSES|UKURAN|progress-caption|status-title/);
  const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8').split('/* The island is a two-row signal')[1];
- assert.match(css,/width:fit-content/);assert.match(css,/max-width:min\(100%,680px\)/);assert.match(css,/\[data-phase=completed\]\{min-width:0;min-height:0;max-width:min\(100%,360px\)/);
+ assert.match(css,/width:fit-content/);assert.match(css,/\[data-phase=processing\]/);assert.match(css,/\[data-phase=completed\]\{min-width:0;min-height:0;max-width:min\(100%,360px\)/);
  assert.match(css,/white-space:nowrap;text-overflow:ellipsis;overflow:hidden/);
+});
+test('Source selector fills the bounded form with four equally sized, quieter controls',()=>{
+ const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8').split('/* One continuous Source selector')[1];
+ assert.match(css,/#capture-panel \.tabs\{display:grid;grid-template-columns:repeat\(4,minmax\(0,1fr\)\);width:100%\}/);
+ assert.match(css,/#capture-panel \.tab\{min-width:0;text-align:center;font-weight:400/);
+ assert.match(css,/\.tab\.selected\{font-weight:500\}/);
+ assert.match(css,/#capture-panel label\{font-weight:500/);
+ const f=fixture();
+ for(const mode of ['youtube','tiktok','instagram','oryx']){
+  f.run(`setMode('${mode}')`);
+  for(const source of ['youtube','tiktok','instagram','oryx'])assert.equal(f.get('tab-'+source).attributes['aria-pressed'],String(source===mode));
+ }
+});
+test('active island fills History while compact states and single-line title hierarchy remain scoped',()=>{
+ const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8').split('/* The island is a two-row signal')[1];
+ assert.match(css,/#status-monitor\[data-phase=downloading\],\.workspace-page #status-monitor\[data-phase=processing\],\.workspace-page #status-monitor\[data-phase=transcribing\]\{width:100%;min-width:0;max-width:100%\}/);
+ assert.match(css,/\[data-phase=queued\]\{max-width:min\(100%,540px\)\}/);
+ assert.match(css,/:is\(\[data-phase=downloading\],\[data-phase=processing\],\[data-phase=transcribing\]\) #status-job-title\{max-width:none\}/);
+ assert.match(css,/min-width:0;white-space:nowrap;text-overflow:ellipsis;overflow:hidden/);
+ assert.match(css,/\.island-state\{[^}]*font-weight:600/);
+ assert.match(css,/#progress-value\{[^}]*font-weight:500/);
+});
+test('island Stop retains its accessible square icon across polls and immediately requests cancellation',async()=>{
+ const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
+ const stop=html.match(/<button id="stop".*?<\/button>/)[0];
+ assert.match(stop,/aria-label="Hentikan proses" title="Hentikan proses"/);
+ assert.match(stop,/<svg[^>]*aria-hidden="true"[^>]*><rect[^>]*width="12" height="12"/);
+ assert.doesNotMatch(stop,/>Hentikan|<path|>×|>X/);
+ const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8').split('/* The island is a two-row signal')[1];
+ assert.match(css,/#stop\{[^}]*width:44px;min-width:44px;height:44px;min-height:44px/);
+ assert.match(css,/#stop:focus-visible\{outline:2px solid/);
+ const f=fixture(),svg=new Element('svg');f.get('stop').append(svg);
+ for(const state of ['starting','waiting','recording']){
+  f.run(`active={job_id:'cancel',source:'youtube',state:'${state}',is_live:false};controls()`);
+  assert.equal(f.get('stop').children[0],svg);assert.equal(f.get('stop').hidden,false);
+ }
+ const calls=[];f.context.fetch=(url,options)=>{calls.push([url,JSON.parse(options.body)]);return new Promise(()=>{});};
+ f.get('stop').onclick();assert.deepEqual(calls,[['/api/stop',{job_id:'cancel'}]]);assert.equal(f.get('stop').disabled,true);
 });
 test('transcription started from History is observed by the same island without changing queue requests',async()=>{
  const motion=motionSpy(),f=fixture(motion);const calls=[];
