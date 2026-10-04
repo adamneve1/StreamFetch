@@ -410,11 +410,17 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
         transcript = (row or {}).get('transcript') or {}
         if transcript.get('status') != 'completed':
             return jsonify(error='Transkrip belum selesai atau tidak ditemukan.'), 404
-        key = 'txt_filename' if kind == 'txt' else 'srt_filename'
+        keys = {'txt': 'txt_filename', 'srt': 'srt_filename',
+                'vtt': 'vtt_filename'}
+        key = keys.get(kind)
+        if not key:
+            return jsonify(error='Jenis file transkrip tidak valid.'), 404
         filename = transcript.get(key)
         if not filename or Path(filename).name != filename:
             return jsonify(error='File transkrip tidak ditemukan.'), 404
-        mimetype = 'text/plain; charset=utf-8' if kind == 'txt' else 'application/x-subrip; charset=utf-8'
+        mimetype = {'txt': 'text/plain; charset=utf-8',
+                    'srt': 'application/x-subrip; charset=utf-8',
+                    'vtt': 'text/vtt; charset=utf-8'}[kind]
         return send_from_directory(Path(os.getenv('DOWNLOAD_DIR', '/downloads')), filename,
                                    as_attachment=attachment, mimetype=mimetype,
                                    download_name=filename)
@@ -430,6 +436,10 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
     @app.get('/api/recordings/<job_id>/transcript/srt')
     def download_transcript_srt(job_id):
         return transcript_file(job_id, 'srt', True)
+
+    @app.get('/api/recordings/<job_id>/transcript/vtt')
+    def download_transcript_vtt(job_id):
+        return transcript_file(job_id, 'vtt', True)
 
     @app.get('/api/files/<filename>')
     def download(filename):
@@ -456,7 +466,7 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
             path.unlink(missing_ok=True)
         transcript = row.get('transcript') or {}
         root = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve()
-        for key in ('txt_filename', 'srt_filename'):
+        for key in ('txt_filename', 'srt_filename', 'vtt_filename'):
             sidecar = transcript.get(key)
             if sidecar and Path(sidecar).name == sidecar:
                 candidate = root / sidecar
@@ -541,7 +551,8 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
         transcript = row.get('transcript') or {}
         sidecar_moves = []
         if transcript.get('status') == 'completed':
-            for kind, suffix in (('txt_filename', '.txt'), ('srt_filename', '.srt')):
+            for kind, suffix in (('txt_filename', '.txt'), ('srt_filename', '.srt'),
+                                 ('vtt_filename', '.vtt')):
                 old_sidecar = transcript.get(kind)
                 if old_sidecar:
                     old_path = root / old_sidecar

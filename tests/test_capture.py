@@ -257,6 +257,56 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('--abort-on-unavailable-fragments', command)
         self.assertIn('%(format_id)s', command[command.index('-o') + 1])
 
+    def test_track_progress_template_is_only_enabled_for_youtube_downloads(self):
+        for source, is_live in (('youtube', False), ('youtube', True), ('tiktok', True)):
+            with self.subTest(source=source, is_live=is_live):
+                command, _ = worker.capture_command(dict(
+                    job_id='progress-job', source=source, is_live=is_live,
+                    url='https://youtu.be/test'))
+                self.assertEqual('--progress-template' in command, source == 'youtube' and not is_live)
+                if '--progress-template' in command:
+                    template = command[command.index('--progress-template') + 1]
+                    self.assertIn('%(info.vcodec)s|%(info.acodec)s', template)
+
+    def test_track_progress_parser_handles_formats_and_unknown_percentages(self):
+        for codecs, phase in (('avc1|none', 'video'), ('none|mp4a', 'audio'),
+                              ('avc1|mp4a', 'media'), ('NA|NA', None)):
+            with self.subTest(codecs=codecs):
+                parsed = worker.parse_progress(f'streamfetch:{codecs}| 42.5%')
+                self.assertEqual(parsed['phase'], phase)
+                self.assertEqual(parsed['percent'], 42.5)
+        self.assertIsNone(worker.parse_progress('streamfetch:none|mp4a|Unknown')['percent'])
+        self.assertIsNone(worker.parse_progress('streamfetch:malformed'))
+        self.assertEqual(worker.parse_progress('[download]  25.0% of 10MiB at 2MiB/s ETA 00:03')['percent'], 25)
+
+    async def test_public_status_exposes_progress_without_private_job_fields(self):
+        job = self.job('youtube')
+        job.update(is_live=False, progress_percent=42.5, progress_phase='audio',
+                   download_attempt=2, download_attempts=3, _capture_diagnostics=['private'])
+        await worker.set_state(job, None, 'recording', 'Downloading audio')
+        public = json.loads(self.redis.get('web:job:test-job'))
+        for key in ('progress_percent', 'progress_phase', 'download_attempt', 'download_attempts'):
+            self.assertEqual(public[key], job[key])
+        self.assertNotIn('url', public)
+        self.assertNotIn('_capture_diagnostics', public)
+
+    async def test_capture_publishes_current_track_progress_from_stdout(self):
+        job = self.job('youtube')
+        job.update(is_live=False, download_attempt=1, download_attempts=1)
+        lease = asyncio.get_running_loop().create_future()
+        self.addCleanup(lease.cancel)
+        command = [sys.executable, '-c',
+                   "import pathlib, sys, time; pathlib.Path(sys.argv[1]).write_bytes(b'partial'); "
+                   "print('streamfetch:none|mp4a| 42.5%', flush=True); time.sleep(1)",
+                   str(self.root / 'test-job-140.m4a.part')]
+        with patch.object(worker, 'capture_command', return_value=(command, None)):
+            reason = await worker.capture(job, None, lease)
+        self.assertEqual(reason, 'completed')
+        public = json.loads(self.redis.get('web:job:test-job'))
+        self.assertEqual(public['progress_phase'], 'audio')
+        self.assertEqual(public['progress_percent'], 42.5)
+        self.assertEqual(public['download_attempts'], 1)
+
     async def test_normal_vod_and_active_live_do_not_use_outer_retry(self):
         lease = asyncio.get_running_loop().create_future()
         self.addCleanup(lease.cancel)
@@ -306,6 +356,7 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         wait.assert_awaited_once()
         inspect.assert_awaited_once()
         self.assertEqual(job['download_attempt'], 2)
+        self.assertEqual(job['download_attempts'], worker.YOUTUBE_POSTLIVE_ATTEMPTS)
         self.assertEqual(job['live_status'], 'was_live')
 
     async def test_post_live_retries_are_bounded_and_keep_partial_files(self):

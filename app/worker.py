@@ -387,6 +387,21 @@ def finalize_to_compatible_mp4(path, compression="original"):
 
 def parse_progress(text):
 
+    if text.startswith('streamfetch:'):
+        fields = text.removeprefix('streamfetch:').split('|')
+        if len(fields) != 3:
+            return None
+        video, audio, percentage = fields
+        absent_codecs = {'none', 'na', '', 'unknown'}
+        has_video = video.strip().lower() not in absent_codecs
+        has_audio = audio.strip().lower() not in absent_codecs
+        phase = 'media' if has_video and has_audio else 'video' if has_video else 'audio' if has_audio else None
+        percent_match = re.search(r'(\d+(?:\.\d+)?)%', percentage)
+        return {
+            'percent': float(percent_match.group(1)) if percent_match else None,
+            'phase': phase, 'size': None, 'speed': None, 'eta': None,
+        }
+
     if "[download]" not in text:
         return None
 
@@ -456,7 +471,7 @@ async def heartbeat(job=None):
 
 async def set_state(job, status, state, detail=''):
     r.set(f"state:{job['job_id']}", state, ex=86400)
-    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'quality', 'output_format', 'compression', 'is_live', 'live_status', 'was_live', 'download_attempt', 'download_exit_code', 'started_at', 'elapsed', 'size', 'filename') if key in job}
+    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'quality', 'output_format', 'compression', 'is_live', 'live_status', 'was_live', 'download_attempt', 'download_attempts', 'download_exit_code', 'progress_percent', 'progress_phase', 'started_at', 'elapsed', 'size', 'filename') if key in job}
     public.update(state=state, detail=detail)
     r.set('web:job:' + job['job_id'], json.dumps(public), ex=86400)
     if os.getenv('DATA_DIR'):
@@ -732,6 +747,13 @@ def capture_command(job):
         '--fragment-retries', '10', '--file-access-retries', '3',
         '--retry-sleep', 'fragment:exp=1:20', '--continue',
     ]
+    if job['source'] == 'youtube' and job.get('is_live') is False:
+        # Report the current format separately: video and audio can each reach
+        # 100%, so this is track progress, not overall download completion.
+        command += [
+            '--progress-template',
+            'download:streamfetch:%(info.vcodec)s|%(info.acodec)s|%(progress._percent_str)s',
+        ]
     if job.get('live_status') == 'post_live':
         # A post-live manifest is still changing. Do not silently accept holes;
         # the bounded outer retry will refresh metadata and resume the .part.
@@ -773,7 +795,8 @@ async def capture(job, status, lease):
     log.info('job=%s source=%s capture_pid=%s temporary=%s',
              job['job_id'], job['source'], process.pid,
              temp_path or f"{job['job_id']}-*")
-    activity = {'media': 0, 'percent': None}
+    activity = {'media': 0, 'percent': None, 'phase': None}
+    job.update(progress_percent=None, progress_phase=None)
     diagnostics = deque(maxlen=40)
     output_tail = deque(maxlen=40)
 
@@ -788,6 +811,7 @@ async def capture(job, status, lease):
                 parsed_progress = parse_progress(text)
                 if parsed_progress:
                     activity['percent'] = parsed_progress['percent']
+                    activity['phase'] = parsed_progress.get('phase')
             elif text.startswith('out_time_us='):
                 try:
                     activity['media'] = max(activity['media'], int(text.split('=', 1)[1]))
@@ -837,7 +861,8 @@ async def capture(job, status, lease):
                 reason = 'source_idle_timeout'
                 break
             if recording and now - last_update >= 5:
-                job.update(size=measure[0], elapsed=round(now - started, 1))
+                job.update(size=measure[0], elapsed=round(now - started, 1),
+                           progress_percent=activity['percent'], progress_phase=activity['phase'])
                 detail = f"💾 {format_size(measure[0])}"
                 if activity['percent'] is not None:
                     detail += f" ({activity['percent']:.1f}%)"
@@ -893,9 +918,11 @@ async def capture_with_retries(job, status, lease):
     """Retry post-live YouTube downloads after refreshing their manifest."""
     post_live = job['source'] == 'youtube' and job.get('live_status') == 'post_live'
     attempts = YOUTUBE_POSTLIVE_ATTEMPTS if post_live else 1
+    job['download_attempts'] = attempts
     last_reason = 'source_error'
     for attempt in range(1, attempts + 1):
         job['download_attempt'] = attempt
+        job.update(progress_percent=None, progress_phase=None)
         if attempt > 1:
             delay = min(120, YOUTUBE_POSTLIVE_RETRY_DELAY * (2 ** (attempt - 2)))
             if not await wait_for_youtube_retry(job, status, lease, delay, attempt, attempts):

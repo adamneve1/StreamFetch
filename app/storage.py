@@ -97,7 +97,7 @@ def save_source(source_id, name, url):
 
 def save_recording(job, state, detail=''):
     # Never store playback URLs/credentials in catalogue or browser status.
-    data = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'storage', 'quality', 'output_format', 'compression', 'is_live', 'live_status', 'was_live', 'download_attempt', 'download_exit_code', 'requested_at', 'started_at', 'elapsed', 'size', 'filename', 'stop_reason') if key in job}
+    data = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'storage', 'quality', 'output_format', 'compression', 'is_live', 'live_status', 'was_live', 'download_attempt', 'download_attempts', 'download_exit_code', 'requested_at', 'started_at', 'elapsed', 'size', 'filename', 'stop_reason') if key in job}
     data.update(state=state, detail=detail)
     with connection() as db:
         db.execute('INSERT INTO recordings VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET updated=excluded.updated, data=excluded.data', (job['job_id'], time.time(), json.dumps(data)))
@@ -123,7 +123,7 @@ def save_transcription_state(job_id, status, replace=False, **fields):
     allowed = {
         'requested_at', 'started_at', 'completed_at', 'processing_seconds',
         'language', 'language_probability', 'model', 'txt_filename',
-        'srt_filename', 'error',
+        'srt_filename', 'vtt_filename', 'error',
     }
     with connection() as db:
         row = db.execute('SELECT data FROM recordings WHERE id=?', (job_id,)).fetchone()

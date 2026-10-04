@@ -193,7 +193,16 @@ CAPTURE_STOP_TIMEOUT=10
 FINALIZE_TIMEOUT=600
 PROBE_TIMEOUT=20
 
-# CPU transcription
+# Cloudflare Workers AI transcription with local CPU fallback
+TRANSCRIPTION_PROVIDER=auto
+CLOUDFLARE_ACCOUNT_ID=isi_account_id
+CLOUDFLARE_API_TOKEN=isi_api_token_workers_ai
+CLOUDFLARE_TRANSCRIPTION_CONCURRENCY=3
+CLOUDFLARE_TRANSCRIPTION_CHUNK_SECONDS=300
+CLOUDFLARE_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS=2
+CLOUDFLARE_TRANSCRIPTION_TIMEOUT=120
+
+# Local transcription fallback
 WHISPER_CPU_THREADS=4
 TRANSCRIPTION_CPUS=4.0
 TRANSCRIPTION_MEMORY_LIMIT=8g
@@ -379,9 +388,10 @@ transcription_queue (Redis)
     ↓
 transcription-worker (concurrency 1)
     ↓
-faster-whisper small / CPU / int8
+Cloudflare @cf/openai/whisper-large-v3-turbo
+    └── 429 / timeout / network / 5xx → faster-whisper small / CPU / int8
     ↓
-<nama-video>.txt + <nama-video>.srt
+<nama-video>.txt + <nama-video>.srt + <nama-video>.vtt
 ```
 
 Status berjalan melalui:
@@ -391,10 +401,18 @@ Queued → Transcribing → Completed
                          └→ Failed
 ```
 
-Worker membaca audio langsung dari media melalui decoder `faster-whisper`; video
-asli tidak diubah atau di-encode ulang. FFprobe dipakai untuk menolak file rusak
-dan video tanpa stream audio sebelum inference dimulai. Output ditulis ke file
-sementara dan dipublikasikan dengan rename atomik.
+Dalam mode `auto`, worker memakai Cloudflare Workers AI sebagai provider utama.
+FFmpeg mengekstrak audio mono 16 kHz ke FLAC sekali, lalu membuat chunk berbasis
+waktu dengan overlap kecil. Maksimal tiga chunk diproses bersamaan secara default.
+Timestamp kata dan segmen di-offset ke timeline video, lalu overlap dipangkas
+menurut ownership window agar ucapan di batas chunk tidak hilang atau terduplikasi.
+
+HTTP 429/kuota, timeout, error jaringan, dan HTTP 5xx otomatis mengulang seluruh
+transkripsi memakai `faster-whisper small` CPU `int8` dari media asli. HTTP 401/403,
+credential yang tidak lengkap, dan respons yang tidak valid dilaporkan sebagai
+error agar kesalahan konfigurasi tidak tersembunyi. Video asli tidak diubah.
+FFprobe menolak file rusak dan video tanpa stream audio sebelum inference dimulai.
+Output ditulis ke file sementara dan dipublikasikan dengan rename atomik.
 
 Metadata status disimpan di `data/capture.sqlite3`. Saat worker atau Redis
 restart, worker membangun kembali antrean dari status durable `queued` atau
