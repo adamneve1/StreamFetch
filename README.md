@@ -117,11 +117,58 @@ Perintah utama:
 ```text
 /record
 /stop
+/watch
+/watchlist
+/cancelwatch ID
+/transcribe
 ```
 
 URL YouTube juga dapat dikirim langsung ke bot untuk dimasukkan ke antrean.
 
 Telegram dan web menggunakan Redis serta worker yang sama sehingga tidak menjalankan pipeline recording terpisah.
+
+Set `TELEGRAM_ALLOWED_USER_IDS` ke ID user Telegram numerik (dipisahkan koma),
+misalnya `123456789,987654321`. Tanpa allowlist, semua command/callback ditolak.
+`STREAMFETCH_PUBLIC_URL` harus menunjuk workspace yang bisa dibuka pengguna,
+misalnya `https://streamfetch.example.com`; View Transcript tetap memakai login web.
+
+`/watch` memandu konfigurasi channel, today/tomorrow/tanggal ISO, jam mulai/akhir
+HH:MM WIB, first/every, dan auto-transcribe yes/no. Cara singkat:
+
+```text
+/watch https://youtube.com/@rribatam tomorrow 09:00 12:00 first yes
+```
+
+Mode default `first`, auto-transcribe default `no`. Jam akhir harus sesudah jam
+mulai pada tanggal yang sama; window yang sudah berakhir ditolak. Polling default
+30 detik (`TELEGRAM_WATCH_POLL_SECONDS`, minimum 10). Discovery memakai metadata
+20 siaran terbaru pada tab Streams, hanya memilih video yang sudah `is_live`,
+dan mengirim URL video aktual ke antrean capture yang ada. Siaran aktif saat
+window mulai juga ditemukan pada poll pertama. Satu video ID hanya dijadwalkan
+sekali oleh watch, termasuk lintas watch/restart. Mode every melanjutkan discovery
+untuk video live berikutnya. Capture yang masuk antrean tetap mengikuti kapasitas
+worker yang ada; ketika worker sibuk, capture dapat menunggu.
+
+Watch dan subscription notifikasi tersimpan di `data/capture.sqlite3`. Bot harus
+memakai volume data yang sama dengan worker/web; Compose sudah mengaturnya.
+`/watchlist` menampilkan watch milik user/chat saat ini. `/cancelwatch ID` hanya
+menghentikan discovery milik user tersebut, tidak menghentikan capture yang sudah
+dijadwalkan. `/cancelwatch` tanpa ID membatalkan wizard yang sedang diisi.
+
+`/transcribe` menampilkan rekaman MP4 siap terbaru, mengutamakan yang belum punya
+transkrip. Tombol Transcribe juga dikirim setelah capture selesai. Callback memakai
+admission transkripsi bersama web; transkrip yang sudah selesai langsung menyediakan
+View Transcript, dan yang gagal bisa diretry. Auto-transcribe watch dimasukkan setelah
+capture berstatus ready. Bot memberi notifikasi status capture/transkripsi dan link
+reader, bukan mengirim seluruh teks. Notifikasi diperiksa ulang setelah restart;
+kegagalan pengiriman dicoba lagi, sehingga notifikasi dapat terulang pada crash
+tepat setelah Telegram menerima pesan. Batasi izin akses grup tempat bot dipakai.
+
+Aktifkan atau perbarui integrasi:
+
+```sh
+docker compose --profile telegram up -d --build bot web
+```
 
 ## Format Output
 

@@ -238,14 +238,14 @@ test('TikTok clears submitted URL and live capture preserves reusable source sel
   f.run("captureSubmitted({job_id:'live-job'},{source:'oryx',source_id:'studio',quality:'best',format:'mp4',compression:'balanced',storage:'local'})");
   assert.equal(f.get('source').value,'studio');
 });
-test('Admin navigation separates advanced controls and returning preserves the capture form',async()=>{
+test('Settings navigation separates advanced controls and returning preserves the capture form',async()=>{
   const f=fixture();captureAPI(f);
   await f.run('enter({is_admin:false})');
   assert.equal(f.get('admin-panel').hidden,true);
   f.get('youtube-url').value='draft';
   f.get('nav-admin').onclick();
   assert.equal(f.get('control-room').hidden,true);assert.equal(f.get('admin-view').hidden,false);
-  assert.equal(f.get('page-title').textContent,'Admin');assert.equal(f.get('nav-admin').attributes['aria-current'],'page');
+  assert.equal(f.get('page-title').textContent,'Settings');assert.equal(f.get('nav-admin').attributes['aria-current'],'page');
   f.get('nav-control').onclick();
   assert.equal(f.get('control-room').hidden,false);assert.equal(f.get('admin-view').hidden,true);
   assert.equal(f.get('youtube-url').value,'draft');
@@ -270,7 +270,7 @@ test('StreamFetch branding retains the existing mark and removes old user-facing
     assert.match(html,/<img class="brand-logo" src="\/static\/favicon.svg" alt=""><strong>StreamFetch<\/strong>/);
   }
   const f=fixture();f.run("showSection('control')");assert.equal(f.get('page-title').textContent,'StreamFetch');
-  f.run("showSection('admin')");assert.equal(f.get('page-title').textContent,'Admin');
+  f.run("showSection('admin')");assert.equal(f.get('page-title').textContent,'Settings');
 });
 test('segmented sources preserve mode behavior and expose the selected state accessibly',()=>{
   const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
@@ -300,4 +300,30 @@ test('compact jobs retain every state, title, full diagnostics, metadata and sec
   assert.match(css,/padding:10px 12px;border:1px solid #36363b;border-radius:12px/);
   assert.match(css,/\.workspace-page #stop\{height:30px/);
   assert.match(css,/\.workspace-page #capture-panel \.capture-options \.form-grid\{display:contents\}/);
+});
+
+test('Settings gear is labelled and existing configuration is grouped without changing IDs',()=>{
+  const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
+  const button=html.match(/<button id="nav-admin".*?<\/button>/)[0];
+  assert.match(button,/aria-label="Settings"/);assert.match(button,/title="Settings"/);
+  assert.match(button,/aria-controls="admin-view"/);assert.match(button,/<svg.*aria-hidden="true"/);
+  assert.doesNotMatch(button,/>Admin</);
+  const settings=html.slice(html.indexOf('<section id="admin-view"'));
+  assert.match(settings,/aria-label="Settings"/);
+  assert.ok(settings.indexOf('<h2>Saved Sources</h2>')<settings.indexOf('<h2>Storage</h2>'));
+  assert.ok(settings.indexOf('<h2>Storage</h2>')<settings.indexOf('<h2>Security</h2>'));
+  assert.ok(settings.indexOf('<h2>Security</h2>')<settings.indexOf('<h2>System</h2>'));
+  for(const id of ['source-form','password-form','disk-free','disk-limit','disk-meter'])assert.equal([...html.matchAll(new RegExp('id="'+id+'"','g'))].length,1);
+  assert.doesNotMatch(settings,/Pengaturan admin|Sistem &amp; pengaturan default/);
+});
+test('Settings ends with a minimal product footer and preserves the existing safe GitHub link',()=>{
+  const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
+  const footer=html.match(/<footer class="product-footer".*?<\/footer>/)[0];
+  assert.ok(html.indexOf(footer)>html.indexOf('<h2>System</h2>'));
+  assert.match(footer,/src="\/static\/favicon.svg"/);assert.match(footer,/<strong>StreamFetch<\/strong>/);
+  assert.match(footer,/href="https:\/\/github.com\/adamneve1"/);
+  assert.match(footer,/target="_blank" rel="noopener noreferrer"/);
+  assert.match(footer,/aria-label="GitHub \(opens in a new tab\)"/);
+  assert.match(footer,/>GitHub <svg/);
+  assert.doesNotMatch(footer,/@adamneve1|Built by|About|credit-link/);
 });

@@ -28,6 +28,7 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.tmp.name)
         self.redis = fakeredis.FakeRedis(decode_responses=True)
         self.patches = [patch.object(worker, 'r', self.redis),
+                        patch.dict(os.environ, DATA_DIR=self.tmp.name, TELEGRAM_ALLOWED_USER_IDS='123'),
                         patch.object(bot, 'r', self.redis),
                         patch.object(worker, 'DOWNLOAD_DIR', self.root),
                         patch.object(worker, 'send', AsyncMock(return_value=SimpleNamespace(message_id=1))),
@@ -45,8 +46,10 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         return job
 
     def update(self, chat=123):
+        message = SimpleNamespace(reply_text=AsyncMock())
         return SimpleNamespace(effective_chat=SimpleNamespace(id=chat),
-                               message=SimpleNamespace(reply_text=AsyncMock()))
+                               effective_user=SimpleNamespace(id=123), callback_query=None,
+                               effective_message=message, message=message)
 
     def media(self, path):
         subprocess.run([

@@ -4,9 +4,11 @@ import re
 import uuid
 import time
 try:
-    from . import storage
+    from . import storage, telegram_controls, telegram_store
 except ImportError:
     import storage
+    import telegram_controls
+    import telegram_store
 # pyrefly: ignore [missing-import]
 import redis
 
@@ -16,6 +18,7 @@ from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
+    CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
     filters,
@@ -45,6 +48,7 @@ r = redis.Redis(
     socket_connect_timeout=5,
     socket_timeout=5,
 )
+controls = telegram_controls.Controls(r)
 
 
 def is_youtube_url(text):
@@ -57,17 +61,21 @@ def is_youtube_url(text):
     )
 
 
+@telegram_controls.authorized
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
-        "🎬 YouTube Downloader\n\n"
+        "StreamFetch\n\n"
         "Kirim link YouTube atau TikTok Live (@username/live) untuk merekam.\n\n"
         "Perintah:\n"
         "/record - rekam live Oryx yang dikonfigurasi\n"
-        "/stop - berentin rekaman yang lagi jalan"
+        "/stop - hentikan capture\n"
+        "/watch · /watchlist · /cancelwatch\n"
+        "/transcribe - pilih rekaman"
     )
 
 
+@telegram_controls.authorized
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = update.effective_chat.id
@@ -95,6 +103,7 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+@telegram_controls.authorized
 async def record(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ORYX_STREAM_URL:
         await update.message.reply_text("❌ ORYX_STREAM_URL belum dikonfigurasi.")
@@ -118,9 +127,15 @@ async def record(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "offline": "❌ Worker tidak tersedia. /record tidak dimasukkan antrean.",
     }
     await update.message.reply_text(messages[result])
+    if result == 'accepted':
+        telegram_store.subscribe(job['job_id'], job['chat_id'], update.effective_user.id, monitor_capture=True)
 
 
+@telegram_controls.authorized
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if await controls.watch_reply(update, context):
+        return
 
     url = update.message.text.strip()
 
@@ -152,12 +167,15 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await update.message.reply_text('⏳ Menyiapkan rekaman TikTok Live.' if result == 'accepted'
                                         else '❌ Worker sibuk atau offline. Coba lagi setelah siap.')
+        if result == 'accepted':
+            telegram_store.subscribe(job['job_id'], job['chat_id'], update.effective_user.id, monitor_capture=True)
         return
 
     r.rpush(
         "download_queue",
         json.dumps(job),
     )
+    telegram_store.subscribe(job['job_id'], job['chat_id'], update.effective_user.id, monitor_capture=True)
 
     await update.message.reply_text(
         "📥 Siap, udah masuk antrian download."
@@ -169,6 +187,8 @@ def main():
     app = (
         Application.builder()
         .token(TOKEN)
+        .post_init(controls.post_init)
+        .post_stop(controls.post_stop)
         .build()
     )
 
@@ -180,6 +200,11 @@ def main():
         CommandHandler("stop", stop)
     )
     app.add_handler(CommandHandler("record", record))
+    app.add_handler(CommandHandler('watch', controls.watch))
+    app.add_handler(CommandHandler('watchlist', controls.watchlist))
+    app.add_handler(CommandHandler('cancelwatch', controls.cancelwatch))
+    app.add_handler(CommandHandler('transcribe', controls.transcribe))
+    app.add_handler(CallbackQueryHandler(controls.callback, pattern=r'^transcribe:'))
 
     app.add_handler(
         MessageHandler(

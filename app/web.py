@@ -14,11 +14,12 @@ from flask import Flask, jsonify, request, session, send_from_directory
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 try:
-    from . import quality, storage, transcript_reader
+    from . import quality, storage, transcript_reader, transcription_queue
 except ImportError:
     import quality
     import storage
     import transcript_reader
+    import transcription_queue
 
 ADMIT = """
 if redis.call('EXISTS', 'worker:heartbeat') == 0 then return 'offline' end
@@ -35,14 +36,6 @@ local state = redis.call('GET', 'state:' .. ARGV[1])
 if state == 'finalizing' or state == 'ready' or state == 'failed' then return 0 end
 redis.call('SET', 'stop:' .. ARGV[1], '1', 'EX', 300)
 return 1
-"""
-TRANSCRIPTION_ADMIT = """
-local guard = 'transcription:guard:' .. ARGV[1]
-if redis.call('EXISTS', guard) == 1 then return 'duplicate' end
-redis.call('SET', guard, 'queued')
-redis.call('SET', 'transcription:state:' .. ARGV[1], 'queued')
-redis.call('RPUSH', 'transcription_queue', ARGV[2])
-return 'accepted'
 """
 
 
@@ -394,20 +387,8 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
         if (not row or row.get('state') != 'ready' or not row.get('filename')
                 or Path(row['filename']).suffix.lower() != '.mp4'):
             return jsonify(error='Rekaman tidak ditemukan atau belum siap.'), 404
-        transcript = row.get('transcript') or {}
-        if transcript.get('status') in {'queued', 'transcribing', 'completed'}:
-            return jsonify(error='Transkrip untuk rekaman ini sudah ada atau sedang diproses.'), 409
-        # A failed job is explicitly retryable, including after a worker restart.
-        if transcript.get('status') == 'failed':
-            r.delete('transcription:guard:' + job_id)
-        # Commit durable state before dispatch so a very fast worker cannot race
-        # the catalogue write. If Redis is temporarily down, worker recovery will
-        # enqueue this durable queued state when Redis returns.
-        storage.save_transcription_state(
-            job_id, 'queued', replace=True, requested_at=time.time(),
-            model=os.getenv('WHISPER_MODEL', 'small'), error='')
-        payload = json.dumps({'job_id': job_id})
-        if r.eval(TRANSCRIPTION_ADMIT, 0, job_id, payload) != 'accepted':
+        _, created = transcription_queue.enqueue(r, job_id)
+        if not created:
             return jsonify(error='Transkrip untuk rekaman ini sudah ada atau sedang diproses.'), 409
         return jsonify(job_id=job_id, status='queued'), 202
 

@@ -10,6 +10,8 @@ services:
     user: "${UID:-1000}:${GID:-1000}"
     profiles: [telegram]
     command: python -u app/bot.py
+    environment:
+      DATA_DIR: /data
     restart: unless-stopped
     env_file:
       - .env

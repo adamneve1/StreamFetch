@@ -5,7 +5,7 @@ const expandedHistoryDetails=new Set();
 function showSection(section){
  const admin=section==='admin';
  $('control-room').hidden=admin;$('admin-view').hidden=!admin;
- $('page-title').textContent=admin?'Admin':'StreamFetch';
+ $('page-title').textContent=admin?'Settings':'StreamFetch';
  for(const [id,current] of [['nav-control',!admin],['nav-admin',admin]]){
   if(current)$(id).setAttribute('aria-current','page');else $(id).removeAttribute('aria-current');
  }
