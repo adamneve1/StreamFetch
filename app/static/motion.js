@@ -1,4 +1,4 @@
-/* Focused choreography: authentication, Source admission, and the status island. */
+/* Restrained choreography; ordinary hover/focus/press states stay in CSS. */
 (function(root, factory) {
  if(typeof module==='object'&&module.exports)module.exports=factory;
  else root.StreamFetchMotion=factory(root);
@@ -6,6 +6,9 @@
  const {gsap,Flip}=env, media=env.matchMedia?.('(prefers-reduced-motion: reduce)');
  const available=!!(gsap&&Flip), regions=new Map(), progressTweens=new Map();
  let islandKey='',dismissedKey='',dismissTimer;
+ let authState='idle',pendingNavigation;
+ const tokens=Object.freeze({micro:.16,navigation:.32,reveal:.8,geometry:.38,source:.44,accepted:.48,sourceMobile:.36,acceptedMobile:.4,ease:'power3.out',settle:'power2.inOut'});
+ const phone=()=>!!env.matchMedia?.('(max-width:600px)').matches;
  if(available)gsap.registerPlugin(Flip);
  const reduced=()=>!!media?.matches;
  function choreograph(name,element,animate,ghost){
@@ -23,26 +26,34 @@
    const fields=[form.querySelector('label'),env.document.getElementById('password'),env.document.getElementById('login-submit')].filter(Boolean);
    const credit=env.document.getElementById('login-credit');
    // The surface alone is masked: inputs remain in flow, focusable, and usable.
-   gsap.timeline({onComplete:done,defaults:{ease:'power3.out'}})
-    .fromTo(mark,{opacity:0,scale:.88,x:10,y:6},{opacity:1,scale:1,x:0,y:0,duration:.3},0)
-    .fromTo(ring,{scale:1,svgOrigin:'32 32'},{scale:1.075,svgOrigin:'32 32',duration:.12,ease:'power2.out'},.1)
-    .to(ring,{scale:1,duration:.18,ease:'power2.inOut'},.22)
-    .fromTo(wordmark,{clipPath:'inset(0 100% 0 0)',x:-3},{clipPath:'inset(0 0% 0 0)',x:0,duration:.28},.16)
-    .fromTo(surface,{clipPath:'inset(0 0 72% 0 round 12px)',opacity:.5},{clipPath:'inset(0 0 0% 0 round 12px)',opacity:1,duration:.38},.21)
-    .fromTo(fields,{opacity:0,y:4},{opacity:1,y:0,duration:.22,stagger:.035},.4)
-    .fromTo(credit,{opacity:0,y:4},{opacity:1,y:0,duration:.18},.64);
+   gsap.timeline({onComplete:done,defaults:{ease:tokens.ease}})
+    .fromTo(mark,{opacity:0,scale:.88,x:10,y:6},{opacity:1,scale:1,x:0,y:0,duration:tokens.navigation},0)
+    .fromTo(ring,{scale:1,svgOrigin:'32 32'},{scale:1.075,svgOrigin:'32 32',duration:tokens.micro},tokens.micro/2)
+    .to(ring,{scale:1,duration:tokens.micro,ease:tokens.settle},tokens.micro*1.5)
+    .fromTo(wordmark,{clipPath:'inset(0 100% 0 0)',x:-3},{clipPath:'inset(0 0% 0 0)',x:0,duration:tokens.navigation},tokens.micro)
+    .fromTo(surface,{clipPath:'inset(0 0 72% 0 round 12px)',opacity:.5},{clipPath:'inset(0 0 0% 0 round 12px)',opacity:1,duration:tokens.geometry},tokens.micro*1.5)
+    .fromTo(fields,{opacity:0,y:4},{opacity:1,y:0,duration:tokens.micro,stagger:tokens.micro/4},tokens.reveal/2)
+    .fromTo(credit,{opacity:0,y:4},{opacity:1,y:0,duration:tokens.micro},tokens.reveal-tokens.micro);
   });
  }
  function loginError(element){
   // A fast response during entrance should settle the form before showing feedback.
-  settle('login');
+  authState='error';settle('login');settle('login-input');
   choreograph('login-error',element,done=>gsap.timeline({onComplete:done})
-   .fromTo(env.document.getElementById('password'),{borderColor:'#dfe5df'},{borderColor:'#b65e55',duration:.16},0)
-   .fromTo(element,{opacity:0,y:3},{opacity:1,y:0,duration:.16,ease:'power2.out'},0));
+   .fromTo(env.document.getElementById('password'),{borderColor:'#dfe5df'},{borderColor:'#b65e55',duration:tokens.micro},0)
+   .fromTo(element,{opacity:0,y:3},{opacity:1,y:0,duration:tokens.micro,ease:tokens.ease},0));
  }
- function loginInteract(){settle('login');settle('login-error');}
+ function loginInteract(state='focus'){
+  if(state===authState||authState==='submit'&&state!=='idle'||authState==='error'&&state==='focus')return;
+  authState=state;settle('login');settle('login-error');
+  const surface=env.document.getElementById('login-surface'),ring=env.document.getElementById('login-ring');
+  choreograph('login-input',surface,done=>gsap.timeline({onComplete:done,defaults:{ease:tokens.ease}})
+   .fromTo(surface,{borderColor:'#e1e4df'},{borderColor:state==='idle'?'#e1e4df':'#a8bc8e',duration:tokens.micro},0)
+   .fromTo(ring,{scale:1,svgOrigin:'32 32'},{scale:state==='typing'?1.025:1.01,svgOrigin:'32 32',duration:tokens.micro},0)
+   .to(ring,{scale:1,duration:tokens.micro,ease:tokens.settle},tokens.micro));
+ }
  function loginSuccess(workspace){
-  settle('login');settle('login-error');
+  authState='idle';settle('login');settle('login-error');settle('login-input');
   if(!gsap||reduced())return;
   const form=env.document.getElementById('login-form');
   // A non-interactive visual exit keeps navigation immediate. Never retain passwords.
@@ -56,66 +67,143 @@
   }
   // enter() does not await this timeline, and the snapshot cannot intercept input.
   choreograph('login-success',workspace,done=>{
-   const timeline=gsap.timeline({onComplete:done,defaults:{ease:'power2.out'}})
-    .fromTo(workspace,{opacity:.96},{opacity:1,duration:.2},0);
+   const timeline=gsap.timeline({onComplete:done,defaults:{ease:tokens.ease}})
+    .fromTo(workspace,{opacity:.96},{opacity:1,duration:tokens.micro*1.25},0);
    if(ghost)timeline
-    .to([...ghost.querySelectorAll('label,input,button')],{opacity:0,y:-3,duration:.12},0)
-    .to(ghost.querySelector('.login-surface'),{clipPath:'inset(0 0 72% 0 round 12px)',opacity:0,duration:.18},0)
-    .to(ghost.querySelector('.login-brand span'),{clipPath:'inset(0 100% 0 0)',duration:.12},.04)
-    .to(ghost.querySelector('.login-logo'),{opacity:0,scale:.96,duration:.1},.1);
+    .to([...ghost.querySelectorAll('label,input,button')],{opacity:0,y:-3,duration:tokens.micro},0)
+    .to(ghost.querySelector('.login-surface'),{clipPath:'inset(0 0 72% 0 round 12px)',opacity:0,duration:tokens.micro},0)
+    .to(ghost.querySelector('.login-brand span'),{clipPath:'inset(0 100% 0 0)',duration:tokens.micro},tokens.micro/4)
+    .to(ghost.querySelector('.login-logo'),{opacity:0,scale:.96,duration:tokens.micro/2},tokens.micro*.75);
   },ghost);
  }
- function settle(name){
+ function settle(name,complete=false){
   const region=regions.get(name);if(!region)return;
+  // Flip.revert() can synchronously fire completion; invalidate ownership first.
+  regions.delete(name);
   // Revert only this region's GSAP-owned styles, never arbitrary application styles.
-  region.context?.revert();region.ghost?.remove();regions.delete(name);
+  region.context?.revert();region.ghost?.remove();
   delete region.element.dataset.motion;
+  if(complete)region.onSettled?.();
  }
  function morph(name,element,targets,change,options={}){
-  if(!available||reduced()) {settle(name);change();return;}
+  if(!available||reduced()) {settle(name);change();options.onSettled?.();return;}
   // Read the in-flight geometry BEFORE reverting obsolete animation styles.
   let before;
-  try{before=Flip.getState(targets,{kill:false,props:'borderRadius,backgroundColor,borderColor'});}
-  catch{settle(name);change();return;}
+  try{before=Flip.getState(targets,{kill:false,props:'padding,borderRadius,backgroundColor,borderColor'});}
+  catch{settle(name);change();options.onSettled?.();return;}
   settle(name);
   const ghost=options.ghost?.();
   change();
-  const region={element,ghost};regions.set(name,region);element.dataset.motion='true';
-  const cleanup=()=>{if(regions.get(name)===region)settle(name);};
+  const region={element,ghost,onSettled:options.onSettled};regions.set(name,region);element.dataset.motion='true';
+  const cleanup=()=>{if(regions.get(name)===region)settle(name,true);};
   try{
    region.context=gsap.context(()=>{
     Flip.from(before,{
-     duration:options.duration||.38,ease:options.ease||'power3.out',nested:true,prune:true,
+     duration:options.duration||tokens.geometry,ease:options.ease||tokens.ease,nested:true,prune:true,
      absoluteOnLeave:true,
-     onEnter:items=>gsap.fromTo(items,{opacity:0,y:4},{opacity:1,y:0,duration:.2,delay:options.accepted?.12:0}),
-     onLeave:items=>gsap.to(items,{opacity:0,duration:.12}),
+     onEnter:options.animate?undefined:items=>gsap.fromTo(items,{opacity:0,y:4},{opacity:1,y:0,duration:tokens.micro,delay:options.accepted?tokens.micro:0}),
+     onLeave:options.animate?undefined:items=>gsap.to(items,{opacity:0,duration:tokens.micro}),
      onComplete:cleanup,
     });
-    if(ghost){
-     gsap.timeline().to(ghost,{opacity:.45,duration:.08})
-      .to(ghost,{opacity:0,y:-3,duration:.14});
-    }
-    if(options.job)gsap.fromTo(options.job,{opacity:.4,y:5},{opacity:1,y:0,duration:.3});
+    options.animate?.(ghost);
+    if(options.job)gsap.fromTo(options.job,{opacity:.65,y:4},{opacity:1,y:0,duration:tokens.navigation,ease:tokens.ease});
    });
   }catch{cleanup();} // The final DOM state must work even when motion is unavailable.
  }
- function source(panel,collapsed,change,{accepted=false,job}={}){
+ function source(panel,collapsed,change,{accepted=false,job,onSettled}={}){
   const content=env.document.getElementById('capture-content');
   const compact=env.document.getElementById('capture-another');
   if(panel.dataset.collapsed===String(collapsed)){change();return;}
+  // Clone in-flight control styles before settling an interrupted expansion.
+  const outgoing=collapsed&&available&&!reduced()?{
+   clone:content.cloneNode(true),rect:content.getBoundingClientRect(),left:content.offsetLeft,top:content.offsetTop,
+  }:null;
+  if(outgoing)for(const node of outgoing.clone.querySelectorAll('[id]')){
+   const original=env.document.getElementById(node.id);
+   if(original&&node.matches?.('input,select,button,.field')&&env.getComputedStyle){
+    const style=env.getComputedStyle(original);
+    Object.assign(node.style,{width:style.width,height:style.height,font:style.font,padding:style.padding,borderRadius:style.borderRadius,gridColumn:style.gridColumn});
+   }
+  }
+  const duration=phone()?(accepted?tokens.acceptedMobile:tokens.sourceMobile):(accepted?tokens.accepted:tokens.source);
+  const controls=node=>[...node.querySelectorAll('.tabs,.source-field,.capture-options .field,.capture-footer')].filter(item=>!item.hidden&&(!item.getClientRects||item.getClientRects().length));
   morph('source',panel,[panel,content,compact],change,{
-   duration:accepted?.48:.38,ease:'back.out(0.35)',accepted,job,
-   ghost:accepted&&collapsed?()=>{
+   duration,ease:tokens.ease,accepted,job,onSettled,
+   animate:ghost=>{
+    const stagger=phone()?.008:.018;
+    if(collapsed&&ghost){
+     gsap.to(controls(ghost),{opacity:0,y:-6,duration:tokens.micro*1.5,stagger,ease:tokens.settle});
+     gsap.to(ghost.querySelector('.panel-heading'),{opacity:0,duration:tokens.micro,delay:duration-tokens.micro});
+     gsap.fromTo(compact,{opacity:0,y:2},{opacity:1,y:0,duration:tokens.micro,delay:duration-tokens.micro,ease:tokens.ease});
+    }else if(!collapsed){
+     gsap.fromTo(controls(content),{opacity:0,y:phone()?4:6},{opacity:1,y:0,duration:tokens.micro,delay:tokens.micro/2,stagger,ease:tokens.ease});
+    }
+   },
+   ghost:collapsed?()=>{
     // Outgoing content is visual only: no duplicate IDs, focusable controls, or events.
-    const clone=content.cloneNode(true),rect=content.getBoundingClientRect();
+    const clone=outgoing.clone,rect=outgoing.rect;
     clone.removeAttribute('id');clone.setAttribute('aria-hidden','true');clone.inert=true;
     for(const node of clone.querySelectorAll('[id]'))node.removeAttribute('id');
     clone.className+=' source-admission-snapshot';
-    Object.assign(clone.style,{width:rect.width+'px',left:content.offsetLeft+'px',top:content.offsetTop+'px'});
-    const action=clone.querySelector('.primary');if(action){action.disabled=false;action.textContent='Diterima ✓';}
+    Object.assign(clone.style,{width:rect.width+'px',left:outgoing.left+'px',top:outgoing.top+'px'});
+    const action=clone.querySelector('.primary');if(action&&accepted){action.disabled=false;action.textContent='Diterima ✓';}
     panel.append(clone);return clone;
    }:undefined,
   });
+ }
+ function snapshot(element){
+  if(!element)return;
+  const rect=element.getBoundingClientRect();if(!rect.width)return;
+  const style=env.getComputedStyle?.(element);
+  const clone=element.cloneNode(true);clone.removeAttribute('id');clone.inert=true;clone.setAttribute('aria-hidden','true');
+  for(const node of clone.querySelectorAll('[id]'))node.removeAttribute('id');
+  clone.className+=' motion-title-snapshot';Object.assign(clone.style,{left:rect.left+'px',top:rect.top+'px',width:rect.width+'px'});
+  if(style)Object.assign(clone.style,{font:style.font,color:style.color,letterSpacing:style.letterSpacing});
+  env.document.body.append(clone);return clone;
+ }
+ function pageReveal(shell,title,parts=[],direction='reader'){
+  choreograph('page',shell,done=>gsap.timeline({onComplete:done,defaults:{ease:tokens.ease}})
+   .fromTo(title,{clipPath:'inset(0 0 100% 0)',y:direction==='reader'?4:-4},{clipPath:'inset(0 0 0% 0)',y:0,duration:tokens.navigation},0)
+   .fromTo(parts.filter(Boolean),{opacity:.65,y:direction==='reader'?6:-6},{opacity:1,y:0,duration:tokens.navigation,stagger:phone()?.015:.025},tokens.micro/2));
+ }
+ function contextChange(shell,title,change,parts){
+  settle('page');const ghost=!reduced()&&gsap?snapshot(title):null;
+  change();
+  choreograph('page',shell,done=>{
+   const timeline=gsap.timeline({onComplete:done,defaults:{ease:tokens.ease}})
+    .fromTo(parts().filter(Boolean),{opacity:.65,y:5},{opacity:1,y:0,duration:tokens.navigation},0)
+    .fromTo(title,{clipPath:'inset(0 0 100% 0)',y:3},{clipPath:'inset(0 0 0% 0)',y:0,duration:tokens.navigation},0);
+   if(ghost)timeline.to(ghost,{opacity:0,y:-3,duration:tokens.micro},0);
+  },ghost);
+ }
+ function followLink(link,event,{shell,origin,row,direction='reader'}={}){
+  if(event.defaultPrevented||event.button>0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.hasAttribute?.('download'))return;
+  // Preserve native new-tab behavior, including popup blocking and noopener.
+  const newTab=link.target==='_blank';
+  if(!gsap||reduced()){return;}
+  pendingNavigation?.cancel();settle('navigation');
+  let finished=false,timer;
+  const finish=()=>{
+   if(finished)return;finished=true;env.clearTimeout(timer);settle('navigation');pendingNavigation=null;
+   if(!newTab){try{env.sessionStorage?.setItem('streamfetch-motion-return',String(Date.now()));}catch{}env.location.assign(link.href);}
+  };
+  const cancel=()=>{finished=true;env.clearTimeout(timer);settle('navigation');};
+  pendingNavigation={finish,cancel};
+  if(!newTab)event.preventDefault();
+  const ghost=snapshot(origin||link);
+  choreograph('navigation',shell,()=>{
+    const timeline=gsap.timeline({onComplete:finish,defaults:{ease:tokens.ease}})
+     .to(shell,{opacity:.78,y:direction==='reader'?-4:4,duration:tokens.navigation},0);
+    if(row)timeline.to(row,{backgroundColor:'#f1f6e7',duration:tokens.micro},0);
+    if(ghost)timeline.to(origin||link,{opacity:0,duration:tokens.micro/2},0);
+    if(ghost)timeline.fromTo(ghost,{opacity:1,y:0},{opacity:1,y:direction==='reader'?-2:2,duration:tokens.navigation},0);
+  },ghost);
+  // Keep navigation independent of animation completion/failure.
+  timer=env.setTimeout(finish,tokens.navigation*1000+50);
+ }
+ function returnReveal(shell,title,parts){
+  let value;try{value=Number(env.sessionStorage?.getItem('streamfetch-motion-return'));env.sessionStorage?.removeItem('streamfetch-motion-return');}catch{}
+  if(value&&Date.now()-value<15000)pageReveal(shell,title,parts,'workspace');
  }
  function island(element,key,phase,change){
   const semanticKey=key+':'+phase;
@@ -142,9 +230,10 @@
   element.setAttribute('aria-valuenow',value);
   const state={value};progressTweens.set(element,state);
   if(!available||reduced()||!Number.isFinite(Number(element.value))){element.value=value;return;}
-  state.tween=gsap.to(element,{value,duration:.24,ease:'power1.out',overwrite:true});
+  state.tween=gsap.to(element,{value,duration:tokens.micro,ease:tokens.ease,overwrite:true});
  }
  function reset(){
+  authState='idle';pendingNavigation?.cancel();pendingNavigation=null;
   env.clearTimeout(dismissTimer);islandKey='';dismissedKey='';
   for(const name of [...regions.keys()])settle(name);
   for(const [element,state] of progressTweens){state.tween?.kill();element.value=state.value;}
@@ -152,9 +241,12 @@
  }
  media?.addEventListener?.('change',()=>{
   if(!reduced())return;
-  for(const name of [...regions.keys()])settle(name);
+  pendingNavigation?.finish();
+  for(const name of [...regions.keys()])settle(name,true);
   for(const [element,state] of progressTweens){state.tween?.kill();element.value=state.value;}
  });
- env.addEventListener?.('resize',()=>{for(const name of [...regions.keys()])settle(name);});
- return {source,island,progress,reset,reduced,loginReveal,loginError,loginSuccess,loginInteract};
+ env.addEventListener?.('resize',()=>{pendingNavigation?.finish();for(const name of [...regions.keys()])settle(name,true);});
+ env.addEventListener?.('pagehide',reset);
+ env.addEventListener?.('pageshow',event=>{if(event.persisted)reset();});
+ return {tokens,source,island,progress,reset,reduced,loginReveal,loginError,loginSuccess,loginInteract,pageReveal,contextChange,followLink,returnReveal};
 });

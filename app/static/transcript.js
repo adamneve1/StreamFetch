@@ -50,6 +50,7 @@ function localPlayerAdapter(video){
 if(typeof module!=='undefined')module.exports={readerTimestamp,readerDisplayTimestamp,timestampLabel,formatInfo,formatTranscript,findMatches,nextMatchIndex,seekTranscript,youtubePlayerAdapter,localPlayerAdapter};
 if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',async()=>{
   const $=id=>document.getElementById(id);
+  for(const link of document.querySelectorAll('.reader-back,.reader-header .brand'))link.addEventListener('click',event=>window.StreamFetchMotion?.followLink?.(link,event,{shell:document.querySelector('.reader-shell'),origin:$('reader-title'),direction:'workspace'}));
   const status=$('reader-status'),content=$('reader-content'),article=$('transcript-text');
   const base=location.pathname.replace(/\/(?:view)?$/,'');
   let data,matchNodes=[],current=-1,player=null,playerReady=false,pendingSeek=null,hasPlayer=false;
@@ -173,5 +174,6 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
     $('copy-transcript').addEventListener('click',()=>copy(transcriptCopy()));
     $('copy-all').addEventListener('click',()=>copy(formatInfo(data.info)+'\n\nTranscript\n\n'+transcriptCopy()));
     render();content.hidden=false;notify('');
+    window.StreamFetchMotion?.pageReveal?.(document.querySelector('.reader-shell'),$('reader-title'),[document.querySelector('.reader-tools'),$('transcript-text')]);
   }catch(error){notify(error.message);}
 });

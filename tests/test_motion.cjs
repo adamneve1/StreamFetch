@@ -26,7 +26,8 @@ function fixture(reduced=false,available=true){
    contexts.push(c);current=c;fn();current=null;return c;}};
  const Flip={getState(targets,vars){const s={targets,vars,collapsed:panel.dataset.collapsed,phase:island.dataset.phase};states.push(s);return s;},
   from(state,vars){const t=tween(state.targets,vars);flips.push({state,vars,t});return t;}};
- const env={document:{getElementById:id=>ids[id],body},
+ const navigations=[],stored=new Map();
+ const env={document:{getElementById:id=>ids[id],body},location:{assign:url=>navigations.push(url)},sessionStorage:{setItem:(key,value)=>stored.set(key,value),getItem:key=>stored.get(key),removeItem:key=>stored.delete(key)},
   gsap:available?gsap:null,Flip:available?Flip:null,matchMedia:()=>media,
   setTimeout(fn){timers.set(++timerId,fn);return timerId;},clearTimeout(id){timers.delete(id);},
   addEventListener(type,fn){listeners[type]=fn;}};
@@ -36,7 +37,7 @@ function fixture(reduced=false,available=true){
  },{accepted,job});
  const status=(key,phase)=>motion.island(island,key,phase,()=>{island.hidden=false;island.detail=phase;});
  const tick=()=>{const callbacks=[...timers.values()];timers.clear();callbacks.forEach(fn=>fn());};
- return {motion,source,status,tick,flips,states,tweens,contexts,timelines,timers,listeners,media,panel,content,compact,island,bar,job,Flip,shell,form,brand,label,password,button,credit,error,workspace,mark,ring,wordmark,surface,body};
+ return {motion,source,status,tick,flips,states,tweens,contexts,timelines,timers,listeners,media,panel,content,compact,island,bar,job,Flip,shell,form,brand,label,password,button,credit,error,workspace,mark,ring,wordmark,surface,body,navigations,stored};
 }
 test('Source admission snapshots before mutation, morphs surface, and keeps snapshot inert',()=>{
  const f=fixture();f.source(true,true);
@@ -123,9 +124,9 @@ test('login signature anchors the mark, pulses its existing ring once, and settl
  assert.equal(f.tweens.some(t=>t.vars.repeat||t.vars.yoyo),false);
  assert.equal(wordmark.from.clipPath,'inset(0 100% 0 0)');
  assert.equal(surface.target,f.surface);assert.match(surface.from.clipPath,/72%/);
- assert.equal(fields.from.y,4);assert.equal(fields.vars.stagger,.035);
+ assert.equal(fields.from.y,4);assert.equal(fields.vars.stagger,f.motion.tokens.micro/4);
  assert.deepEqual(fields.target,[f.label,f.password,f.button]);
- assert.equal(credit.target,f.credit);assert.ok(Math.abs(credit.position+credit.vars.duration-.82)<.001);
+ assert.equal(credit.target,f.credit);assert.ok(Math.abs(credit.position+credit.vars.duration-f.motion.tokens.reveal)<.001);
  f.timelines[0].vars.onComplete();assert.equal(f.contexts[0].reverted,true);
 });
 test('login errors settle entrance, animate feedback without shake, and replace stale error motion',()=>{
@@ -148,8 +149,8 @@ test('success settles immediately without promise, timer, or architecture change
  assert.equal(ghost.removed,true);
 });
 test('typing or pointer interaction immediately settles signature motion without gating the password',()=>{
- const f=fixture();f.motion.loginReveal(f.shell);f.motion.loginInteract();
- assert.equal(f.contexts[0].reverted,true);assert.equal(f.tweens.every(t=>t.killed),true);
+ const f=fixture();f.motion.loginReveal(f.shell);const entrance=[...f.tweens];f.motion.loginInteract();
+ assert.equal(f.contexts[0].reverted,true);assert.equal(entrance.every(t=>t.killed),true);
  assert.equal(f.password.hidden,false);assert.equal(f.password.disabled,undefined);
 });
 test('login reduced motion and unavailable GSAP preserve visible, immediately usable controls',()=>{
@@ -159,4 +160,77 @@ test('login reduced motion and unavailable GSAP preserve visible, immediately us
  }
  const f=fixture();f.motion.loginReveal(f.shell);f.media.matches=true;f.listeners.media();
  assert.equal(f.contexts[0].reverted,true);assert.equal(f.tweens.every(t=>t.killed),true);
+});
+
+test('motion tokens provide shared bounded timing and restrained easing',()=>{
+ const {tokens}=fixture().motion;assert.equal(Object.isFrozen(tokens),true);
+ assert.ok(tokens.micro>=.12&&tokens.micro<=.18);assert.ok(tokens.navigation>=.28&&tokens.navigation<=.42);assert.ok(tokens.reveal>=.5&&tokens.reveal<=.8);
+ assert.equal(tokens.ease,'power3.out');assert.equal(tokens.source,.44);
+});
+test('typing is a deduplicated state response, never character or form movement',()=>{
+ const f=fixture();f.motion.loginInteract('focus');f.motion.loginInteract('typing');const count=f.timelines.length;
+ for(let n=0;n<30;n++)f.motion.loginInteract('typing');assert.equal(f.timelines.length,count);
+ assert.equal(f.tweens.some(t=>t.target===f.form||t.target===f.password),false);
+ assert.equal(f.tweens.at(-2).vars.scale,1.025);assert.equal(f.tweens.at(-1).vars.scale,1);
+ f.motion.loginInteract('submit');const submitted=f.timelines.length;f.motion.loginInteract('typing');assert.equal(f.timelines.length,submitted);
+ f.motion.loginError(f.error);const errors=f.timelines.length;f.motion.loginInteract('focus');assert.equal(f.timelines.length,errors);
+ f.motion.loginInteract('typing');assert.equal(f.timelines.length,errors+1);
+});
+test('manual Source collapse preserves a visual snapshot and interpolates padding, not height alone',()=>{
+ const f=fixture();f.source(true);assert.equal(f.flips[0].vars.duration,f.motion.tokens.source);
+ assert.match(f.states[0].vars.props,/padding/);assert.ok(f.panel.children[0].inert);
+ assert.notEqual(f.panel.children[0].action.textContent,'Diterima ✓');
+ const out=f.tweens.find(t=>t.vars.y===-6);assert.ok(out);assert.equal(out.vars.duration,f.motion.tokens.micro*1.5);
+ assert.equal(f.tweens.some(t=>t.vars.height!==undefined),false);
+});
+test('expanded Source controls reveal in order and focus only after current geometry settles',()=>{
+ const f=fixture();f.source(true);let focused=0;
+ f.motion.source(f.panel,false,()=>{f.panel.dataset.collapsed='false';f.content.hidden=false;},{onSettled:()=>focused++});
+ assert.equal(focused,0);const incoming=f.tweens.find(t=>Array.isArray(t.target)&&t.from?.y===6);assert.ok(incoming);assert.equal(incoming.vars.stagger,.018);
+ f.flips[0].vars.onComplete();assert.equal(focused,0);f.flips[1].vars.onComplete();assert.equal(focused,1);
+});
+function follow(f,href='/next',target=''){
+ const link={href,target},event={button:0,preventDefault(){this.defaultPrevented=true;}};
+ f.motion.followLink(link,event,{shell:f.workspace,origin:f.wordmark,row:f.job});return event;
+}
+test('same-document context change applies immediately with coordinated title/content reveal and no Flip',()=>{
+ const f=fixture();let changed=false;f.motion.contextChange(f.workspace,f.wordmark,()=>changed=true,()=>[f.job]);
+ assert.equal(changed,true);assert.equal(f.flips.length,0);assert.equal(f.tweens[0].vars.duration,f.motion.tokens.navigation);
+ assert.equal(f.body.children[0].inert,true);f.timelines.at(-1).vars.onComplete();assert.equal(f.body.children[0].removed,true);
+});
+test('same-tab navigation anchors title then uses normal navigation with a failsafe and return reveal',()=>{
+ const f=fixture();const event=follow(f);assert.equal(event.defaultPrevented,true);assert.equal(f.navigations.length,0);
+ assert.equal(f.body.children[0].inert,true);assert.equal(f.tweens[0].vars.y,-4);assert.equal(f.flips.length,0);
+ f.tick();assert.deepEqual(f.navigations,['/next']);assert.equal(f.body.children[0].removed,true);
+ f.motion.returnReveal(f.workspace,f.wordmark,[f.job]);assert.equal(f.tweens.at(-1).from.y,-6);assert.equal(f.stored.size,0);
+});
+test('existing new-tab transcript action stays native; modifier clicks stay native and unanimated',()=>{
+ const f=fixture();assert.equal(follow(f,'/reader','_blank').defaultPrevented,undefined);f.tick();assert.equal(f.navigations.length,0);
+ const count=f.timelines.length;f.motion.followLink({href:'/reader'},{ctrlKey:true},{shell:f.workspace});assert.equal(f.timelines.length,count);
+});
+test('rapid navigation replaces old destination and obsolete completion cannot navigate',()=>{
+ const f=fixture();follow(f,'/old');const old=f.timelines.at(-1);follow(f,'/new');old.vars.onComplete();assert.equal(f.navigations.length,0);
+ f.timelines.at(-1).vars.onComplete();f.tick();assert.deepEqual(f.navigations,['/new']);
+});
+test('reduced motion/resize settle pending navigation; pagehide cancels and bfcache leaves no stale styles',()=>{
+ const f=fixture();follow(f);f.media.matches=true;f.listeners.media();assert.deepEqual(f.navigations,['/next']);
+ const r=fixture(true);assert.equal(follow(r).defaultPrevented,undefined);r.motion.pageReveal(r.workspace,r.wordmark,[r.job]);assert.equal(r.tweens.length,0);
+ const b=fixture();follow(b);b.listeners.pagehide();b.tick();assert.equal(b.navigations.length,0);assert.equal(b.body.children[0].removed,true);
+ b.listeners.pageshow({persisted:true});assert.equal(b.contexts.at(-1).reverted,true);
+ const resized=fixture();follow(resized);resized.listeners.resize();assert.deepEqual(resized.navigations,['/next']);
+});
+test('reduced-motion Source expansion focuses immediately without creating snapshots',()=>{
+ const f=fixture(true);f.source(true);let focused=false;f.motion.source(f.panel,false,()=>f.content.hidden=false,{onSettled:()=>focused=true});
+ assert.equal(focused,true);assert.equal(f.panel.children.length,0);assert.equal(f.flips.length,0);
+});
+test('Flip completion fired during context revert cannot recursively revert or focus stale Source',()=>{
+ const f=fixture();let focused=0;f.motion.source(f.panel,true,()=>f.panel.dataset.collapsed='true',{onSettled:()=>focused++});
+ const context=f.contexts[0],original=context.revert.bind(context);let reverted=0;
+ context.revert=()=>{reverted++;f.flips[0].vars.onComplete();original();};
+ f.source(false);assert.equal(reverted,1);assert.equal(focused,0);assert.equal(f.panel.dataset.collapsed,'false');
+});
+test('changing reduced motion mid-expansion settles geometry before deferred focus',()=>{
+ const f=fixture();f.source(true);let focused=0;f.motion.source(f.panel,false,()=>{f.panel.dataset.collapsed='false';},{onSettled:()=>focused++});
+ f.media.matches=true;f.listeners.media();assert.equal(f.panel.dataset.motion,undefined);assert.equal(focused,1);
+ f.flips.at(-1).vars.onComplete();assert.equal(focused,1);
 });

@@ -263,6 +263,7 @@ footer{padding:18px 2px 4px}
 .workspace-page #capture-panel[data-collapsed=true]{width:fit-content;max-width:100%}
 .workspace-page #capture-panel[data-motion=true]{overflow:hidden}
 .source-admission-snapshot{position:absolute;pointer-events:none;margin:0;z-index:1}
+.motion-title-snapshot{position:fixed;z-index:20;pointer-events:none;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:calc(100vw - 32px)}
 .workspace-page #status-monitor[data-phase=completed] #status-detail,
 .workspace-page #status-monitor[data-phase=completed] .monitor-metadata,
 .workspace-page #status-monitor[data-phase=completed] .history-job-controls{display:none}

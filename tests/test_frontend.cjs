@@ -475,11 +475,34 @@ function motionSpy(){
   loginReveal(element){calls.push(['loginReveal',element]);},
   loginError(element){calls.push(['loginError',element]);},
   loginSuccess(element){calls.push(['loginSuccess',element]);},
+  loginInteract(state){calls.push(['loginInteract',state]);},
+  contextChange(shell,title,change){calls.push(['contextChange']);change();},
+  followLink(link,event,options){calls.push(['followLink',link,event,options]);},
   source(panel,collapsed,change,options){calls.push(['source',collapsed,options,panel.dataset.collapsed]);change();},
   island(panel,key,phase,change){calls.push(['island',key,phase]);change();},
   progress(panel,value){if(value===null)panel.removeAttribute('value');else panel.value=value;},
- };
+};
 }
+test('navigation hooks preserve native transcript links and immediate Settings state',()=>{
+ const motion=motionSpy(),f=fixture(motion);
+ f.run("renderHistory([{job_id:'done',state:'ready',filename:'Dialog.mp4',transcript:{status:'completed'}}])");
+ const link=f.get('results').querySelector('.transcript-cta');assert.equal(link.target,'_blank');assert.equal(link.rel,'noopener');
+ const event={};link.onclick(event);assert.equal(motion.calls.at(-1)[0],'followLink');assert.equal(motion.calls.at(-1)[1],link);
+ f.get('nav-admin').onclick();assert.equal(f.get('workspace').dataset.destination,'settings');
+ f.get('nav-control').onclick();assert.equal(f.get('workspace').dataset.destination,'workspace');assert.equal(motion.calls.filter(c=>c[0]==='contextChange').length,2);
+});
+test('password events use state feedback and submission still starts the API immediately',()=>{
+ const motion=motionSpy(),f=fixture(motion);f.get('password').value='private';f.get('password').oninput();
+ assert.deepEqual(motion.calls.at(-1),['loginInteract','typing']);
+ const requests=[];f.context.fetch=(url)=>{requests.push(url);return new Promise(()=>{});};
+ f.get('login-form').onsubmit({preventDefault(){}});assert.deepEqual(requests,['/api/login']);
+ assert.deepEqual(motion.calls.at(-1),['loginInteract','submit']);assert.equal(f.get('login-submit').disabled,true);
+});
+test('Source reopen supplies a deferred focus callback instead of focusing during the morph',()=>{
+ const motion=motionSpy(),f=fixture(motion);f.run("setMode('youtube');collapseSource(true)");
+ f.get('capture-another').onclick();const call=motion.calls.filter(c=>c[0]==='source').at(-1);
+ assert.equal(call[1],false);assert.equal(f.get('youtube-url').focused,undefined);call[2].onSettled();assert.equal(f.get('youtube-url').focused,true);
+});
 test('phone Source and History use deliberate single-column/cards while tablet rules stay intact',()=>{
  const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8');
  const phone=css.split('/* Phones use a composition')[1];
@@ -722,12 +745,13 @@ test('transcription started from History is observed by the same island without 
  assert.equal(f.get('state').textContent,'Menunggu');assert.equal(f.get('status-job-title').textContent,'Capture baru');
  assert.equal(motion.calls.filter(c=>c[0]==='island').at(-1)[2],'queued');
 });
-test('GSAP and Flip load locally and only the workspace opts into the motion system',()=>{
+test('workspace and reader load the same local GSAP motion system',()=>{
  const root=path.resolve(__dirname,'..'),html=fs.readFileSync(path.join(root,'app/static/index.html'),'utf8');
  const scripts=[...html.matchAll(/<script defer src="([^"]+)"/g)].map(match=>match[1]);
  assert.deepEqual(scripts,['/static/vendor/gsap.min.js','/static/vendor/Flip.min.js','/static/motion.js','/static/app.js']);
  assert.equal(fs.readFileSync(path.join(root,'package.json'),'utf8').includes('"gsap": "3.15.0"'),true);
- assert.doesNotMatch(fs.readFileSync(path.join(root,'app/static/transcript.html'),'utf8'),/gsap|Flip|motion\.js/);
+ const reader=fs.readFileSync(path.join(root,'app/static/transcript.html'),'utf8');
+ assert.deepEqual([...reader.matchAll(/<script src="([^"]+)" defer/g)].map(match=>match[1]),['/static/vendor/gsap.min.js','/static/vendor/Flip.min.js','/static/motion.js','/static/transcript.js']);
 });
 test('rapid repeated submission cannot duplicate admission and a changed source retains its action label',async()=>{
  const motion=motionSpy(),f=fixture(motion);let reject,count=0;

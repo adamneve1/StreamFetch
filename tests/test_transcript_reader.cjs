@@ -62,12 +62,18 @@ async function fixture(data,window={},video={}){
   nodes.get('reader-player').hidden=true;nodes.get('local-player').hidden=true;
   Object.assign(nodes.get('local-player'),video);
   let init;const copies=[],requests=[];
-  const head=new Node();
-  const context=vm.createContext({window,document:{head,getElementById:id=>nodes.get(id),createElement:()=>new Node(),createTextNode:text=>{const node=new Node();node.textContent=text;return node;},addEventListener:(_,callback)=>init=callback},location:{origin:'https://streamfetch.example',pathname:'/api/recordings/old/transcript/view'},navigator:{clipboard:{writeText:async text=>copies.push(text)}},fetch:async url=>{requests.push(url);return {ok:true,json:async()=>data};}});
+  const head=new Node(),back=new Node(),shell=new Node(),tools=new Node();
+  const context=vm.createContext({window,document:{head,querySelectorAll:()=>[back],querySelector:selector=>selector==='.reader-shell'?shell:tools,getElementById:id=>nodes.get(id),createElement:()=>new Node(),createTextNode:text=>{const node=new Node();node.textContent=text;return node;},addEventListener:(_,callback)=>init=callback},location:{origin:'https://streamfetch.example',pathname:'/api/recordings/old/transcript/view'},navigator:{clipboard:{writeText:async text=>copies.push(text)}},fetch:async url=>{requests.push(url);return {ok:true,json:async()=>data};}});
   vm.runInContext(fs.readFileSync(require.resolve('../app/static/transcript.js'),'utf8'),context);
   await init();
-  return {get:id=>nodes.get(id),copies,requests,head};
+  return {get:id=>nodes.get(id),copies,requests,head,back,shell,tools};
 }
+test('reader enters after data renders and Back uses shared motion without changing player or transcript requests',async()=>{
+ const calls=[];
+ const f=await fixture({info:{program:'Dialog'},segments,raw:'TXT',exports:[]},{StreamFetchMotion:{pageReveal(...args){calls.push(['enter',...args]);},followLink(...args){calls.push(['back',...args]);}}});
+ assert.equal(calls[0][1],f.shell);assert.equal(calls[0][2],f.get('reader-title'));assert.equal(f.get('reader-content').hidden,false);
+ f.back.listeners.click({});assert.equal(calls[1][1],f.back);assert.equal(calls[1][3].direction,'workspace');assert.equal(f.requests.length,1);
+});
 function descendants(node){return node.children.flatMap(child=>[child,...descendants(child)]);}
 test('YouTube timestamp seeks the single player including clicks before readiness',async()=>{
   let options;const seeks=[];
