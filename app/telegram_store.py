@@ -45,6 +45,19 @@ def tasks():
         return [(row['id'], json.loads(row['data'])) for row in db.execute('SELECT * FROM telegram_tasks')]
 
 
+def discovery_state(watch_id, error, checked_at):
+    """Update diagnostics without overwriting a concurrent cancellation/claim."""
+    with storage.connection() as db:
+        tables(db)
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute('SELECT data FROM telegram_watches WHERE id=?', (watch_id,)).fetchone()
+        if not row:
+            return
+        watch = json.loads(row['data'])
+        watch.update(discovery_error=error, last_checked_at=checked_at)
+        db.execute('UPDATE telegram_watches SET data=? WHERE id=?', (json.dumps(watch), watch_id))
+
+
 def save_task(key, value):
     with storage.connection() as db:
         tables(db)

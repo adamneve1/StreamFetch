@@ -8,6 +8,7 @@ import re
 import uuid
 import time
 import logging
+import selectors
 from collections import deque
 from urllib.parse import urlsplit
 from datetime import datetime
@@ -29,6 +30,8 @@ STARTUP_TIMEOUT = float(os.getenv("CAPTURE_STARTUP_TIMEOUT", "30"))
 IDLE_TIMEOUT = float(os.getenv("CAPTURE_IDLE_TIMEOUT", "60"))
 STOP_TIMEOUT = float(os.getenv("CAPTURE_STOP_TIMEOUT", "10"))
 FINALIZE_TIMEOUT = float(os.getenv("FINALIZE_TIMEOUT", "600"))
+FINALIZE_DURATION_MULTIPLIER = max(0, float(os.getenv('FINALIZE_DURATION_MULTIPLIER', '4')))
+FINALIZE_TIMEOUT_CAP = max(FINALIZE_TIMEOUT, float(os.getenv('FINALIZE_TIMEOUT_CAP', '21600')))
 PROBE_TIMEOUT = float(os.getenv("PROBE_TIMEOUT", "20"))
 YOUTUBE_POSTLIVE_ATTEMPTS = max(1, min(5, int(os.getenv("YOUTUBE_POSTLIVE_ATTEMPTS", "3"))))
 YOUTUBE_POSTLIVE_RETRY_DELAY = max(1, float(os.getenv("YOUTUBE_POSTLIVE_RETRY_DELAY", "20")))
@@ -155,9 +158,9 @@ def generate_final_filename(title="", note="", extension="mp4"):
 
     extension = quality.validate_format(extension)
     patterns = (
-        re.compile(rf"^{re.escape(date_str)}(\d+)(?: - .+)?\.(?:mp4|mp3)$", re.IGNORECASE),
+        re.compile(rf"^{re.escape(date_str)}(\d+)(?: - .+)?\.(?:mp4|mp3|ts|mkv|webm)$", re.IGNORECASE),
         # Keep counting files created with the previous Title - DDMMYYNN format.
-        re.compile(rf"^.+ -{re.escape(date_str)}(\d+)\.(?:mp4|mp3)$", re.IGNORECASE),
+        re.compile(rf"^.+ -{re.escape(date_str)}(\d+)\.(?:mp4|mp3|ts|mkv|webm)$", re.IGNORECASE),
     )
     download_numbers = []
     for path in DOWNLOAD_DIR.iterdir():
@@ -260,7 +263,95 @@ def probe_media_file(path):
     }
 
 
-def finalize_to_compatible_mp4(path, compression="original", allow_silent=False):
+class ProcessingError(RuntimeError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+def processing_timeout(info):
+    return min(FINALIZE_TIMEOUT_CAP, FINALIZE_TIMEOUT + (duration_seconds(info) or 0) * FINALIZE_DURATION_MULTIPLIER)
+
+
+def processing_checkpoint(job):
+    """Durable Original checkpoint and the existing shared job/progress surface."""
+    detail = 'Memproses · Original sudah tersimpan.'
+    if os.getenv('DATA_DIR'):
+        storage.save_recording(job, 'finalizing', detail)
+    try:
+        current = json.loads(r.get('web:job:' + job['job_id']) or '{}')
+        current.update({key: job[key] for key in ('filename', 'size', 'original_filename', 'processing_status', 'progress_percent', 'progress_phase', 'eta_seconds') if key in job})
+        current.update(job_id=job['job_id'], state='finalizing', detail=detail)
+        r.set('web:job:' + job['job_id'], json.dumps(current), ex=86400)
+        r.set('state:' + job['job_id'], 'finalizing', ex=86400)
+    except redis.exceptions.RedisError:
+        log.warning('job=%s processing progress unavailable', job['job_id'])
+
+
+def processing_stopped(job):
+    return bool(job and r.exists('stop:' + job['job_id']))
+
+
+def run_processing(command, path, info, job):
+    """Bounded FFmpeg execution; cancellation never touches captured media."""
+    disk = storage.disk_status(path.parent)
+    if not disk['available'] or disk['free'] < disk['minimum'] + path.stat().st_size * 2:
+        raise ProcessingError('disk_space')
+    if processing_stopped(job):
+        raise ProcessingError('cancelled')
+    duration = duration_seconds(info)
+    deadline = time.monotonic() + processing_timeout(info)
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+    buffer = b''
+    last_update = 0
+    selector = selectors.DefaultSelector()
+    try:
+        os.set_blocking(process.stdout.fileno(), False)
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while process.poll() is None:
+            if processing_stopped(job):
+                raise ProcessingError('cancelled')
+            if time.monotonic() >= deadline:
+                raise ProcessingError('timeout')
+            for key, _ in selector.select(.2):
+                buffer += os.read(key.fd, 65536)
+                lines = buffer.split(b'\n')
+                buffer = lines.pop()
+                for line in lines:
+                    if line.startswith(b'out_time_us=') and duration:
+                        try:
+                            seconds = int(line.partition(b'=')[2]) / 1_000_000
+                            if seconds >= 0:
+                                job['progress_percent'] = min(99, round(seconds / duration * 100, 1))
+                        except ValueError:
+                            pass
+            if time.monotonic() - last_update >= 2:
+                disk = storage.disk_status(path.parent)
+                if not disk['can_record']:
+                    raise ProcessingError('disk_space')
+                processing_checkpoint(job)
+                last_update = time.monotonic()
+        if process.returncode:
+            raise ProcessingError('ffmpeg_failed')
+    finally:
+        selector.close()
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=min(STOP_TIMEOUT, 3))
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+        process.stdout.close()
+
+
+def finalize_to_compatible_mp4(path, compression="original", allow_silent=False, job=None):
     """Finalize *path* as an MP4 using the selected size preset.
 
     Rules
@@ -270,7 +361,7 @@ def finalize_to_compatible_mp4(path, compression="original", allow_silent=False)
     * Hemat always encodes H.265 CRF 27 plus AAC 128 kbps.
     * If the container is wrong → at minimum remux.
     * Add ``-movflags +faststart`` when remuxing or encoding.
-    * Writes to a temporary file first; only replaces the original on success.
+    * Writes to a temporary file first; job processing never overwrites Original.
     """
 
     compression = quality.validate_preset(compression)
@@ -339,17 +430,30 @@ def finalize_to_compatible_mp4(path, compression="original", allow_silent=False)
     else:
         cmd += ["-c:a", "copy"]
 
-    cmd += ["-movflags", "+faststart", str(temp_path)]
+    cmd += ["-movflags", "+faststart"]
+    if job is not None:
+        cmd += ['-v', 'error', '-nostats', '-progress', 'pipe:1']
+    cmd += [str(temp_path)]
 
     print(f"Running: {' '.join(cmd)}")
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False,
-                                timeout=FINALIZE_TIMEOUT)
+        if job is not None:
+            run_processing(cmd, path, probe, job)
+            result = subprocess.CompletedProcess(cmd, 0)
+        else:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False,
+                                    timeout=processing_timeout(probe))
+    except ProcessingError:
+        temp_path.unlink(missing_ok=True)
+        raise
     except (OSError, subprocess.TimeoutExpired):
         log.warning("finalization failed or timed out file=%s", path)
         temp_path.unlink(missing_ok=True)
         return None
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
 
     if result.returncode != 0:
         log.warning("finalization rejected file=%s exit=%s", path, result.returncode)
@@ -373,12 +477,21 @@ def finalize_to_compatible_mp4(path, compression="original", allow_silent=False)
     print(f"Temp   – audio codec: {tmp_audio}")
     print(f"Temp   – pix_fmt: {tmp_pix}")
 
-    if not compatible_media(tmp_probe, compression, allow_silent=allow_silent):
+    if not compatible_media(tmp_probe, compression, allow_silent=allow_silent) or not durations_aligned(probe, tmp_probe):
         print("Finalized temp file does not meet compatibility requirements – aborting.")
         temp_path.unlink(missing_ok=True)
         return None
 
     # Atomically swap -------------------------------------------------------
+    if job is not None:
+        if processing_stopped(job):
+            temp_path.unlink(missing_ok=True)
+            raise ProcessingError('cancelled')
+        target = path.with_name(path.stem + ('.' + compression if compression != 'original' else '') + '.mp4')
+        if target == path:
+            target = path.with_name(path.stem + '.processed.mp4')
+        temp_path.replace(target)
+        return target
     temp_path.replace(path)
 
     print(f"Finalized successfully: {path}")
@@ -471,7 +584,7 @@ async def heartbeat(job=None):
 
 async def set_state(job, status, state, detail=''):
     r.set(f"state:{job['job_id']}", state, ex=86400)
-    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'quality', 'output_format', 'compression', 'is_live', 'live_status', 'was_live', 'download_attempt', 'download_attempts', 'download_exit_code', 'progress_percent', 'progress_phase', 'started_at', 'elapsed', 'size', 'filename') if key in job}
+    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'quality', 'output_format', 'compression', 'is_live', 'live_status', 'was_live', 'download_attempt', 'download_attempts', 'download_exit_code', 'progress_percent', 'progress_phase', 'eta_seconds', 'started_at', 'elapsed', 'size', 'filename', 'original_filename', 'processing_status', 'processing_error', 'processing_detail') if key in job}
     public.update(state=state, detail=detail)
     r.set('web:job:' + job['job_id'], json.dumps(public), ex=86400)
     if os.getenv('DATA_DIR'):
@@ -642,6 +755,7 @@ class MediaValidationError(RuntimeError):
 def safe_diagnostic(text):
     """Keep useful yt-dlp diagnostics while removing URLs and common secrets."""
     text = re.sub(r'(?i)(?:https?|rtmps?|srt|tcp|udp)://\S+', '[URL]', str(text))
+    text = re.sub(r'(?im)\b(authorization|cookie)\s*[:=][^\r\n]*', r'\1=[REDACTED]', text)
     text = re.sub(
         r'(?i)(authorization|cookie|token|signature|sig|key)=([^\s&]+)',
         r'\1=[REDACTED]', text,
@@ -1028,7 +1142,7 @@ def finalize_to_mp3(path):
         result = subprocess.run([
             'ffmpeg', '-v', 'error', '-y', '-i', str(path), '-map', '0:a:0',
             '-vn', '-c:a', 'libmp3lame', '-q:a', '2', str(target),
-        ], capture_output=True, timeout=FINALIZE_TIMEOUT, check=False)
+        ], capture_output=True, timeout=processing_timeout(info), check=False)
     except (OSError, subprocess.TimeoutExpired):
         target.unlink(missing_ok=True)
         return None
@@ -1081,12 +1195,8 @@ def complete_recording(job):
             # Only accept silence explicitly confirmed by source metadata, not
             # a missing audio fragment from an interrupted A/V download.
             if allow_silent:
-                compression = quality.validate_preset(job.get('compression', 'original'))
-                final_path = finalize_to_compatible_mp4(path, compression, allow_silent=True)
-                if final_path and compatible_media(probe_media_file(final_path), compression, allow_silent=True):
-                    target = generate_final_filename(job.get('title', ''), note=job.get('note', ''))
-                    final_path.rename(target)
-                    return target
+                if usable_capture(info, allow_silent=True):
+                    return finish_captured_media(job, path, info, allow_silent=True)
             if separate_video is None:
                 separate_video, separate_video_info = path, info
             continue
@@ -1096,17 +1206,11 @@ def complete_recording(job):
             continue
         if info['video_codec'] == 'unknown' or info['audio_codec'] == 'unknown':
             continue
-        compression = quality.validate_preset(job.get('compression', 'original'))
-        final_path = finalize_to_compatible_mp4(path, compression)
-        if final_path is None or not compatible_media(probe_media_file(final_path), compression):
+        if not usable_capture(info):
             continue
         # One global worker reservation protects the existing date sequence.
         # A rename error must propagate: no ready message without final naming.
-        target = generate_final_filename(job.get('title', ''), note=job.get('note', ''))
-        final_path.rename(target)
-        log.info('job=%s source=%s finalization=passed final=%s',
-                 job['job_id'], job['source'], target)
-        return target
+        return finish_captured_media(job, path, info)
     if separate_video and separate_audio:
         if not durations_aligned(separate_video_info, separate_audio_info):
             video_duration = duration_seconds(separate_video_info, 'video')
@@ -1130,16 +1234,11 @@ def complete_recording(job):
                 'ffmpeg', '-v', 'error', '-y', '-i', str(separate_video),
                 '-i', str(separate_audio), '-map', '0:v:0', '-map', '1:a:0',
                 '-c', 'copy', '-shortest', str(merged),
-            ], capture_output=True, timeout=FINALIZE_TIMEOUT, check=False)
+            ], capture_output=True, timeout=processing_timeout(separate_video_info), check=False)
             if result.returncode == 0:
-                compression = quality.validate_preset(job.get('compression', 'original'))
-                final_path = finalize_to_compatible_mp4(merged, compression)
-                if final_path and compatible_media(probe_media_file(final_path), compression):
-                    target = generate_final_filename(job.get('title', ''), note=job.get('note', ''))
-                    final_path.rename(target)
-                    log.info('job=%s source=%s finalization=passed final=%s recovery=tracks',
-                             job['job_id'], job['source'], target)
-                    return target
+                info = probe_media_file(merged)
+                if usable_capture(info):
+                    return finish_captured_media(job, merged, info)
         except (OSError, subprocess.TimeoutExpired):
             log.warning('job=%s track recovery failed', job['job_id'])
     raise MediaValidationError(
@@ -1147,6 +1246,96 @@ def complete_recording(job):
         'Proses capture belum menghasilkan video dan audio yang lengkap. '
         'File parsial tetap disimpan. ' + diagnostic_detail(job),
     )
+
+
+def usable_capture(info, allow_silent=False):
+    return bool(info and info.get('video_codec', 'unknown') != 'unknown'
+                and (allow_silent or info.get('audio_codec', 'unknown') != 'unknown')
+                and duration_seconds(info) and durations_aligned(info))
+
+
+def preserve_original(job, path, info):
+    extension = next((ext for name, ext in [('mp4', 'mp4'), ('mpegts', 'ts'), ('matroska', 'mkv'), ('webm', 'webm')]
+                      if name in info.get('container', '')), 'mkv')
+    target = generate_final_filename(job.get('title', ''), note=job.get('note', '')).with_suffix('.' + extension)
+    size = path.stat().st_size
+    job.update(filename=target.name, original_filename=target.name, size=size,
+               original_size=size, requested_compression=job.get('compression', 'original'),
+               processing_status='processing', progress_phase='processing', progress_percent=None, eta_seconds=None)
+    # Write intent before rename: a restart can find either the job-prefixed
+    # capture or the named Original, including the gap before Redis publication.
+    if os.getenv('DATA_DIR'):
+        storage.save_recording(job, 'finalizing', 'Memvalidasi Original sebelum pemrosesan.')
+    path.rename(target)
+    processing_checkpoint(job)
+    return target
+
+
+def processing_failure(job, reason):
+    job.update(processing_status=reason, processing_error=reason, compression='original',
+               filename=job['original_filename'], size=job['original_size'], progress_percent=None, eta_seconds=None)
+    labels = {'cancelled': 'kompresi dibatalkan', 'interrupted': 'kompresi terputus',
+              'disk_space': 'kompresi gagal · ruang disk tidak cukup', 'timeout': 'kompresi gagal · batas waktu terlewati'}
+    job['processing_detail'] = 'Rekaman berhasil · ' + labels.get(reason, 'kompresi gagal') + ' · Original tersedia.'
+    log.warning('job=%s processing=%s original_preserved=%s', job['job_id'], reason, job['original_filename'])
+
+
+def finish_captured_media(job, path, info, allow_silent=False):
+    original = preserve_original(job, path, info)
+    try:
+        final = finalize_to_compatible_mp4(original, job.get('compression', 'original'), allow_silent=allow_silent, job=job)
+        if final is None:
+            raise ProcessingError('validation_failed')
+        job['processing_status'] = 'completed'
+        return final
+    except Exception as exc:
+        try:
+            original.with_name(original.stem + '.finalize_tmp.mp4').unlink(missing_ok=True)
+        except OSError:
+            log.warning('job=%s abandoned processing temp could not be removed', job['job_id'])
+        processing_failure(job, exc.code if isinstance(exc, ProcessingError) else 'processing_failed')
+        return original
+
+
+def recover_processing():
+    """Single worker startup: settle abandoned processing to verified Original."""
+    if not os.getenv('DATA_DIR'):
+        return
+    for row in storage.recordings():
+        if row.get('state') != 'finalizing':
+            continue
+        job = dict(row)
+        name = row.get('original_filename')
+        path = DOWNLOAD_DIR / name if name and Path(name).name == name else None
+        valid = path and not path.is_symlink() and path.is_file() and usable_capture(probe_media_file(path), row.get('silent_video', False))
+        if not valid:
+            # Old jobs may predate the Original checkpoint.
+            for candidate in DOWNLOAD_DIR.glob(row['job_id'] + '-*'):
+                if '.finalize_tmp.' in candidate.name or candidate.is_symlink() or not candidate.is_file():
+                    continue
+                info = probe_media_file(candidate)
+                if usable_capture(info, row.get('silent_video', False)):
+                    path = preserve_original(job, candidate, info)
+                    valid = True
+                    break
+        if valid:
+            job.setdefault('original_size', path.stat().st_size)
+            processing_failure(job, 'interrupted')
+            storage.save_recording(job, 'ready', job['processing_detail'])
+            for temp in [path.with_name(path.stem + '.finalize_tmp.mp4'), *DOWNLOAD_DIR.glob(row['job_id'] + '-*.finalize_tmp.*')]:
+                try:
+                    temp.unlink(missing_ok=True)
+                except OSError:
+                    log.warning('job=%s abandoned processing temp could not be removed', job['job_id'])
+            state, detail = 'ready', job['processing_detail']
+        else:
+            state, detail = 'failed', 'Capture terputus tanpa video dan audio lengkap; file parsial tetap disimpan.'
+            storage.save_recording(job, state, detail)
+        r.set('state:' + job['job_id'], state, ex=86400)
+        r.set('web:job:' + job['job_id'], json.dumps(storage.recording(job['job_id'])), ex=86400)
+        for key in ['capture:owner', *r.scan_iter('active:*')]:
+            r.eval("if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0", 1, key, job['job_id'])
+        r.delete('stop:' + job['job_id'])
 
 
 async def run_download(job):
@@ -1212,14 +1401,19 @@ async def run_download(job):
         stage = 'capture'
         reason = await capture_with_retries(job, status, lease)
         job['stop_reason'] = reason
+        # A capture stop has already been fulfilled; a subsequent Stop cancels processing only.
+        r.delete('stop:' + job['job_id'])
         if job.get('started_at'):
             job['elapsed'] = round(time.time() - job['started_at'], 1)
+        job.update(progress_percent=None, progress_phase='processing', eta_seconds=None)
         await set_state(job, status, 'finalizing',
                         'Menggabungkan track dan memvalidasi durasi video/audio…')
         stage = 'finalization'
         final_path = await asyncio.to_thread(complete_recording, job)
         job.update(filename=final_path.name, size=final_path.stat().st_size)
         detail = f"📁 {final_path.name}\n💾 {format_size(final_path.stat().st_size)}"
+        if job.get('processing_detail'):
+            detail = job['processing_detail'] + '\n' + detail
         if reason not in {'completed', 'operator_stop'}:
             detail += '\n⚠️ Sumber terputus/timeout; hanya media yang berhasil direkam disimpan.'
         await set_state(job, status, 'ready', detail)
@@ -1251,6 +1445,7 @@ async def run_download(job):
 
 async def main():
     log.info('Worker running')
+    await asyncio.to_thread(recover_processing)
     archival = asyncio.create_task(archive_worker())
     try:
         while True:

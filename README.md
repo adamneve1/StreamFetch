@@ -219,14 +219,24 @@ video otomatis dinonaktifkan.
 
 Untuk video, panel menyediakan preset ukuran file:
 
-- **Original**: mempertahankan stream jika sudah kompatibel; paling cepat.
-- **Seimbang**: H.264 CRF 23 dan AAC 128 kbps; pilihan bawaan dengan kompatibilitas luas.
+- **Original** (bawaan): mempertahankan stream jika sudah kompatibel; paling cepat.
+- **Seimbang**: H.264 CRF 23 dan AAC 128 kbps; kompatibilitas luas.
 - **Hemat**: H.265/HEVC CRF 27 dan AAC 128 kbps; lebih kecil, tetapi proses lebih lama
   dan perangkat lama mungkin tidak mendukung pemutaran HEVC.
 
 Ukuran akhir preset Seimbang dan Hemat bergantung pada kompleksitas gambar, gerakan,
 durasi, dan codec sumber. Perkiraan di panel menunjukkan ukuran media sumber sebelum
 proses kompresi.
+
+Media capture yang valid disimpan sebagai Original sebelum kompresi. Hasil kompresi
+dipublikasikan secara atomik hanya setelah FFmpeg dan validasi ffprobe berhasil;
+Original tidak ditimpa. Kegagalan, Stop saat pemrosesan, disk tidak cukup, atau
+restart worker tetap menghasilkan rekaman siap dengan Original yang dapat diunduh.
+Stop saat pemrosesan hanya membatalkan kompresi. Worker memulihkan checkpoint
+pemrosesan saat restart dan membersihkan output sementara yang ditinggalkan.
+Timeout pemrosesan adalah `min(FINALIZE_TIMEOUT_CAP, FINALIZE_TIMEOUT + durasi ×
+FINALIZE_DURATION_MULTIPLIER)`; bawaan 600 detik + 4× durasi, maksimal 6 jam.
+Jika durasi/progress tidak tersedia, UI menampilkan Memproses tanpa persentase palsu.
 
 Livestream YouTube yang baru selesai dapat sementara berstatus `post_live` saat
 YouTube masih membangun arsip VOD. StreamFetch mempertahankan file `.part`/`.ytdl`,
@@ -276,6 +286,8 @@ CAPTURE_STARTUP_TIMEOUT=30
 CAPTURE_IDLE_TIMEOUT=60
 CAPTURE_STOP_TIMEOUT=10
 FINALIZE_TIMEOUT=600
+FINALIZE_DURATION_MULTIPLIER=4
+FINALIZE_TIMEOUT_CAP=21600
 PROBE_TIMEOUT=20
 
 # Cloudflare Workers AI transcription with local CPU fallback

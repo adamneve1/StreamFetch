@@ -60,6 +60,187 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
             '-f', 'mpegts', str(path),
         ], check=True, capture_output=True, timeout=30)
 
+    def valid_info(self):
+        return dict(container='mov,mp4,m4a,3gp,3g2,mj2', video_codec='h264',
+                    audio_codec='aac', pix_fmt='yuv420p', duration=600,
+                    video_duration=600, audio_duration=600)
+
+    async def test_processing_failures_preserve_valid_original_as_ready_not_incomplete_media(self):
+        for reason in ('timeout', 'cancelled', 'disk_space', 'ffmpeg_failed'):
+            with self.subTest(reason=reason):
+                job = self.job()
+                job.update(compression='balanced', download_exit_code=0)
+                source = self.root / 'test-job-valid.mp4'
+                source.write_bytes(b'validated original capture')
+                def fail(*args):
+                    checkpoint = storage.recording(job['job_id'])
+                    self.assertEqual(checkpoint['state'], 'finalizing')
+                    self.assertEqual((self.root / checkpoint['original_filename']).read_bytes(), b'validated original capture')
+                    raise worker.ProcessingError(reason)
+                with patch.object(worker, 'probe_media_file', return_value=self.valid_info()), \
+                     patch.object(worker, 'capture', AsyncMock(return_value='completed')), \
+                     patch.object(worker, 'run_processing', side_effect=fail):
+                    await worker.run_download(job)
+                row = storage.recording(job['job_id'])
+                self.assertEqual(row['state'], 'ready')
+                self.assertEqual(row['compression'], 'original')
+                self.assertEqual(row['requested_compression'], 'balanced')
+                self.assertEqual(row['processing_error'], reason)
+                self.assertEqual(row['filename'], row['original_filename'])
+                self.assertEqual((self.root / row['filename']).read_bytes(), b'validated original capture')
+                self.assertIn('Rekaman berhasil', row['detail'])
+                self.assertNotIn('incomplete_media', row['detail'])
+                self.assertIsNone(self.redis.get('capture:owner'))
+
+    def test_processing_disk_guard_does_not_start_ffmpeg_or_destroy_original(self):
+        job = self.job()
+        job['compression'] = 'compact'
+        source = self.root / 'test-job-valid.mp4'
+        source.write_bytes(b'original')
+        with patch.object(worker, 'probe_media_file', return_value=self.valid_info()), \
+             patch.object(storage, 'disk_status', return_value=dict(available=True, free=1, minimum=10)), \
+             patch.object(worker.subprocess, 'Popen') as popen:
+            final = worker.complete_recording(job)
+        popen.assert_not_called()
+        self.assertEqual(job['processing_error'], 'disk_space')
+        self.assertEqual(final.read_bytes(), b'original')
+
+    def test_original_default_keeps_compatible_capture_bytes_without_encoding(self):
+        job = self.job();path = self.root / 'test-job-capture.mp4';path.write_bytes(b'original')
+        with patch.object(worker, 'probe_media_file', return_value=self.valid_info()), patch.object(worker.subprocess, 'Popen') as popen:
+            final = worker.complete_recording(job)
+        popen.assert_not_called()
+        self.assertEqual(final.read_bytes(), b'original')
+        self.assertEqual(final.name, job['original_filename'])
+        self.assertEqual(job['requested_compression'], 'original')
+
+    async def test_running_processing_stop_kills_process_and_keeps_media(self):
+        job = self.job()
+        path = self.root / 'original.mp4';path.write_bytes(b'original')
+        command = [sys.executable, '-c', 'import time; print("out_time_us=50000000", flush=True); time.sleep(10)']
+        started = time.monotonic()
+        with patch.object(storage, 'disk_status', return_value=dict(available=True, free=10**10, minimum=0, can_record=True)):
+            task = asyncio.create_task(asyncio.to_thread(worker.run_processing, command, path, self.valid_info(), job))
+            await asyncio.sleep(.3)
+            self.redis.set('stop:test-job', '1')
+            with self.assertRaises(worker.ProcessingError) as caught:
+                await asyncio.wait_for(task, 3)
+        self.assertEqual(caught.exception.code, 'cancelled')
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(path.read_bytes(), b'original')
+
+    def test_processing_timeout_is_duration_aware_capped_and_interrupts_execution(self):
+        with patch.object(worker, 'FINALIZE_TIMEOUT', 600), patch.object(worker, 'FINALIZE_DURATION_MULTIPLIER', 4), \
+             patch.object(worker, 'FINALIZE_TIMEOUT_CAP', 21600):
+            self.assertEqual(worker.processing_timeout({}), 600)
+            self.assertEqual(worker.processing_timeout(dict(duration=3600)), 15000)
+            self.assertEqual(worker.processing_timeout(dict(duration=20000)), 21600)
+        job = self.job();path = self.root / 'original.mp4';path.write_bytes(b'original')
+        with patch.object(worker, 'processing_timeout', return_value=.1), \
+             patch.object(storage, 'disk_status', return_value=dict(available=True, free=10**10, minimum=0, can_record=True)):
+            with self.assertRaises(worker.ProcessingError) as caught:
+                worker.run_processing([sys.executable, '-c', 'import time; time.sleep(10)'], path, {}, job)
+        self.assertEqual(caught.exception.code, 'timeout')
+        self.assertEqual(path.read_bytes(), b'original')
+
+    def test_ffmpeg_progress_updates_shared_job_and_unknown_duration_is_indeterminate(self):
+        for duration in (100, None):
+            job = self.job();job.update(progress_percent=None, progress_phase='processing')
+            path = self.root / 'original.mp4';path.write_bytes(b'original')
+            command = [sys.executable, '-c', 'import time; print("out_time_us=50000000", flush=True); time.sleep(.3)']
+            with patch.object(storage, 'disk_status', return_value=dict(available=True, free=10**10, minimum=0, can_record=True)):
+                worker.run_processing(command, path, dict(duration=duration), job)
+            checkpoint = storage.recording('test-job')
+            self.assertEqual(checkpoint['state'], 'finalizing')
+            self.assertEqual(checkpoint['progress_percent'], 50 if duration else None)
+
+    def test_invalid_processed_output_and_stop_before_publish_retain_original_and_clean_temp(self):
+        for reason in ('invalid', 'cancelled'):
+            job = self.job();job.update(compression='balanced')
+            source = self.root / 'test-job-valid.mp4';source.write_bytes(b'original')
+            def encode(command, path, info, payload):
+                Path(command[-1]).write_bytes(b'processed')
+                if reason == 'cancelled':
+                    self.redis.set('stop:test-job', '1')
+            def probe(path):
+                info = self.valid_info()
+                if reason == 'invalid' and '.finalize_tmp.' in path.name:
+                    info['audio_duration'] = 10
+                return info
+            with patch.object(worker, 'probe_media_file', side_effect=probe), patch.object(worker, 'run_processing', side_effect=encode):
+                final = worker.complete_recording(job)
+            self.assertEqual(final.read_bytes(), b'original')
+            self.assertEqual(job['processing_error'], 'validation_failed' if reason == 'invalid' else 'cancelled')
+            self.assertFalse(list(self.root.glob('*.finalize_tmp.mp4')))
+            self.redis.delete('stop:test-job')
+
+    def test_restart_recovers_checkpoint_and_legacy_processing_without_deleting_other_files(self):
+        for legacy in (False, True):
+            job = self.job();job.update(compression='balanced')
+            path = self.root / ('test-job-capture.mp4' if legacy else 'original.mp4')
+            path.write_bytes(b'original')
+            if not legacy:
+                job.update(original_filename=path.name, original_size=8, filename=path.name)
+            storage.save_recording(job, 'finalizing')
+            temp = path.with_name(path.stem + '.finalize_tmp.mp4');temp.write_bytes(b'partial')
+            unrelated = self.root / 'other.finalize_tmp.mp4';unrelated.write_bytes(b'keep')
+            self.redis.set('stop:test-job', '1')
+            with patch.object(worker, 'probe_media_file', return_value=self.valid_info()):
+                worker.recover_processing()
+            row = storage.recording('test-job')
+            self.assertEqual(row['state'], 'ready')
+            self.assertEqual(row['processing_error'], 'interrupted')
+            self.assertEqual((self.root / row['filename']).read_bytes(), b'original')
+            self.assertFalse(temp.exists())
+            self.assertTrue(unrelated.exists())
+            self.assertIsNone(self.redis.get('capture:owner'))
+            self.assertIsNone(self.redis.get('active:123'))
+            self.assertIsNone(self.redis.get('stop:test-job'))
+
+    def test_original_rename_is_recoverable_before_progress_publication(self):
+        job = self.job();job['compression'] = 'balanced'
+        path = self.root / 'test-job-capture.mp4';path.write_bytes(b'original')
+        with patch.object(worker, 'processing_checkpoint', side_effect=RuntimeError('interrupted before Redis publication')):
+            with self.assertRaises(RuntimeError):
+                worker.preserve_original(job, path, self.valid_info())
+        checkpoint = storage.recording('test-job')
+        self.assertEqual(checkpoint['state'], 'finalizing')
+        self.assertEqual((self.root / checkpoint['original_filename']).read_bytes(), b'original')
+        with patch.object(worker, 'probe_media_file', return_value=self.valid_info()):
+            worker.recover_processing()
+        self.assertEqual(storage.recording('test-job')['state'], 'ready')
+
+    def test_processing_exception_cleans_partial_output_without_touching_original(self):
+        job = self.job();job['compression'] = 'balanced'
+        path = self.root / 'test-job-capture.mp4';path.write_bytes(b'original')
+        def fail(command, *args):
+            Path(command[-1]).write_bytes(b'partial')
+            raise RuntimeError('interrupted')
+        with patch.object(worker, 'probe_media_file', return_value=self.valid_info()), patch.object(worker, 'run_processing', side_effect=fail):
+            final = worker.complete_recording(job)
+        self.assertEqual(final.read_bytes(), b'original')
+        self.assertFalse(list(self.root.glob('*.finalize_tmp.mp4')))
+        self.assertEqual(job['processing_error'], 'processing_failed')
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'FFmpeg required')
+    def test_balanced_success_publishes_validated_output_atomically_preserving_original(self):
+        job = self.job();job['compression'] = 'balanced'
+        path = self.root / 'test-job-capture.ts';self.media(path)
+        original_bytes = path.read_bytes()
+        final = worker.complete_recording(job)
+        self.assertTrue(worker.compatible_media(worker.probe_media_file(final), 'balanced'))
+        self.assertEqual((self.root / job['original_filename']).read_bytes(), original_bytes)
+        self.assertNotEqual(final.name, job['original_filename'])
+        self.assertEqual(job['processing_status'], 'completed')
+        self.assertFalse(list(self.root.glob('*.finalize_tmp.mp4')))
+
+    async def test_telegram_stop_during_processing_uses_shared_cancellation(self):
+        self.job();self.redis.set('state:test-job', 'finalizing')
+        update = self.update()
+        await bot.stop(update, None)
+        self.assertEqual(self.redis.get('stop:test-job'), '1')
+        self.assertIn('Original', update.message.reply_text.call_args.args[0])
+
     async def test_duplicate_record_rejected_atomically(self):
         self.redis.set('worker:heartbeat', '1', ex=15)
         with patch.object(bot, 'ORYX_STREAM_URL', 'http://oryx/live/feed.flv'):
@@ -111,7 +292,7 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
     async def test_stopped_ts_becomes_valid_named_mp4_without_transcode(self):
         job = self.job()
         self.media(self.root / 'test-job-capture.ts')
-        original_run = subprocess.run
+        original_run = subprocess.Popen
         commands = []
 
         def observe(command, **kwargs):
@@ -119,7 +300,7 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
             return original_run(command, **kwargs)
 
         with patch.object(worker, 'capture', AsyncMock(return_value='operator_stop')), \
-             patch.object(worker.subprocess, 'run', side_effect=observe):
+             patch.object(worker.subprocess, 'Popen', side_effect=observe):
             await worker.run_download(job)
         files = list(self.root.glob('*.mp4'))
         self.assertEqual(len(files), 1)

@@ -74,7 +74,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.json['active_count'], 2)
         rows = {row['id']: row for row in response.json['watches']}
         self.assertEqual({key: row['status'] for key, row in rows.items()},
-                         dict(waiting='waiting', active='active', expired='expired', finished='finished', cancelled='cancelled'))
+                         dict(waiting='waiting', active='waiting', expired='expired', finished='finished', cancelled='cancelled'))
         self.assertTrue(rows['active']['auto_transcribe'])
         self.assertEqual(rows['active']['mode'], 'every')
         self.assertNotIn('user_id', response.text)
@@ -84,7 +84,7 @@ class WebTests(unittest.TestCase):
         with patch.object(web, 'time') as clock:
             clock.time.return_value = 160
             self.assertEqual(next(w for w in self.client.get('/api/admin/watches').json['watches']
-                                  if w['id'] == 'waiting')['status'], 'active')
+                                  if w['id'] == 'waiting')['status'], 'waiting')
 
     def test_watch_apis_require_admin_auth_csrf_and_do_not_offer_web_creation(self):
         self.save_watch()
@@ -99,6 +99,57 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.client.post('/api/admin/watches/watch/cancel', json={}).status_code, 403)
         self.assertEqual(self.post('admin/watches', {}).status_code, 405)
         self.assertEqual(telegram_store.watches()[0]['status'], 'active')
+
+    def test_watch_discovery_issue_and_recording_derive_from_shared_job_without_window_stop(self):
+        self.save_watch('issue')
+        telegram_store.discovery_state('issue', 'HTTP Error 403: [redacted]', 120)
+        self.save_watch('recording', status='finished', last_capture=dict(job_id='watch-job', video_id='abcdefghijk'))
+        storage.save_recording(dict(job_id='watch-job', source='youtube', origin='telegram_watch', is_live=True,
+                                    source_metadata=dict(title='Dialog RRI Batam')), 'recording')
+        with patch.object(web, 'time') as clock:
+            clock.time.return_value = 150
+            rows = {row['id']: row for row in self.client.get('/api/admin/watches').json['watches']}
+        self.assertEqual(rows['issue']['status'], 'discovery_issue')
+        self.assertTrue(rows['issue']['can_cancel'])
+        self.assertEqual(rows['recording']['status'], 'recording')
+        self.assertFalse(rows['recording']['can_cancel'])
+        self.assertEqual(rows['recording']['last_capture']['title'], 'Dialog RRI Batam')
+        with patch.object(web, 'time') as clock:
+            clock.time.return_value = 220
+            rows = {row['id']: row for row in self.client.get('/api/admin/watches').json['watches']}
+        self.assertEqual(rows['issue']['status'], 'expired')
+        self.assertEqual(rows['recording']['status'], 'recording')
+        self.assertFalse(self.redis.keys('stop:*'))
+
+    def test_canonical_queued_watch_stays_queued_in_history_and_original_defaults(self):
+        job = dict(job_id='watch-job', source='youtube', origin='telegram_watch', is_live=True)
+        storage.save_recording(job, 'queued')
+        self.redis.rpush('download_queue', json.dumps(job))
+        rows = self.client.get('/api/recordings').json['recordings']
+        self.assertEqual(rows[0]['state'], 'queued')
+        self.assertEqual(rows[0]['origin'], 'telegram_watch')
+        self.redis.delete('download_queue')
+        self.redis.set('worker:heartbeat', 1)
+        response = self.post('record', dict(source='youtube', url='https://youtu.be/abcdefghijk'))
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(json.loads(self.redis.lindex('download_queue', 0))['compression'], 'original')
+
+    def test_original_media_remains_securely_downloadable_during_and_after_processing(self):
+        root = Path(self.tmp.name)
+        (root / 'original.mp4').write_bytes(b'0123456789')
+        job = dict(job_id='preserved', source='youtube', filename='original.mp4', original_filename='original.mp4')
+        storage.save_recording(job, 'finalizing')
+        response = self.client.get('/api/files/original.mp4?inline=1', headers={'Range': 'bytes=2-5'})
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(response.data, b'2345')
+        response.close()
+        (root / 'processed.mp4').write_bytes(b'processed')
+        job['filename'] = 'processed.mp4'
+        storage.save_recording(job, 'ready')
+        response = self.client.get('/api/files/original.mp4')
+        self.assertEqual(response.status_code, 200)
+        response.close()
+        self.assertEqual(self.app.test_client().get('/api/files/original.mp4').status_code, 401)
 
     def test_web_cancel_persists_for_telegram_restart_without_stopping_capture_or_tasks(self):
         self.save_watch(mode='every')
@@ -249,7 +300,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.post('stop', {'job_id': job_id}).status_code, 200)
         self.assertTrue(self.redis.exists('stop:' + job_id))
         self.redis.set('state:' + job_id, 'finalizing')
-        self.assertEqual(self.post('stop', {'job_id': job_id}).status_code, 409)
+        self.assertEqual(self.post('stop', {'job_id': job_id}).status_code, 200)
 
     def test_operator_can_choose_local_or_configured_archive(self):
         self.redis.set('worker:heartbeat', 1)

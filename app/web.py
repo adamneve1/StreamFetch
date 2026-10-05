@@ -34,7 +34,7 @@ return 'accepted'
 STOP = """
 if redis.call('GET', 'capture:owner') ~= ARGV[1] then return 0 end
 local state = redis.call('GET', 'state:' .. ARGV[1])
-if state == 'finalizing' or state == 'ready' or state == 'failed' then return 0 end
+if state == 'ready' or state == 'failed' then return 0 end
 redis.call('SET', 'stop:' .. ARGV[1], '1', 'EX', 300)
 return 1
 """
@@ -185,17 +185,22 @@ def create_app(client=None):
         for watch in telegram_store.watches():
             status = watch['status']
             if status == 'active':
-                status = 'expired' if now >= watch['end'] else 'waiting' if now < watch['start'] else 'active'
+                status = 'expired' if now >= watch['end'] else 'discovery_issue' if now >= watch['start'] and watch.get('discovery_error') else 'waiting'
             last = watch.get('last_capture')
             if last:
                 recording = storage.recording(last.get('job_id')) or {}
                 last = dict(last, title=(recording.get('source_metadata') or {}).get('title') or recording.get('note'),
                             state=recording.get('state'))
+                if recording.get('state') in {'recording', 'stopping', 'finalizing'} and watch['status'] != 'cancelled':
+                    status = 'recording'
             rows.append(dict(id=watch['id'], channel=watch['channel'], name=watch.get('channel_name'),
                              start=watch['start'], end=watch['end'], mode=watch['mode'],
-                             auto_transcribe=watch['auto_transcribe'], status=status, last_capture=last))
-        rows.sort(key=lambda row: (row['status'] not in {'waiting', 'active'}, -row['start']))
-        return jsonify(watches=rows, active_count=sum(row['status'] in {'waiting', 'active'} for row in rows))
+                             auto_transcribe=watch['auto_transcribe'], status=status, last_capture=last,
+                             can_cancel=watch['status'] == 'active' and now < watch['end'],
+                             discovery_error=watch.get('discovery_error')))
+        visible = {'waiting', 'recording', 'discovery_issue'}
+        rows.sort(key=lambda row: (row['status'] not in visible, -row['start']))
+        return jsonify(watches=rows, active_count=sum(row['status'] in visible for row in rows))
 
     @app.post('/api/admin/watches/<watch_id>/cancel')
     def cancel_watch(watch_id):
@@ -403,8 +408,14 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
     def history():
         rows = storage.recordings()
         owner = r.get('capture:owner')
+        queued_ids = set()
+        for payload in r.lrange('download_queue', 0, -1):
+            try:
+                queued_ids.add(json.loads(payload)['job_id'])
+            except (ValueError, KeyError, TypeError):
+                continue
         for row in rows:
-            if row['state'] not in {'ready', 'failed'} and row['job_id'] != owner:
+            if row['state'] not in {'ready', 'failed'} and row['job_id'] != owner and row['job_id'] not in queued_ids:
                 row.update(state='interrupted', detail='Proses rekaman terputus sebelum file dinyatakan siap.')
         query = request.args.get('q', '').casefold().strip()
         source = request.args.get('source', '')
@@ -495,7 +506,9 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
 
     @app.get('/api/files/<filename>')
     def download(filename):
-        if not any(row.get('filename') == filename and row['state'] == 'ready' for row in storage.recordings()):
+        if not any((row.get('filename') == filename and row['state'] == 'ready') or
+                   (row.get('original_filename') == filename and row['state'] in {'ready', 'finalizing'})
+                   for row in storage.recordings()):
             return jsonify(error='File rekaman tidak ditemukan atau belum siap.'), 404
         root = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve()
         path = root / filename

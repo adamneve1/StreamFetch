@@ -87,10 +87,6 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if r.get(f"state:{job_id}") == "finalizing":
-        await update.message.reply_text("🔧 File sedang difinalisasi. Tunggu hasil validasi.")
-        return
-
     r.set(
         f"stop:{job_id}",
         "1",
@@ -98,8 +94,8 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(
-        "🛑 Oke, lagi diberentiin...\n"
-        "Menunggu capture berhenti, lalu file akan difinalisasi dan divalidasi."
+        "Kompresi dibatalkan · Original tetap disimpan." if r.get(f"state:{job_id}") == "finalizing" else
+        "🛑 Oke, lagi diberentiin...\nMenunggu capture berhenti, lalu file akan difinalisasi dan divalidasi."
     )
 
 

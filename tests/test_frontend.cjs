@@ -100,6 +100,39 @@ test('island progress omits track helpers and attempts, and resets when unknown'
   assert.equal(f.get('download-progress').hidden, true);
 });
 
+test('Original is the Source default and watch recording uses the canonical Merekam island',()=>{
+ const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
+ assert.match(html,/<option value="original" selected>/);assert.doesNotMatch(html,/<option value="balanced" selected>/);
+ const f=fixture();
+ f.run("active=null;submittedJob=null;lastObservedJob=null;queued=0;renderOperationalStatus()");
+ assert.equal(f.get('status-monitor').hidden,true);
+ f.run("active={job_id:'watch',origin:'telegram_watch',source:'youtube',is_live:true,state:'queued'};renderOperationalStatus()");
+ assert.equal(f.get('state').textContent,'Menunggu');
+ f.run("active.state='recording';active.source_metadata={title:'Dialog RRI Batam'};controls()");
+ assert.equal(f.get('state').textContent,'Merekam');assert.equal(f.get('status-job-title').textContent,'Dialog RRI Batam');
+ assert.equal(f.get('stop').disabled,false);
+ f.run("active.state='finalizing';active.progress_phase='processing';active.progress_percent=68;controls()");
+ assert.equal(f.get('state').textContent,'Memproses');assert.equal(f.get('progress-value').textContent,'68%');
+ assert.equal(f.get('download-progress').hidden,false);assert.equal(f.get('stop').hidden,false);
+ f.run("active.progress_percent=null;controls()");assert.equal(f.get('progress-value').textContent,'');
+});
+
+test('Watches render Waiting Recording Discovery issue and Expired with cancellation tied to discovery',()=>{
+ const f=fixture();
+ f.run("renderWatches({active_count:3,watches:['waiting','recording','discovery_issue','expired'].map((status,i)=>({id:String(i),channel:'@rribatam',start:100,end:200,status,can_cancel:['waiting','discovery_issue'].includes(status)}))})");
+ const rows=f.get('watch-list').children;
+ assert.deepEqual(rows.map(row=>row.children[1].textContent),['Waiting','Recording','Discovery issue','Expired']);
+ assert.deepEqual(rows.map(row=>row.children.length),[3,2,3,2]);
+});
+
+test('History reports processing failure as a usable Original rather than a capture failure',()=>{
+ const f=fixture();
+ f.run("renderHistory([{job_id:'preserved',source:'youtube',state:'ready',filename:'original.mp4',compression:'original',note:'Dialog',processing_detail:'Rekaman berhasil · kompresi gagal · Original tersedia.'}])");
+ const row=f.get('results').children[0];
+ assert.equal(row.children[1].children[1].textContent,'Rekaman berhasil · kompresi gagal · Original tersedia.');
+ assert.equal(row.children[5].children[0].href,'/api/files/original.mp4');
+});
+
 test('island uses semantic colors and concise feedback while History retains diagnostics', () => {
   const f = fixture();
   for (const [state, tone] of [['recording', 'working'], ['waiting', 'waiting'], ['ready', 'success'], ['failed', 'error']]) {
@@ -349,7 +382,7 @@ test('shell retains meaningful online/offline status and long job state without 
   assert.equal(f.get('connection').textContent,'Online');assert.equal(f.get('connection').attributes['aria-label'],'Sistem siap');
   assert.equal(f.get('state').textContent,'Mengunduh');assert.equal(f.get('status-job-title').title,f.context.longTitle);
   assert.equal(f.get('download-progress').hidden,false);assert.equal(f.get('stop').disabled,false);
-  f.run("active.state='finalizing';controls()");assert.equal(f.get('stop').disabled,true);
+  f.run("active.state='finalizing';controls()");assert.equal(f.get('stop').disabled,false);
 });
 
 test('mobile shell and island use dedicated composition, touch targets, and local history scrolling',()=>{
@@ -677,7 +710,7 @@ test('island keeps live marker and Stop permissions while removing normal diagno
  assert.equal(f.get('marker-controls').hidden,false);assert.equal(f.get('stop').hidden,false);assert.equal(f.get('stop').disabled,false);
  assert.equal(f.get('state').textContent,'Merekam');assert.equal(f.get('status-detail').hidden,true);
  f.run("active.state='finalizing';controls()");
- assert.equal(f.get('marker-controls').hidden,true);assert.equal(f.get('stop').hidden,true);assert.equal(f.get('stop').disabled,true);
+ assert.equal(f.get('marker-controls').hidden,true);assert.equal(f.get('stop').hidden,false);assert.equal(f.get('stop').disabled,false);
  assert.equal(f.get('state').textContent,'Memproses');
  assert.equal(f.get('status-detail').textContent,'');
 });

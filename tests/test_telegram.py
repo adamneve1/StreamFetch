@@ -86,10 +86,67 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(self.redis.lindex('download_queue', 0))
         self.assertEqual(payload['url'], self.live()['url'])
         self.assertEqual(payload['source'], 'youtube')
+        self.assertEqual(payload['origin'], 'telegram_watch')
+        self.assertTrue(payload['is_live'])
+        self.assertEqual(payload['compression'], 'original')
+        self.assertEqual(storage.recording(payload['job_id'])['state'], 'queued')
         self.assertEqual(store.watches()[0]['status'], 'finished')
         self.assertEqual(store.watches()[0]['last_capture']['video_id'], 'abcdefghijk')
         self.assertEqual(store.watches()[0]['last_capture']['job_id'], payload['job_id'])
         self.assertIn('Live terdeteksi', self.sender.send_message.call_args.args[1])
+
+    def test_discovery_without_streams_tab_falls_back_to_live_metadata_only(self):
+        missing = tc.subprocess.CalledProcessError(1, 'yt-dlp', stderr=b'This channel does not have a streams tab')
+        with patch.object(tc.subprocess, 'run', side_effect=[missing, SimpleNamespace(stdout=json.dumps(
+                dict(id='abcdefghijk', is_live=True, live_status='is_live', media_type='livestream')))]) as run:
+            self.assertEqual(tc.discover_live('https://www.youtube.com/@rribatam'), [self.live()])
+        self.assertTrue(run.call_args.args[0][-1].endswith('/live'))
+        self.assertIn('--skip-download', run.call_args.args[0])
+        self.assertNotIn('--flat-playlist', run.call_args.args[0])
+
+    def test_discovery_fallback_rejects_upcoming_past_premiere_upload_and_normal_no_live(self):
+        for metadata in [dict(live_status='is_upcoming'), dict(live_status='was_live'),
+                         dict(live_status='post_live'), dict(live_status='not_live'),
+                         dict(is_live=False, live_status='is_live'),
+                         dict(is_live=True, is_premiere=True), dict(is_live=True, media_type='video'),
+                         dict(is_live=True, is_upcoming=True), dict()]:
+            missing = tc.subprocess.CalledProcessError(1, 'yt-dlp', stderr=b'This channel does not have a streams tab')
+            with self.subTest(metadata=metadata), patch.object(tc.subprocess, 'run', side_effect=[
+                    missing, SimpleNamespace(stdout=json.dumps(dict(id='abcdefghijk', **metadata)))]):
+                self.assertEqual(tc.discover_live('https://www.youtube.com/@rribatam'), [])
+        with patch.object(tc.subprocess, 'run', side_effect=[missing,
+                tc.subprocess.CalledProcessError(1, 'yt-dlp', stderr=b'The channel is not currently live')]):
+            self.assertEqual(tc.discover_live('https://www.youtube.com/@rribatam'), [])
+
+    async def test_real_discovery_failure_is_sanitized_persisted_and_cleared_on_no_live(self):
+        self.watch('every')
+        error = tc.subprocess.CalledProcessError(1, ['yt-dlp', 'https://host/?token=secret'],
+                                               stderr=b'HTTP Error 403: https://host/?token=secret token=secret\nAuthorization: Bearer secret\nCookie: session=secret')
+        with patch.object(tc, 'discover_live', side_effect=error), self.assertLogs(tc.log, level='WARNING') as logs:
+            await self.controls.tick(self.sender, 110)
+        self.assertNotIn('secret', ''.join(logs.output))
+        self.assertIn('403', store.watches()[0]['discovery_error'])
+        self.assertEqual(self.redis.llen('download_queue'), 0)
+        self.assertEqual(self.sender.send_message.await_count, 0)
+        with patch.object(tc, 'discover_live', return_value=[]):
+            await self.controls.tick(self.sender, 120)
+        self.assertIsNone(store.watches()[0]['discovery_error'])
+
+    async def test_dispatch_checkpoints_before_queue_and_retries_admission_without_overwriting_worker(self):
+        self.watch()
+        admit = self.redis.eval
+        def observe(script, count, job_id, payload):
+            self.assertEqual(storage.recording(job_id)['state'], 'queued')
+            return admit(script, count, job_id, payload)
+        with patch.object(tc, 'discover_live', return_value=[self.live()]), patch.object(self.redis, 'eval', side_effect=observe):
+            await self.controls.tick(self.sender, 100)
+        task_key, task = next((key, value) for key, value in store.tasks() if key.startswith('capture:'))
+        task['dispatch'] = 'pending'
+        store.save_task(task_key, task)
+        storage.save_recording(task['job'], 'recording')
+        await self.controls.dispatch_task(self.sender, task_key, task)
+        self.assertEqual(self.redis.llen('download_queue'), 1)
+        self.assertEqual(storage.recording(task['job']['job_id'])['state'], 'recording')
 
     async def test_every_mode_discovers_later_live_but_deduplicates_ids_after_restart(self):
         self.watch('every')
@@ -173,6 +230,16 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message.args[1], 'Transkripsi selesai.')
         self.assertEqual(message.kwargs['reply_markup'].inline_keyboard[0][0].url,
                          'https://stream.example/api/recordings/video-job/transcript/view')
+
+    async def test_compression_failure_notification_reports_capture_success_and_original(self):
+        storage.save_recording(dict(job_id='video-job', source='youtube', filename='original.mp4',
+                                    processing_detail='Rekaman berhasil · kompresi gagal · Original tersedia.'), 'ready')
+        store.subscribe('video-job', 77, 7, monitor_capture=True)
+        await self.controls.notify_jobs(self.sender)
+        message = self.sender.send_message.call_args.args[1]
+        self.assertIn('Capture selesai', message)
+        self.assertIn('kompresi gagal', message)
+        self.assertIn('Original', message)
         before = self.sender.send_message.await_count
         await self.controls.notify_jobs(self.sender)
         self.assertEqual(self.sender.send_message.await_count, before)

@@ -123,15 +123,42 @@ def watch_window(day, start, end, now=None):
 
 def discover_live(channel):
     """Metadata-only yt-dlp lookup; actual media always belongs to capture worker."""
-    result = subprocess.run(['yt-dlp', '--dump-single-json', '--skip-download',
-                             '--flat-playlist', '--playlist-end', '20', '--no-warnings',
-                             channel + '/streams'], capture_output=True, timeout=25, check=True)
-    entries = json.loads(result.stdout).get('entries') or []
+    def lookup(suffix, flat=True):
+        command = ['yt-dlp', '--dump-single-json', '--skip-download', '--no-warnings']
+        command += ['--flat-playlist', '--playlist-end', '20'] if flat else ['--no-playlist', '--ignore-no-formats-error']
+        result = subprocess.run(command + [channel.rstrip('/') + suffix], capture_output=True, timeout=25, check=True)
+        data = json.loads(result.stdout)
+        if not isinstance(data, dict):
+            raise ValueError('Invalid discovery metadata')
+        return data
+    try:
+        data = lookup('/streams')
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.output or b'')
+        detail = detail.decode(errors='replace') if isinstance(detail, bytes) else str(detail)
+        if 'streams tab' not in detail.lower():
+            raise
+        log.info('youtube discovery fallback=channel_live reason=streams_tab_unavailable')
+        try:
+            data = lookup('/live', flat=False)
+        except subprocess.CalledProcessError as fallback:
+            text = fallback.stderr or fallback.output or b''
+            text = text.decode(errors='replace') if isinstance(text, bytes) else str(text)
+            if any(value in text.lower() for value in ('not currently live', 'live event will begin', 'premiere will begin')):
+                return []
+            raise
+    entries = data.get('entries') if 'entries' in data else [data]
+    if entries is not None and not isinstance(entries, list):
+        raise ValueError('Invalid discovery entries')
     live = []
-    for entry in entries:
+    for entry in entries or []:
         if not isinstance(entry, dict) or not re.fullmatch(r'[A-Za-z0-9_-]{11}', str(entry.get('id') or '')):
             continue
-        if entry.get('live_status') == 'is_live' or entry.get('is_live') is True:
+        if (entry.get('live_status') in {None, 'is_live'}
+                and (entry.get('live_status') == 'is_live' or entry.get('is_live') is True)
+                and entry.get('is_live') is not False
+                and entry.get('media_type') in {None, 'livestream'}
+                and not entry.get('is_upcoming') and not entry.get('is_premiere')):
             live.append({'id': entry['id'], 'url': 'https://www.youtube.com/watch?v=' + entry['id']})
     return live
 
@@ -347,7 +374,10 @@ class Controls:
 
     async def dispatch_task(self, bot, key, task):
         if task.get('dispatch') != 'sent':
-            if not storage.recording(task['job']['job_id']):
+            row = storage.recording(task['job']['job_id'])
+            if not row:
+                storage.save_recording(task['job'], 'queued', 'Live terdeteksi · capture masuk antrean.')
+            if not row or row.get('state') == 'queued':
                 self.client.eval(CAPTURE_ADMIT, 0, task['job']['job_id'], json.dumps(task['job']))
             telegram_store.subscribe(task['job']['job_id'], task['chat_id'], task['user_id'],
                                      monitor_capture=True, auto_transcribe=task['auto_transcribe'])
@@ -378,15 +408,24 @@ class Controls:
                 continue
             try:
                 live = await asyncio.to_thread(discover_live, watch['channel'])
-            except (OSError, subprocess.SubprocessError, ValueError):
-                log.warning('telegram watch=%s discovery unavailable', watch['id'])
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                try:
+                    from .worker import safe_diagnostic
+                except ImportError:
+                    from worker import safe_diagnostic
+                detail = getattr(exc, 'stderr', None) or str(exc)
+                if isinstance(detail, bytes):
+                    detail = detail.decode(errors='replace')
+                telegram_store.discovery_state(watch['id'], safe_diagnostic(detail), now)
+                log.warning('telegram watch=%s discovery_issue=%s detail=%s', watch['id'], type(exc).__name__, safe_diagnostic(detail))
                 continue
+            telegram_store.discovery_state(watch['id'], None, now)
             # Discovery may outlast the window or race a cancel callback.
             if now + time.monotonic() - clock_started >= watch['end']:
                 continue
             for video in live:
                 job = dict(job_id=uuid.uuid4().hex, chat_id=watch['chat_id'], source='youtube',
-                           source_name='YouTube', url=video['url'], requested_at=now, origin='telegram')
+                           source_name='YouTube', url=video['url'], requested_at=now, origin='telegram_watch', is_live=True, compression='original')
                 task = dict(job=job, chat_id=watch['chat_id'], user_id=watch['user_id'],
                             auto_transcribe=watch['auto_transcribe'], dispatch='pending')
                 if telegram_store.claim_video(watch['id'], video['id'], task) and watch['mode'] == 'first':
@@ -413,7 +452,8 @@ class Controls:
                 task['capture_started'] = True
             if state in {'ready', 'failed', 'interrupted'} and not task.get('capture_done'):
                 await bot.send_message(task['chat_id'], ('Capture selesai · ' if state == 'ready' else 'Capture gagal · ')
-                                       + (row.get('filename') or row.get('detail') or row['job_id'][:8])[:500],
+                                       + (row.get('filename') or row.get('detail') or row['job_id'][:8])[:500]
+                                       + ('\n' + row['processing_detail'] if state == 'ready' and row.get('processing_detail') else ''),
                                        reply_markup=transcript_button(row) if state == 'ready' else None)
                 task['capture_done'] = True
             if state == 'ready' and task.get('auto_transcribe') and not task.get('transcript_requested'):

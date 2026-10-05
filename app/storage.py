@@ -130,7 +130,7 @@ def save_source(source_id, name, url):
 
 def save_recording(job, state, detail=''):
     # Never store playback URLs/credentials in catalogue or browser status.
-    data = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'storage', 'quality', 'output_format', 'compression', 'is_live', 'live_status', 'was_live', 'download_attempt', 'download_attempts', 'download_exit_code', 'requested_at', 'started_at', 'elapsed', 'size', 'filename', 'stop_reason') if key in job}
+    data = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'storage', 'quality', 'output_format', 'compression', 'is_live', 'live_status', 'was_live', 'download_attempt', 'download_attempts', 'download_exit_code', 'requested_at', 'started_at', 'elapsed', 'size', 'filename', 'stop_reason', 'original_filename', 'original_size', 'requested_compression', 'processing_status', 'processing_error', 'processing_detail', 'progress_percent', 'progress_phase', 'eta_seconds', 'silent_video') if key in job}
     data.update(state=state, detail=detail)
     if isinstance(job.get('source_metadata'), dict):
         data['source_metadata'] = {key: job['source_metadata'][key]
