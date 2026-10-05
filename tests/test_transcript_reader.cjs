@@ -46,33 +46,40 @@ test('old TXT-only jobs have readable copy without fabricated timestamps or meta
 });
 
 class Node {
-  constructor(){this.children=[];this.dataset={};this.listeners={};this._text='';this.value='';this.checked=false;this.disabled=false;this.hidden=false;this.className='';this.scrolled=false;this.classList={toggle:(name,on)=>{const values=new Set(this.className.split(' ').filter(Boolean));on?values.add(name):values.delete(name);this.className=[...values].join(' ');}};}
-  append(...nodes){this.children.push(...nodes);}
+  constructor(){this.children=[];this.dataset={};this.listeners={};this._text='';this.value='';this.checked=false;this.disabled=false;this.hidden=false;this.className='';this.scrolled=false;this.clientHeight=600;const styles=new Map();this.style={setProperty:(name,value)=>styles.set(name,value),removeProperty:name=>styles.delete(name),getPropertyValue:name=>styles.get(name)||''};this.classList={toggle:(name,on)=>{const values=new Set(this.className.split(' ').filter(Boolean));on?values.add(name):values.delete(name);this.className=[...values].join(' ');}};}
+  append(...nodes){for(const node of nodes){node.parentNode=this;this.children.push(node);}}
   replaceChildren(){this.children=[];this._text='';}
   set textContent(value){this.replaceChildren();this._text=String(value);}
   get textContent(){return this._text+this.children.map(node=>node.textContent).join('');}
   addEventListener(type,callback){this.listeners[type]=callback;}
   setAttribute(name,value){this[name]=value;}
   scrollIntoView(options){this.scrolled=options||true;}
+  contains(target){return target===this||this.children.some(child=>child.contains?.(target));}
+  getBoundingClientRect(){return {height:this.clientHeight};}
 }
 function mediaQuery(matches=false){
   const listeners=new Set();
   return {matches,addEventListener(type,listener){if(type==='change')listeners.add(listener);},removeEventListener(type,listener){if(type==='change')listeners.delete(listener);},change(value){this.matches=value;for(const listener of [...listeners])listener({matches:value});},get listenerCount(){return listeners.size;}};
 }
 test('desktop Reader creates one subtle smoother and routes jumps without native competition',()=>{
-  const reduced=mediaQuery(false),desktop=mediaQuery(true),wrapper=new Node(),content=new Node(),registrations=[],creates=[],scrolls=[];
+  const reduced=mediaQuery(false),desktop=mediaQuery(true),wrapper=new Node(),content=new Node(),root=new Node(),body=new Node(),registrations=[],creates=[],scrolls=[];
   let current=null;
-  const ScrollSmoother={get:()=>current,create:options=>{const instance={options,killed:false,kill(){this.killed=true;if(current===this)current=null;},scrollTo(...args){scrolls.push(args);},refresh(){this.refreshed=true;}};creates.push(instance);return current=instance;}};
+  const ScrollSmoother={get:()=>current,create:options=>{const instance={options,killed:false,kill(){this.killed=true;if(current===this)current=null;},scrollTo(...args){scrolls.push(args);},scrollTop(){return 42;},refresh(){this.refreshed=true;}};creates.push(instance);return current=instance;}};
   const events={};
-  const env={document:{getElementById:id=>id==='reader-smooth-wrapper'?wrapper:id==='reader-smooth-content'?content:null},gsap:{registerPlugin:(...plugins)=>registrations.push(plugins)},ScrollTrigger:{},ScrollSmoother,
+  const env={innerHeight:900,document:{documentElement:root,body,getElementById:id=>id==='reader-smooth-wrapper'?wrapper:id==='reader-smooth-content'?content:null},gsap:{registerPlugin:(...plugins)=>registrations.push(plugins)},ScrollTrigger:{},ScrollSmoother,
     matchMedia:query=>query.includes('reduced')?reduced:desktop,addEventListener:(type,listener)=>events[type]=listener,removeEventListener:type=>delete events[type]};
   const scroller=reader.createReaderScroller(env);scroller.start();scroller.start();
   assert.equal(creates.length,1);assert.deepEqual(registrations[0],[env.ScrollTrigger,ScrollSmoother]);
   assert.deepEqual(creates[0].options,{wrapper,content,smooth:1,smoothTouch:0,effects:false,normalizeScroll:false,ignoreMobileResize:true});
-  const target=new Node();assert.equal(scroller.jumpTo(target,true,'center center'),true);
+  assert.match(root.className,/reader-smoothing/);assert.match(body.className,/reader-smoothing/);
+  assert.equal(content.style.getPropertyValue('--reader-scroll-compensation'),'300px');
+  const target=new Node();content.append(target);assert.equal(scroller.jumpTo(target,true,'center center'),true);
   assert.deepEqual(scrolls,[[target,true,'center center']]);assert.equal(target.scrolled,false);
+  const stationaryTarget=new Node();scroller.jumpTo(stationaryTarget,true,'top top+=24');
+  assert.equal(stationaryTarget.scrolled,false);assert.equal(scrolls.length,1);
   scroller.refresh();assert.equal(creates[0].refreshed,true);
   reduced.change(true);assert.equal(creates[0].killed,true);assert.equal(scroller.isActive(),false);
+  assert.doesNotMatch(root.className,/reader-smoothing/);assert.equal(wrapper.scrollTop,42);
   scroller.jumpTo(target,true,'center center');assert.deepEqual(target.scrolled,{behavior:'auto',block:'center'});
   assert.equal(reduced.listenerCount,1);events.pagehide();assert.equal(reduced.listenerCount,0);
   reduced.matches=false;events.pageshow({persisted:true});assert.equal(creates.length,2);
@@ -239,12 +246,14 @@ test('desktop player sizing is capped and centered without changing the 16:9 emb
   const css=fs.readFileSync(require.resolve('../app/static/transcript.css'),'utf8');
   assert.match(css,/\.reader-shell \.reader-player\{max-width:680px;width:100%;margin:8px auto 12px;aspect-ratio:16\/9\}/);
 });
-test('reader workspace separates sticky sidebar from sticky tools and stacks on tablet',()=>{
+test('reader workspace fixes desktop chrome around the transcript body and stacks on tablet',()=>{
   const html=fs.readFileSync(require.resolve('../app/static/transcript.html'),'utf8');
   const css=fs.readFileSync(require.resolve('../app/static/transcript.css'),'utf8');
   const sidebar=html.slice(html.indexOf('<aside'),html.indexOf('</aside>'));
   const tools=html.slice(html.indexOf('<div class="reader-tools">'),html.indexOf('<article'));
-  assert.match(html,/id="reader-smooth-wrapper"[\s\S]*id="reader-smooth-content"[\s\S]*class="app-header reader-header"/);
+  assert.ok(html.indexOf('class="app-header reader-header"')<html.indexOf('id="reader-smooth-wrapper"'));
+  assert.match(html,/class="reader-tools"[\s\S]*id="reader-smooth-wrapper"[\s\S]*id="reader-smooth-content"[\s\S]*id="transcript-text"/);
+  assert.match(html,/class="reader-transcript-scroll" tabindex="0" aria-label="Transcript segments"/);
   for(const id of ['reader-player','reader-title','program-info','full-description'])assert.ok(sidebar.includes('id="'+id+'"'));
   for(const id of ['transcript-search','timestamp-mode','copy-transcript','copy-info','copy-all','transcript-exports','raw-view'])assert.ok(tools.includes('id="'+id+'"'));
   assert.match(css,/grid-template-columns:minmax\(0,38fr\) minmax\(0,62fr\)/);
@@ -254,7 +263,11 @@ test('reader workspace separates sticky sidebar from sticky tools and stacks on 
   assert.match(css,/\.reader-sidebar\{position:static;max-height:none;overflow:visible\}/);
   assert.match(css,/user-select:text/);
   assert.match(css,/\.reader-segment\+\.reader-segment\{border-top:0\}/);
-  assert.match(css,/#reader-smooth-wrapper,#reader-smooth-content\{width:100%;min-height:100%\}/);
+  assert.match(css,/@media\(min-width:1001px\) and \(hover:hover\) and \(pointer:fine\)/);
+  assert.match(css,/body\.reader-page\{height:100dvh;min-height:0;overflow:hidden\}/);
+  assert.match(css,/\.reader-document\{position:relative;display:grid;grid-template-rows:auto minmax\(0,1fr\);height:100%;min-height:0;overflow:hidden\}/);
+  assert.match(css,/#reader-smooth-wrapper\{position:relative!important;inset:auto!important;[\s\S]*overflow-y:auto/);
+  assert.match(css,/\.reader-smoothing #reader-smooth-wrapper\{overflow:hidden\}/);
   assert.match(html,/<summary>More<\/summary>.*id="raw-view"/);
 });
 test('non-YouTube timestamps remain readable, exports omit absent files, and display changes make no requests',async()=>{

@@ -49,30 +49,48 @@ function localPlayerAdapter(video){
 function createReaderScroller(env){
   const reduced=env.matchMedia?.('(prefers-reduced-motion: reduce)')||{matches:false};
   const desktop=env.matchMedia?.('(min-width: 1001px) and (hover: hover) and (pointer: fine)')||{matches:false};
+  const wrapper=env.document?.getElementById('reader-smooth-wrapper'),content=env.document?.getElementById('reader-smooth-content');
   let smoother=null,started=false,lifecycle=false;
   const mediaListen=(query,method)=>{
     if(query[method])query[method]('change',sync);
     else query[method==='addEventListener'?'addListener':'removeListener']?.(sync);
   };
-  const stopInstance=()=>{smoother?.kill?.();smoother=null;};
+  const setSmoothingMode=active=>{
+    env.document?.documentElement?.classList?.toggle('reader-smoothing',active);
+    env.document?.body?.classList?.toggle('reader-smoothing',active);
+  };
+  const updateGeometry=()=>{
+    if(!content?.style)return;
+    const viewportHeight=wrapper?.getBoundingClientRect?.().height||wrapper?.clientHeight||0;
+    const compensation=Math.max(0,(env.innerHeight||viewportHeight)-viewportHeight);
+    content.style.setProperty?.('--reader-scroll-compensation',compensation+'px');
+  };
+  const clearGeometry=()=>content?.style?.removeProperty?.('--reader-scroll-compensation');
+  const stopInstance=()=>{
+    const position=smoother?.scrollTop?.()||0;
+    smoother?.kill?.();smoother=null;setSmoothingMode(false);clearGeometry();
+    if(wrapper&&desktop.matches)wrapper.scrollTop=position;
+  };
   function sync(){
     stopInstance();
     if(reduced.matches||!desktop.matches||!env.gsap||!env.ScrollTrigger||!env.ScrollSmoother)return;
-    const wrapper=env.document?.getElementById('reader-smooth-wrapper'),content=env.document?.getElementById('reader-smooth-content');
     if(!wrapper||!content)return;
     env.gsap.registerPlugin(env.ScrollTrigger,env.ScrollSmoother);
     env.ScrollSmoother.get?.()?.kill?.();
-    smoother=env.ScrollSmoother.create({wrapper,content,smooth:1,smoothTouch:0,effects:false,normalizeScroll:false,ignoreMobileResize:true});
+    setSmoothingMode(true);updateGeometry();
+    try{smoother=env.ScrollSmoother.create({wrapper,content,smooth:1,smoothTouch:0,effects:false,normalizeScroll:false,ignoreMobileResize:true});}
+    catch{setSmoothingMode(false);clearGeometry();smoother=null;}
   }
+  const resize=()=>{if(smoother){updateGeometry();smoother.refresh?.();}};
   function stop(){
     if(!started)return;
-    started=false;mediaListen(reduced,'removeEventListener');mediaListen(desktop,'removeEventListener');stopInstance();
+    started=false;mediaListen(reduced,'removeEventListener');mediaListen(desktop,'removeEventListener');env.removeEventListener?.('resize',resize);stopInstance();
   }
   const pagehide=()=>stop(),pageshow=event=>{if(event.persisted)start();};
   function start(){
     if(!lifecycle){lifecycle=true;env.addEventListener?.('pagehide',pagehide);env.addEventListener?.('pageshow',pageshow);}
     if(started)return;
-    started=true;mediaListen(reduced,'addEventListener');mediaListen(desktop,'addEventListener');sync();
+    started=true;mediaListen(reduced,'addEventListener');mediaListen(desktop,'addEventListener');env.addEventListener?.('resize',resize);sync();
   }
   function destroy(){
     stop();
@@ -80,11 +98,11 @@ function createReaderScroller(env){
   }
   function jumpTo(target,smooth=true,position='center center'){
     if(!target)return false;
-    if(smoother){smoother.scrollTo(target,smooth,position);return true;}
+    if(smoother){if(content?.contains?.(target))smoother.scrollTo(target,smooth,position);return true;}
     target.scrollIntoView?.({behavior:reduced.matches?'auto':smooth?'smooth':'auto',block:position.startsWith('center')?'center':'start'});
     return true;
   }
-  return {start,destroy,jumpTo,refresh:()=>smoother?.refresh?.(),isActive:()=>!!smoother};
+  return {start,destroy,jumpTo,refresh:()=>{if(smoother){updateGeometry();smoother.refresh?.();}},isActive:()=>!!smoother};
 }
 
 if(typeof module!=='undefined')module.exports={readerTimestamp,readerDisplayTimestamp,timestampLabel,formatInfo,formatTranscript,findMatches,nextMatchIndex,seekTranscript,youtubePlayerAdapter,localPlayerAdapter,createReaderScroller};

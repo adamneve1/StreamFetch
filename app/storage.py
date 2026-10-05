@@ -20,6 +20,7 @@ def connection():
     db.execute('CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL)')
     db.execute('CREATE TABLE IF NOT EXISTS markers (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, seconds REAL NOT NULL, note TEXT NOT NULL, created REAL NOT NULL)')
     db.execute('CREATE TABLE IF NOT EXISTS recordings (id TEXT PRIMARY KEY, updated REAL NOT NULL, data TEXT NOT NULL)')
+    db.execute('CREATE TABLE IF NOT EXISTS capture_requests (id TEXT PRIMARY KEY, created REAL NOT NULL, data TEXT NOT NULL)')
     db.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)')
     try:
         with db:
@@ -128,9 +129,20 @@ def save_source(source_id, name, url):
         db.execute('INSERT INTO sources VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, url=excluded.url', (source_id, name, url))
 
 
+def _recording_data(value):
+    """Load one catalogue record with backward-compatible download defaults."""
+    data = json.loads(value) if isinstance(value, str) else dict(value)
+    try:
+        data['download_count'] = max(0, int(data.get('download_count') or 0))
+    except (TypeError, ValueError):
+        data['download_count'] = 0
+    data.setdefault('last_downloaded_at', None)
+    return data
+
+
 def save_recording(job, state, detail=''):
     # Never store playback URLs/credentials in catalogue or browser status.
-    data = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'storage', 'quality', 'output_format', 'compression', 'is_live', 'live_status', 'was_live', 'download_attempt', 'download_attempts', 'download_exit_code', 'requested_at', 'started_at', 'elapsed', 'size', 'filename', 'stop_reason', 'original_filename', 'original_size', 'requested_compression', 'processing_status', 'processing_error', 'processing_detail', 'progress_percent', 'progress_phase', 'eta_seconds', 'silent_video') if key in job}
+    data = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'storage', 'quality', 'output_format', 'compression', 'is_live', 'live_status', 'was_live', 'download_attempt', 'download_attempts', 'download_exit_code', 'requested_at', 'started_at', 'elapsed', 'size', 'filename', 'stop_reason', 'original_filename', 'original_size', 'requested_compression', 'processing_status', 'processing_error', 'processing_detail', 'progress_percent', 'progress_phase', 'eta_seconds', 'silent_video', 'attempt_root_id', 'retry_of', 'attempt_number', 'attempt_total', 'error_code', 'error_title', 'error_message') if key in job}
     data.update(state=state, detail=detail)
     if isinstance(job.get('source_metadata'), dict):
         data['source_metadata'] = {key: job['source_metadata'][key]
@@ -138,14 +150,37 @@ def save_recording(job, state, detail=''):
                                                'uploader', 'uploader_id', 'timestamp', 'duration', 'id')
                                    if key in job['source_metadata']}
     with connection() as db:
-        if 'source_metadata' not in data:
-            previous = db.execute('SELECT data FROM recordings WHERE id=?',
-                                  (job['job_id'],)).fetchone()
-            if previous:
-                metadata = json.loads(previous['data']).get('source_metadata')
-                if metadata is not None:
-                    data['source_metadata'] = metadata
+        previous = db.execute('SELECT data FROM recordings WHERE id=?',
+                              (job['job_id'],)).fetchone()
+        previous_data = _recording_data(previous['data']) if previous else {}
+        if 'source_metadata' not in data and previous_data.get('source_metadata') is not None:
+            data['source_metadata'] = previous_data['source_metadata']
+        data['download_count'] = previous_data.get('download_count', 0)
+        data['last_downloaded_at'] = previous_data.get('last_downloaded_at')
         db.execute('INSERT INTO recordings VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET updated=excluded.updated, data=excluded.data', (job['job_id'], time.time(), json.dumps(data)))
+
+
+def save_capture_request(job):
+    """Persist retry inputs privately; URLs never join the public catalogue payload."""
+    allowed = ('source', 'source_name', 'note', 'storage', 'archive', 'quality',
+               'output_format', 'compression', 'is_live', 'url', 'stream_url')
+    data = {key: job[key] for key in allowed if key in job}
+    with connection() as db:
+        db.execute('INSERT INTO capture_requests VALUES (?, ?, ?) '
+                   'ON CONFLICT(id) DO UPDATE SET data=excluded.data',
+                   (job['job_id'], time.time(), json.dumps(data)))
+
+
+def capture_request(job_id):
+    """Return one private retry snapshot without exposing it through recordings()."""
+    with connection() as db:
+        row = db.execute('SELECT data FROM capture_requests WHERE id=?', (job_id,)).fetchone()
+        return json.loads(row['data']) if row else None
+
+
+def capture_request_ids():
+    with connection() as db:
+        return {row['id'] for row in db.execute('SELECT id FROM capture_requests')}
 
 
 def save_archive_state(job_id, archive_status, **fields):
@@ -195,12 +230,12 @@ def recording(job_id):
     """Return one catalogue item, including transcript metadata."""
     with connection() as db:
         row = db.execute('SELECT data FROM recordings WHERE id=?', (job_id,)).fetchone()
-        return json.loads(row['data']) if row else None
+        return _recording_data(row['data']) if row else None
 
 
 def recordings():
     with connection() as db:
-        rows = [json.loads(row['data']) for row in db.execute('SELECT data FROM recordings ORDER BY updated DESC')]
+        rows = [_recording_data(row['data']) for row in db.execute('SELECT data FROM recordings ORDER BY updated DESC')]
         by_job = {}
         for marker in db.execute('SELECT job_id, seconds, note FROM markers ORDER BY seconds, id'):
             by_job.setdefault(marker['job_id'], []).append(dict(seconds=marker['seconds'], note=marker['note']))
@@ -209,10 +244,25 @@ def recordings():
         return rows
 
 
+def record_download(job_id, downloaded_at=None):
+    """Atomically record one successful attachment response without reordering History."""
+    with connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute('SELECT data FROM recordings WHERE id=?', (job_id,)).fetchone()
+        if not row:
+            return None
+        data = _recording_data(row['data'])
+        data['download_count'] += 1
+        data['last_downloaded_at'] = time.time() if downloaded_at is None else float(downloaded_at)
+        db.execute('UPDATE recordings SET data=? WHERE id=?', (json.dumps(data), job_id))
+        return data['download_count'], data['last_downloaded_at']
+
+
 def delete_recording(job_id):
     """Remove one catalogue row and its markers after its file is deleted."""
     with connection() as db:
         db.execute('DELETE FROM markers WHERE job_id=?', (job_id,))
+        db.execute('DELETE FROM capture_requests WHERE id=?', (job_id,))
         deleted = db.execute('DELETE FROM recordings WHERE id=?', (job_id,)).rowcount
         return bool(deleted)
 

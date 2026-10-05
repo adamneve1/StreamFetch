@@ -187,6 +187,18 @@ test('history keeps expanded errors and selection through refresh without interp
   assert.equal(table.querySelector('.recording-details').open, false);
 });
 
+test('download analytics stay compact and render only for admins with WIB detail time',()=>{
+  const row={job_id:'analytics',source:'youtube',state:'ready',filename:'Dialog.mp4',download_count:12,last_downloaded_at:1704067200};
+  const admin=fixture();admin.context.row=row;admin.run('isAdmin=true;renderHistory([row])');
+  assert.equal(admin.get('results').querySelector('.download-stat').textContent,'12× download');
+  const detail=admin.get('results').querySelector('.detail-download-stats');
+  assert.match(detail.textContent,/12× download · Terakhir: .* WIB/);
+
+  const user=fixture();user.context.row=row;user.run('isAdmin=false;renderHistory([row])');
+  assert.equal(user.get('results').querySelector('.download-stat'),null);
+  assert.equal(user.get('results').querySelector('.detail-download-stats'),null);
+});
+
 test('one accessible native dialog replaces every user-facing prompt and confirm',()=>{
   const root=path.resolve(__dirname,'../app/static');
   const html=fs.readFileSync(path.join(root,'index.html'),'utf8');
@@ -787,6 +799,32 @@ test('failed island opens existing History diagnostics without inventing a secon
  const row=f.get('results').children[0];
  assert.equal(row.querySelector('.recording-details').open,true);assert.equal(row.focused,true);assert.equal(row.scrolled,true);
  f.run('renderHistory(historyRows)');assert.equal(f.get('results').querySelector('.recording-details').open,true);
+});
+test('failed capture shows concise classified copy, raw detail, attempt number, and one guarded Retry',async()=>{
+ const f=fixture(),requests=[];f.context.requests=requests;
+ f.context.row={job_id:'failed',state:'failed',source:'youtube',source_name:'YouTube',is_live:false,
+  quality:'720',compression:'compact',output_format:'mp4',storage:'archive',filename:'Dialog.mp4',
+  attempt_root_id:'failed',attempt_number:1,attempt_total:1,can_retry:true,error_code:'http_403',
+  error_title:'Gagal mengambil media',error_message:'YouTube menolak permintaan media. Coba lagi untuk mengambil sumber media baru.',
+  detail:'ERROR: HTTP Error 403: Forbidden'};
+ f.context.retryGate={};f.run("api=async(path,data)=>{requests.push([path,data]);return new Promise(resolve=>retryGate.resolve=resolve)};refresh=async()=>{}");
+ f.run('historyRows=[row];renderHistory(historyRows);lastObservedJob=row;renderOperationalStatus()');
+ const rendered=f.get('results').children[0],retry=rendered.querySelector('.retry-capture');
+ assert.ok(retry);assert.equal(retry.textContent,'Coba lagi');assert.match(rendered.children[1].children[1].textContent,/Gagal mengambil media.*YouTube menolak/);
+ assert.doesNotMatch(rendered.children[1].children[1].title,/HTTP Error 403/);
+ assert.equal(rendered.querySelector('.recording-detail-body').children[0].textContent,'ERROR: HTTP Error 403: Forbidden');
+ assert.match(rendered.querySelector('.detail-metadata').textContent,/Percobaan 1\/1/);
+ assert.match(f.get('status-detail').textContent,/Gagal mengambil media/);
+ const first=retry.onclick();retry.onclick();assert.equal(requests.length,1);assert.equal(retry.disabled,true);
+ f.context.retryGate.resolve({job_id:'retry-2',retry_of:'failed',attempt_root_id:'failed',attempt_number:2,attempt_total:2});await first;
+ assert.equal(f.get('results').children[0].dataset.jobId,'retry-2');assert.equal(f.get('status-monitor').dataset.phase,'starting');
+ assert.equal(requests[0][0],'recordings/failed/retry');assert.match(f.get('notice').textContent,/Percobaan 2\/2/);
+});
+test('failed Retry request restores the action and reports inline feedback',async()=>{
+ const f=fixture();f.context.row={job_id:'failed',state:'failed',source:'instagram',can_retry:true,detail:'diagnostic'};
+ f.run("api=async()=>{throw Error('Masih ada capture yang berjalan.')};historyRows=[row];renderHistory(historyRows)");
+ const retry=f.get('results').querySelector('.retry-capture');await retry.onclick();
+ assert.equal(retry.disabled,false);assert.match(f.get('notice').textContent,/Masih ada capture/);
 });
 test('minimal island markup omits duplicate metadata and moves live markers outside the signal',()=>{
  const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');

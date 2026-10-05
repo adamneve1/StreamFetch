@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch, AsyncMock
 from pathlib import Path
 import fakeredis
@@ -134,6 +135,63 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(json.loads(self.redis.lindex('download_queue', 0))['compression'], 'original')
 
+    def test_failed_capture_retry_creates_fresh_linked_job_and_preserves_settings(self):
+        self.redis.set('worker:heartbeat', 1)
+        original = dict(job_id='failed-403', source='youtube', source_name='YouTube', origin='web',
+                        chat_id='web', url='https://youtu.be/abcdefghijk', note='Dialog Batam',
+                        filename='Dialog Batam.mp4', storage='archive', archive=True, quality='720',
+                        output_format='mp4', compression='compact', is_live=False,
+                        attempt_root_id='failed-403', attempt_number=1, attempt_total=1)
+        with patch.dict(os.environ, ARCHIVE_ENABLED='true'):
+            storage.save_capture_request(original)
+            failed = {**original, 'error_code': 'http_403', 'error_title': 'Gagal mengambil media',
+                      'error_message': 'YouTube menolak permintaan media. Coba lagi untuk mengambil sumber media baru.'}
+            storage.save_recording(failed, 'failed', 'ERROR: HTTP Error 403: Forbidden')
+            response = self.post('recordings/failed-403/retry', {})
+        self.assertEqual(response.status_code, 202)
+        replacement = json.loads(self.redis.lindex('download_queue', 0))
+        self.assertNotEqual(replacement['job_id'], original['job_id'])
+        for key in ('source', 'url', 'note', 'filename', 'storage', 'archive', 'quality',
+                    'output_format', 'compression', 'is_live'):
+            self.assertEqual(replacement[key], original[key])
+        self.assertEqual(replacement['retry_of'], 'failed-403')
+        self.assertEqual(replacement['attempt_root_id'], 'failed-403')
+        self.assertEqual(replacement['attempt_number'], 2)
+        self.assertNotIn('source_metadata', replacement)
+        rows = {row['job_id']: row for row in self.client.get('/api/recordings').json['recordings']}
+        self.assertEqual(rows['failed-403']['state'], 'failed')
+        self.assertEqual((rows['failed-403']['attempt_number'], rows['failed-403']['attempt_total']), (1, 2))
+        self.assertFalse(rows['failed-403']['can_retry'])
+        self.assertEqual((rows[replacement['job_id']]['attempt_number'], rows[replacement['job_id']]['attempt_total']), (2, 2))
+        self.assertNotIn('youtu.be', self.client.get('/api/recordings').get_data(as_text=True))
+        duplicate = self.post('recordings/failed-403/retry', {})
+        self.assertEqual(duplicate.status_code, 409)
+        self.assertEqual(self.redis.llen('download_queue'), 1)
+
+    def test_retry_success_and_failure_keep_attempt_history_and_allow_only_latest_failure(self):
+        self.redis.set('worker:heartbeat', 1)
+        first = dict(job_id='first', source='instagram', url='https://www.instagram.com/reel/ABC/',
+                     note='Reel', storage='local', archive=False, quality='best', output_format='mp4',
+                     compression='balanced', is_live=False, attempt_root_id='first', attempt_number=1)
+        storage.save_capture_request(first);storage.save_recording(first, 'failed', 'network timeout')
+        second_id = self.post('recordings/first/retry', {}).json['job_id']
+        second = json.loads(self.redis.lindex('download_queue', 0))
+        storage.save_recording({**second, 'filename': 'Reel.mp4'}, 'ready', 'File siap')
+        rows = {row['job_id']: row for row in self.client.get('/api/recordings').json['recordings']}
+        self.assertEqual(rows[second_id]['state'], 'ready')
+        self.assertFalse(rows['first']['can_retry'])
+        self.redis.delete('capture:owner', 'active:web', 'download_queue')
+        failed_second = {**second, 'error_code': 'network', 'error_title': 'Koneksi bermasalah',
+                         'error_message': 'Koneksi ke sumber terputus atau melewati batas waktu. Coba lagi.'}
+        storage.save_recording(failed_second, 'failed', 'connection timed out')
+        self.redis.set('worker:heartbeat', 1)
+        third = self.post('recordings/' + second_id + '/retry', {})
+        self.assertEqual(third.status_code, 202)
+        self.assertEqual(third.json['attempt_number'], 3)
+        rows = {row['job_id']: row for row in self.client.get('/api/recordings').json['recordings']}
+        self.assertEqual({row['attempt_total'] for row in rows.values()}, {3})
+        self.assertFalse(rows['first']['can_retry']);self.assertFalse(rows[second_id]['can_retry'])
+
     def test_original_media_remains_securely_downloadable_during_and_after_processing(self):
         root = Path(self.tmp.name)
         (root / 'original.mp4').write_bytes(b'0123456789')
@@ -150,6 +208,60 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         response.close()
         self.assertEqual(self.app.test_client().get('/api/files/original.mp4').status_code, 401)
+
+    def test_recording_download_counts_are_admin_only_and_ignore_inline_reader_and_transcripts(self):
+        root = Path(self.tmp.name)
+        (root / 'counted.mp4').write_bytes(b'recording')
+        (root / 'counted.txt').write_text('Transcript', encoding='utf-8')
+        with storage.connection() as db:
+            db.execute('INSERT INTO recordings VALUES (?, ?, ?)',
+                       ('counted', 1, json.dumps(dict(job_id='counted', source='youtube',
+                                                     filename='counted.mp4', state='ready', detail=''))))
+        storage.save_transcription_state('counted', 'completed', replace=True, txt_filename='counted.txt')
+
+        legacy = storage.recording('counted')
+        self.assertEqual(legacy['download_count'], 0)
+        self.assertIsNone(legacy['last_downloaded_at'])
+        admin_row = self.client.get('/api/recordings').json['recordings'][0]
+        self.assertEqual(admin_row['download_count'], 0)
+        self.assertIsNone(admin_row['last_downloaded_at'])
+
+        user = self.app.test_client()
+        self.assertEqual(user.post('/api/login', json={'password': 'test-password'}).status_code, 200)
+        user_row = user.get('/api/recordings').json['recordings'][0]
+        self.assertNotIn('download_count', user_row)
+        self.assertNotIn('last_downloaded_at', user_row)
+
+        reader = self.client.get('/api/recordings/counted/transcript/view')
+        self.assertEqual(reader.status_code, 200);reader.close()
+        transcript = self.client.get('/api/recordings/counted/transcript/txt')
+        self.assertEqual(transcript.status_code, 200);transcript.close()
+        inline = self.client.get('/api/files/counted.mp4?inline=1')
+        self.assertEqual(inline.status_code, 200);inline.close()
+        head = self.client.head('/api/files/counted.mp4', headers={'X-CSRF-Token': self.csrf})
+        self.assertEqual(head.status_code, 200);head.close()
+        self.assertEqual(storage.recording('counted')['download_count'], 0)
+
+        first = self.client.get('/api/files/counted.mp4')
+        self.assertEqual(first.status_code, 200);first.close()
+        second = self.client.get('/api/files/counted.mp4')
+        self.assertEqual(second.status_code, 200);second.close()
+        counted = storage.recording('counted')
+        self.assertEqual(counted['download_count'], 2)
+        self.assertIsInstance(counted['last_downloaded_at'], float)
+        admin_row = self.client.get('/api/recordings').json['recordings'][0]
+        self.assertEqual(admin_row['download_count'], 2)
+        self.assertEqual(admin_row['last_downloaded_at'], counted['last_downloaded_at'])
+        self.assertNotIn('download_count', user.get('/api/recordings').get_data(as_text=True))
+
+    def test_download_increment_is_atomic_for_concurrent_requests(self):
+        storage.save_recording(dict(job_id='concurrent', source='youtube', filename='concurrent.mp4'), 'ready')
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _: storage.record_download('concurrent', 1_700_000_000), range(24)))
+        self.assertEqual(sorted(count for count, _ in results), list(range(1, 25)))
+        row = storage.recording('concurrent')
+        self.assertEqual(row['download_count'], 24)
+        self.assertEqual(row['last_downloaded_at'], 1_700_000_000)
 
     def test_web_cancel_persists_for_telegram_restart_without_stopping_capture_or_tasks(self):
         self.save_watch(mode='every')

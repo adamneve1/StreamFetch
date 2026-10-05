@@ -4,7 +4,7 @@
 .reader-player{aspect-ratio:16/9;width:100%;margin:16px 0 20px;background:#111;border-radius:16px;overflow:hidden}.reader-player iframe,.reader-player>div{width:100%;height:100%;border:0}.reader-info h1{font-size:23px;line-height:1.4;margin:0;overflow-wrap:anywhere}.reader-info dl{gap:6px 16px;margin:16px 0}.reader-timestamp{font:11px/1.8 ui-monospace,SFMono-Regular,monospace;color:var(--deep);padding:6px 0 0;border:0;background:none;align-self:start;text-align:left;white-space:pre-line;cursor:pointer}.reader-timestamp:hover{text-decoration:underline}.reader-timestamp:focus-visible{outline:2px solid #629d45;outline-offset:3px}#player-status{font-size:12px;color:var(--muted);margin-bottom:16px}#reader-source{font-size:12px;color:var(--muted);margin-top:16px}@media(max-width:680px){.reader-info h1{font-size:20px}.reader-prose[data-mode=subtitle] .reader-timestamp{white-space:normal}}
 .reader-shell{max-width:1240px;padding-top:24px}.reader-workspace{display:grid;grid-template-columns:minmax(0,38fr) minmax(0,62fr);gap:24px;align-items:start}.reader-sidebar{position:sticky;top:16px;min-width:0;max-height:calc(100dvh - 32px);overflow:auto;scrollbar-width:thin}.reader-document{min-width:0;overflow:visible}.reader-shell .reader-player{margin-top:0}.reader-sidebar .reader-info{padding:18px;margin-bottom:0}.reader-sidebar .reader-info h1{font-size:20px}.reader-sidebar .reader-info dl{grid-template-columns:86px minmax(0,1fr);gap:6px 12px;margin:14px 0}.reader-sidebar .reader-info dd{font-size:13px;line-height:1.6}.reader-tools{position:sticky;top:16px;z-index:2;background:#fafafc;border-radius:16px 16px 0 0;box-shadow:0 2px 5px #00000008}.reader-tools .reader-toolbar{padding:16px 20px 6px;gap:14px}.reader-tools .reader-display{width:110px;flex-shrink:0}.reader-tools .reader-search-controls input{width:100%}.reader-tools .reader-search-controls button{padding:6px 11px}.reader-tools .reader-actions{padding:0 20px 12px;gap:10px}.reader-menu{position:relative}.reader-menu>summary{cursor:pointer;list-style:none;font-size:12px;font-weight:600;color:var(--deep);border:1px solid var(--line);border-radius:8px;padding:6px 12px;background:#fff}.reader-menu>summary::-webkit-details-marker{display:none}.reader-menu>summary::after{content:' ▾'}.reader-menu-content{position:absolute;left:0;top:calc(100% + 6px);z-index:3;display:flex;flex-direction:column;gap:6px;min-width:160px;padding:10px;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 6px 20px #00000012}.reader-actions nav.reader-menu-content{margin-left:0;gap:10px}.reader-menu-content button{text-align:left;white-space:nowrap}.reader-menu-content .reader-raw-toggle{margin:0}.reader-more{margin-left:auto}.reader-more .reader-menu-content{left:auto;right:0}.reader-prose{padding:12px 24px 28px;font-size:16px;line-height:1.85;user-select:text}.reader-segment{grid-template-columns:52px minmax(0,1fr);gap:14px;padding:12px 0}.reader-segment+.reader-segment{border-top:0}.reader-prose[data-mode=subtitle] .reader-segment{grid-template-columns:108px minmax(0,1fr)}.reader-prose[data-mode=subtitle] .reader-timestamp,.reader-prose[data-mode=subtitle] time{overflow-wrap:anywhere;white-space:normal}.reader-prose mark.current-match{scroll-margin-top:180px;scroll-margin-bottom:80px}@media(max-width:1000px){.reader-workspace{grid-template-columns:minmax(0,1fr);gap:18px}.reader-sidebar{position:static;max-height:none;overflow:visible}.reader-tools{top:0}.reader-sidebar .reader-info{padding:18px 20px}}@media(max-width:680px){.reader-tools .reader-toolbar{padding:14px 16px 6px;flex-wrap:nowrap;gap:10px}.reader-tools .reader-search{flex-basis:auto}.reader-tools .reader-display{width:96px}.reader-tools .reader-actions{padding:0 16px 10px}.reader-prose{padding:10px 16px 24px}.reader-segment{grid-template-columns:46px minmax(0,1fr);gap:10px}.reader-prose[data-mode=subtitle] .reader-segment{grid-template-columns:94px minmax(0,1fr);gap:10px}.reader-sidebar .reader-info dl{grid-template-columns:80px minmax(0,1fr)}.reader-sidebar .reader-info dd{margin-bottom:0}.reader-actions nav.reader-menu-content{flex-basis:auto;padding:10px}.reader-search-controls button{min-width:30px}}
 .reader-menu:not([open]) .reader-menu-content{display:none}
-#reader-smooth-wrapper,#reader-smooth-content{width:100%;min-height:100%}
+#reader-smooth-wrapper,#reader-smooth-content{width:100%}
 .reader-shell .reader-player.local-video{max-width:min(568px,100%);max-height:40dvh}
 .reader-player video{display:block;width:100%;height:100%;object-fit:contain;background:#111}
 .reader-shell .reader-player.local-video.portrait{width:fit-content;max-width:100%;aspect-ratio:auto}
@@ -23,3 +23,24 @@
  .reader-prose{font-size:14px;line-height:1.65;padding:6px 12px 18px}.reader-segment{grid-template-columns:42px minmax(0,1fr);gap:8px;padding:7px 0}.reader-prose[data-mode=subtitle] .reader-segment{grid-template-columns:62px minmax(0,1fr);gap:8px}.reader-timestamp{font-size:10px;padding:0;min-height:44px;align-self:start}
 }
 @media(max-width:600px) and (max-height:500px){.reader-tools{position:static}}
+
+/* Desktop Reader is a fixed workspace; only the transcript surface moves. */
+@media(min-width:1001px) and (hover:hover) and (pointer:fine){
+ html{height:100%;overflow:hidden}
+ html.reader-smoothing{overflow-y:auto}
+ body.reader-page{height:100dvh;min-height:0;overflow:hidden}
+ body.reader-page.reader-smoothing{overflow:visible}
+ .reader-header{position:fixed;inset:0 0 auto;z-index:20;height:60px}
+ .reader-shell{position:fixed;inset:60px 0 0;width:auto;max-width:1240px;min-height:0;margin:auto;padding-top:16px;padding-bottom:16px;display:flex;flex-direction:column;overflow:hidden}
+ .reader-shell>.eyebrow,#reader-status{flex:none}
+ #reader-status:empty{display:none}
+ .reader-workspace{flex:1;min-height:0;align-items:stretch}
+ .reader-sidebar{position:static;height:100%;max-height:none;overflow:hidden}
+ .reader-document{position:relative;display:grid;grid-template-rows:auto minmax(0,1fr);height:100%;min-height:0;overflow:hidden}
+ .reader-tools{position:relative;top:auto;z-index:2;flex:none}
+ #reader-smooth-wrapper{position:relative!important;inset:auto!important;width:100%!important;height:100%!important;min-height:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;scrollbar-width:thin}
+ .reader-smoothing #reader-smooth-wrapper{overflow:hidden}
+ #reader-smooth-content{min-height:100%;padding-bottom:0}
+ .reader-smoothing #reader-smooth-content{padding-bottom:var(--reader-scroll-compensation,0px)}
+ .reader-transcript-scroll:focus-visible{outline:2px solid #629d45;outline-offset:-2px}
+}

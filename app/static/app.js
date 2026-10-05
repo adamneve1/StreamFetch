@@ -3,6 +3,7 @@ const motion=window.StreamFetchMotion;
 let csrf='', isAdmin=false, mode='oryx', sources=[], editing='', active=null, online=false, queued=0, pending=false, disk=null, archiveEnabled=false, historyRows=[], refreshId=0, estimateId=0, estimateTimer, lastObservedJob=null;
 let focusedJobId=null, submittedJob=null, focusPending=false;
 const expandedHistoryDetails=new Set();
+const retryingJobs=new Set();
 let watchRefreshId=0,watchLoading=false;
 let dialogRequest=null;
 function finishDialog(value){
@@ -226,7 +227,7 @@ function renderOperationalStatus(){
  $('status-job-title').textContent=job?islandTitle(job):queued+' capture';
  $('status-job-title').title=$('status-job-title').textContent;
  $('status-detail').hidden=phase!=='failed';
- $('status-detail').textContent=phase==='failed'?(transcript?.status==='failed'?'Transkripsi gagal.':'Capture gagal.') : '';
+ $('status-detail').textContent=phase==='failed'?(transcript?.status==='failed'?'Transkripsi gagal.':job?.error_title?(job.error_title+'. '+job.error_message):'Capture gagal.') : '';
  $('island-details').hidden=phase!=='failed'||!(job?.detail||transcript?.error||historyRows.some(row=>row.job_id===job?.job_id));
  $('duration').textContent=['completed','failed','cancelled'].includes(phase)?'':islandTime(job,transcript);
  $('progress-value').textContent='';
@@ -256,7 +257,7 @@ async function showIslandDetails(){
  const row=[...$('results').children].find(row=>row.dataset.jobId===job.job_id);
  const details=row?.querySelector('.recording-details');
  if(details){expandedHistoryDetails.add(job.job_id);details.open=true;row.tabIndex=-1;row.focus({preventScroll:true});row.scrollIntoView({behavior:motion?.reduced()?'auto':'smooth',block:'center'});}
- else notice(job.transcript?.error||job.detail||'Detail belum tersedia.');
+ else notice(job.error_message||job.transcript?.error||'Detail belum tersedia.');
 }
 function editSource(id){editing=id;const s=sources.find(x=>x.id===id);$('source-name').value=s?.name||'';$('source-url').value=s?.url||'';$('source-feedback').textContent='';}
 async function loadSources(){const previous=$('source').value; sources=(await api('sources')).sources;$('source').replaceChildren();for(const s of sources){const o=document.createElement('option');o.value=s.id;o.textContent=s.name;$('source').append(o);}if(!sources.length){const o=document.createElement('option');o.value='';o.textContent='Belum ada sumber — tambahkan dulu';$('source').append(o);}if(sources.some(x=>x.id===previous))$('source').value=previous;editSource($('source').value);scheduleEstimate();controls();}
@@ -284,15 +285,23 @@ function setMode(value){
  if(motion?.sourceMode)motion.sourceMode($('capture-panel'),change,{nextTab,indicator:$('source-tab-indicator'),outgoing:$(previous+'-fields'),incoming:$(value+'-fields'),shared,direction:Math.sign(sourceModes.indexOf(value)-sourceModes.indexOf(previous))});
  else change();
 }
+function downloadCount(row){return Math.max(0,Number.parseInt(row.download_count,10)||0);}
+function downloadedAtWIB(value){
+ const seconds=Number(value);if(!Number.isFinite(seconds)||seconds<=0)return '';
+ return new Intl.DateTimeFormat('id-ID',{timeZone:'Asia/Jakarta',dateStyle:'medium',timeStyle:'short',hour12:false}).format(new Date(seconds*1000))+' WIB';
+}
 function historyDetails(row){
  const details=document.createElement('details'),summary=document.createElement('summary'),body=document.createElement('div');
  details.className='recording-details';details.dataset.jobId=row.job_id;details.open=expandedHistoryDetails.has(row.job_id);
- summary.textContent=['failed','interrupted'].includes(row.state)?'Lihat penyebab':'Lihat detail';
+ summary.textContent='Lihat detail';
  body.className='recording-detail-body';
  const description=document.createElement('p');description.textContent=row.detail||row.note||'Belum ada detail tambahan.';
  const metadata=document.createElement('p');metadata.className='detail-metadata';
- metadata.textContent='Preset: '+presetName(row)+(row.download_attempt?' · Percobaan '+row.download_attempt+(row.download_attempts?'/'+row.download_attempts:''):'');
- body.append(description,metadata);details.append(summary,body);
+ const attempt=row.attempt_number?'Percobaan '+row.attempt_number+'/'+(row.attempt_total||row.attempt_number):row.download_attempt?'Percobaan internal '+row.download_attempt+(row.download_attempts?'/'+row.download_attempts:''):'';
+ metadata.textContent='Preset: '+presetName(row)+(attempt?' · '+attempt:'');
+ body.append(description,metadata);
+ if(isAdmin){const analytics=document.createElement('p'),last=downloadedAtWIB(row.last_downloaded_at);analytics.className='detail-download-stats';analytics.textContent=downloadCount(row)+'× download · '+(last?'Terakhir: '+last:'Belum pernah diunduh');body.append(analytics);}
+ details.append(summary,body);
  details.addEventListener('toggle',()=>{if(!details.isConnected)return;if(details.open)expandedHistoryDetails.add(row.job_id);else expandedHistoryDetails.delete(row.job_id);});
  return details;
 }
@@ -312,12 +321,14 @@ function renderHistory(rows){
   const selectionLabel=document.createElement('label');selectionLabel.className='history-selection';selectionLabel.append(checkbox);selectCell.append(selectionLabel);tr.append(selectCell);
   const file=document.createElement('td'),strong=document.createElement('strong'),small=document.createElement('small');
   strong.textContent=row.filename||'Rekaman '+row.job_id.slice(0,8);strong.title=strong.textContent;
-  small.textContent=row.processing_detail||row.note||(['failed','interrupted'].includes(row.state)?'Proses belum selesai. Buka detail untuk melihat penyebab.':row.detail||'Tanpa catatan');
-  small.title=row.note||row.detail||'';
+  small.textContent=row.processing_detail||row.error_title&&(row.error_title+' — '+row.error_message)||row.note||(['failed','interrupted'].includes(row.state)?'Proses belum selesai. Buka detail untuk melihat penyebab.':row.detail||'Tanpa catatan');
+  small.title=row.note||row.error_message||(!row.error_title?row.detail:'');
   const preset=document.createElement('span');preset.className='preset-badge';preset.textContent=presetName(row);
   const heading=document.createElement('div'),badge=document.createElement('span');heading.className='recording-heading';
   badge.className='status-badge';badge.dataset.tone=statusTone(row.state);badge.textContent=jobStateName(row);
-  heading.append(badge,strong);file.append(heading,small,preset,historyDetails(row));
+  heading.append(badge,strong);file.append(heading,small,preset);
+  if(isAdmin){const downloads=document.createElement('span');downloads.className='download-stat';downloads.textContent=downloadCount(row)+'× download';file.append(downloads);}
+  file.append(historyDetails(row));
   const meta=document.createElement('div');meta.className='history-mobile-meta';meta.textContent=[sourceDisplayName(row),row.requested_at?new Date(row.requested_at*1000).toLocaleString('id-ID'):null,row.size?bytes(row.size):null].filter(Boolean).join(' · ');file.append(meta);
   if(row.markers?.length){
    const details=document.createElement('details'),summary=document.createElement('summary'),list=document.createElement('ul');summary.textContent=row.markers.length+' tanda momen';
@@ -334,6 +345,7 @@ function renderHistory(rows){
    const download=document.createElement('a');download.href='/api/files/'+encodeURIComponent(row.filename);download.className='download-direct';
    download.setAttribute('aria-label','Unduh '+row.filename);download.title='Unduh';download.append(downloadIcon());action.append(download);
   }
+  if(row.state==='failed'&&row.can_retry){const retry=document.createElement('button');retry.type='button';retry.className='retry-capture secondary';retry.textContent='Coba lagi';retry.disabled=retryingJobs.has(row.job_id);retry.onclick=()=>retryCapture(row,retry);action.append(retry);}
   if((row.filename&&row.state==='ready')||isAdmin){
    const trigger=document.createElement('button');trigger.type='button';trigger.className='action-trigger';trigger.textContent='⋯';
    trigger.setAttribute('aria-label','Aksi lainnya untuk '+(row.filename||'riwayat'));trigger.setAttribute('aria-haspopup','menu');trigger.setAttribute('aria-expanded','false');
@@ -343,6 +355,22 @@ function renderHistory(rows){
   if(row.job_id===focusedJobId&&focusPending){tr.focus({preventScroll:true});tr.scrollIntoView({behavior:motion?.reduced()?'auto':'smooth',block:'center'});focusPending=false;}
  }
  updateDeleteControls();
+}
+async function retryCapture(row,button){
+ if(retryingJobs.has(row.job_id)||button?.disabled)return;
+ retryingJobs.add(row.job_id);if(button)button.disabled=true;
+ try{
+  const result=await api('recordings/'+encodeURIComponent(row.job_id)+'/retry',{});
+  const replacement={job_id:result.job_id,retry_of:row.job_id,attempt_root_id:result.attempt_root_id,
+   attempt_number:result.attempt_number,attempt_total:result.attempt_total,source:row.source,
+   source_name:row.source_name,note:row.note,filename:row.filename,quality:row.quality,
+   output_format:row.output_format,compression:row.compression,storage:row.storage,is_live:row.is_live,
+   requested_at:Date.now()/1000,state:'starting',detail:'Percobaan '+result.attempt_number+'/'+result.attempt_total+' · Menunggu worker…'};
+  active=null;queued=Math.max(1,queued);focusedJobId=result.job_id;focusPending=true;submittedJob=replacement;lastObservedJob=replacement;
+  renderHistory([replacement,...historyRows.filter(item=>item.job_id!==replacement.job_id)]);controls();
+  notice('Percobaan '+result.attempt_number+'/'+result.attempt_total+' masuk antrean.');
+  await refresh();
+ }catch(error){retryingJobs.delete(row.job_id);if(button)button.disabled=false;notice(error.message);}
 }
 async function refresh(){
  if(!csrf)return;

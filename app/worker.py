@@ -584,7 +584,7 @@ async def heartbeat(job=None):
 
 async def set_state(job, status, state, detail=''):
     r.set(f"state:{job['job_id']}", state, ex=86400)
-    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'quality', 'output_format', 'compression', 'is_live', 'live_status', 'was_live', 'download_attempt', 'download_attempts', 'download_exit_code', 'progress_percent', 'progress_phase', 'eta_seconds', 'started_at', 'elapsed', 'size', 'filename', 'original_filename', 'processing_status', 'processing_error', 'processing_detail') if key in job}
+    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'quality', 'output_format', 'compression', 'is_live', 'live_status', 'was_live', 'download_attempt', 'download_attempts', 'download_exit_code', 'progress_percent', 'progress_phase', 'eta_seconds', 'started_at', 'elapsed', 'size', 'filename', 'original_filename', 'processing_status', 'processing_error', 'processing_detail', 'attempt_root_id', 'retry_of', 'attempt_number', 'attempt_total', 'error_code', 'error_title', 'error_message') if key in job}
     public.update(state=state, detail=detail)
     r.set('web:job:' + job['job_id'], json.dumps(public), ex=86400)
     if os.getenv('DATA_DIR'):
@@ -603,8 +603,9 @@ async def set_state(job, status, state, detail=''):
             'ready': '✅ Ready: file siap digunakan.',
             'failed': '❌ Failed: file belum siap.',
         }
+        visible_detail = job.get('error_message') if state == 'failed' else detail
         await edit(job['chat_id'], status.message_id,
-                   labels[state] + ('\n' + detail if detail else ''))
+                   labels[state] + ('\n' + visible_detail if visible_detail else ''))
 
 
 def set_archive_state(job_id, state, **fields):
@@ -738,9 +739,10 @@ async def spawn(command, merge_stderr=True):
 
 class SourceInspectionError(RuntimeError):
     """Only fixed, credential-free diagnostics may reach logs or the UI."""
-    def __init__(self, code, detail):
+    def __init__(self, code, detail, diagnostic=None):
         self.code = code
         self.detail = detail
+        self.diagnostic = diagnostic or detail
         super().__init__(code)
 
 
@@ -772,6 +774,34 @@ def diagnostic_detail(job):
     return f'{prefix}: {message}'
 
 
+def classify_failure(job, exc):
+    """Return concise UI copy separately from sanitized technical diagnostics."""
+    if isinstance(exc, SourceInspectionError):
+        technical = safe_diagnostic(exc.diagnostic)
+        signal = f'{exc.code}\n{exc.detail}\n{technical}'.lower()
+    elif isinstance(exc, MediaValidationError):
+        technical = safe_diagnostic(exc.detail)
+        signal = f'{exc.code}\n{technical}\n{diagnostic_detail(job)}'.lower()
+    else:
+        technical = safe_diagnostic(str(exc)) or diagnostic_detail(job)
+        signal = f'{type(exc).__name__}\n{technical}\n{diagnostic_detail(job)}'.lower()
+    if job.get('stop_reason') == 'operator_stop' or 'stopped before capture' in signal:
+        return ('cancelled', 'Dibatalkan', 'Capture dibatalkan oleh operator.', technical)
+    if any(value in signal for value in ('http error 403', 'http 403', 'access_denied')):
+        return ('http_403', 'Gagal mengambil media',
+                'YouTube menolak permintaan media. Coba lagi untuk mengambil sumber media baru.', technical)
+    if any(value in signal for value in ('http error 404', 'http 404', 'video unavailable',
+                                         'video tidak tersedia', 'not found')):
+        return ('unavailable', 'Video tidak tersedia',
+                'Video sudah dihapus, bersifat privat, atau tidak tersedia dari sumber.', technical)
+    if any(value in signal for value in ('timed out', 'timeout', 'name resolution',
+                                         'connection refused', 'network', 'unable to download')):
+        return ('network', 'Koneksi bermasalah',
+                'Koneksi ke sumber terputus atau melewati batas waktu. Coba lagi.', technical)
+    return ('unknown', 'Capture gagal',
+            'Capture belum berhasil. Coba lagi atau buka detail untuk diagnosis teknis.', technical)
+
+
 def update_youtube_metadata(job, info):
     job['is_live'] = info.get('is_live') is True
     job['live_status'] = info.get('live_status') or ('is_live' if job['is_live'] else 'not_live')
@@ -788,9 +818,11 @@ def update_youtube_metadata(job, info):
 
 
 def inspection_error(output):
-    lines = output.decode(errors='replace').lower().splitlines()
+    lines = output.decode(errors='replace').splitlines()
     # Prefer fatal errors so unrelated warnings do not hide the actual cause.
-    text = '\n'.join(line for line in lines if line.startswith('error:')) or '\n'.join(lines)
+    text = '\n'.join(line for line in lines if line.lower().startswith('error:')) or '\n'.join(lines)
+    search = text.lower()
+    diagnostic = safe_diagnostic(text)
     cases = [
         (('impersonation target', 'impersonate'), 'browser_support',
          'Extractor membutuhkan dukungan browser impersonation. Rebuild image dengan dependensi curl-cffi.'),
@@ -800,10 +832,14 @@ def inspection_error(output):
          'TikTok melaporkan akun tidak live atau room live tidak terbaca. Pastikan akun sedang live; pembatasan akses juga dapat menyebabkan respons ini.'),
         (('login required', 'log in', 'sign in', 'requiring login', 'login-required', 'logged-in'), 'login_required',
          'Sumber meminta login atau membatasi akses. Video ini belum dapat diakses dari server.'),
-        (('http error 403', 'http error 429'), 'access_denied',
-         'Akses sumber ditolak atau dibatasi (HTTP 403/429). Coba lagi setelah beberapa saat.'),
+        (('http error 403',), 'access_denied',
+         'Akses sumber ditolak (HTTP 403). Coba lagi untuk mengambil sumber media baru.'),
+        (('http error 429',), 'rate_limited',
+         'Sumber membatasi terlalu banyak permintaan (HTTP 429). Coba lagi setelah beberapa saat.'),
         (('http error 400',), 'http_400',
          'API sumber menolak permintaan (HTTP 400). Extractor mungkin perlu diperbarui.'),
+        (('http error 404', 'video unavailable', 'video is unavailable'), 'unavailable',
+         'Video tidak tersedia dari sumber.'),
         (('timed out', 'timeout'), 'timeout', 'Koneksi ke sumber melewati batas waktu.'),
         (('unable to download', 'name resolution', 'connection refused'), 'network',
          'Worker gagal mengunduh informasi sumber. Periksa koneksi jaringan server.'),
@@ -811,9 +847,9 @@ def inspection_error(output):
          'Extractor tidak menemukan informasi atau format video. Periksa akses sumber dan versi yt-dlp.'),
     ]
     for needles, code, detail in cases:
-        if any(needle in text for needle in needles):
-            return SourceInspectionError(code, detail)
-    return SourceInspectionError('unknown', 'yt-dlp gagal membaca informasi sumber sebelum capture dimulai. Perlu diagnosis extractor dari worker.')
+        if any(needle in search for needle in needles):
+            return SourceInspectionError(code, detail, diagnostic)
+    return SourceInspectionError('unknown', 'yt-dlp gagal membaca informasi sumber sebelum capture dimulai. Perlu diagnosis extractor dari worker.', diagnostic)
 
 
 async def inspect_youtube(job):
@@ -1352,6 +1388,14 @@ async def run_download(job):
     job.setdefault('job_id', uuid.uuid4().hex)
     job.setdefault('requested_at', time.time())
     job.setdefault('origin', 'telegram')
+    job.setdefault('attempt_root_id', job['job_id'])
+    job.setdefault('attempt_number', 1)
+    job.setdefault('attempt_total', job['attempt_number'])
+    if os.getenv('DATA_DIR') and job['source'] in {'youtube', 'tiktok', 'instagram'}:
+        try:
+            await asyncio.to_thread(storage.save_capture_request, job)
+        except Exception:
+            log.error('job=%s retry_snapshot=failed', job['job_id'])
     lease = asyncio.create_task(heartbeat(job))
     status = None
     stage = 'starting'
@@ -1432,11 +1476,9 @@ async def run_download(job):
         log.error('job=%s source=%s stage=%s error_type=%s reason=%s detail=%s',
                   job['job_id'], job['source'], stage, type(exc).__name__,
                   error_code, error_detail)
-        await set_state(job, status, 'failed',
-                        exc.detail if isinstance(exc, (SourceInspectionError, MediaValidationError)) else
-                        'Sumber tidak tersedia, capture berhenti sebelum ada media, atau '
-                        'finalisasi gagal. File sementara yang ada tetap disimpan; '
-                        'cek log dan coba lagi.')
+        failure_code, title, message, technical = classify_failure(job, exc)
+        job.update(error_code=failure_code, error_title=title, error_message=message)
+        await set_state(job, status, 'failed', technical)
     finally:
         lease.cancel()
         await asyncio.gather(lease, return_exceptions=True)

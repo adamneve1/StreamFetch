@@ -31,6 +31,17 @@ redis.call('SET', 'state:' .. ARGV[1], 'starting', 'EX', 86400)
 redis.call('RPUSH', 'download_queue', ARGV[2])
 return 'accepted'
 """
+RETRY_ADMIT = """
+if redis.call('EXISTS', 'worker:heartbeat') == 0 then return 'offline' end
+if redis.call('EXISTS', 'retry:' .. ARGV[1]) == 1 then return 'duplicate' end
+if redis.call('EXISTS', 'capture:owner') == 1 or redis.call('LLEN', 'download_queue') > 0 then return 'busy' end
+redis.call('SET', 'retry:' .. ARGV[1], ARGV[2], 'EX', 86400)
+redis.call('SET', 'capture:owner', ARGV[2], 'EX', 30)
+redis.call('SET', 'active:web', ARGV[2], 'EX', 30)
+redis.call('SET', 'state:' .. ARGV[2], 'starting', 'EX', 86400)
+redis.call('RPUSH', 'download_queue', ARGV[3])
+return 'accepted'
+"""
 STOP = """
 if redis.call('GET', 'capture:owner') ~= ARGV[1] then return 0 end
 local state = redis.call('GET', 'state:' .. ARGV[1])
@@ -55,6 +66,25 @@ def create_app(client=None):
                       PERMANENT_SESSION_LIFETIME=timedelta(hours=8))
     r = client or redis.Redis(host=os.getenv('REDIS_HOST', 'redis'), decode_responses=True,
                              socket_connect_timeout=3, socket_timeout=3)
+
+    def annotate_attempts(rows):
+        """Add public attempt totals/retry eligibility without exposing request URLs."""
+        groups = {}
+        for row in rows:
+            root = row.get('attempt_root_id') or row['job_id']
+            number = positive_int(row.get('attempt_number')) or 1
+            row.update(attempt_root_id=root, attempt_number=number)
+            groups.setdefault(root, []).append(row)
+        private_ids = storage.capture_request_ids()
+        for attempts in groups.values():
+            total = max(row['attempt_number'] for row in attempts)
+            for row in attempts:
+                row['attempt_total'] = total
+                downloadable = (row.get('source') in {'youtube', 'instagram'}
+                                or row.get('source') == 'tiktok' and row.get('is_live') is not True)
+                row['can_retry'] = bool(row.get('state') == 'failed' and downloadable
+                                        and row['job_id'] in private_ids
+                                        and row['attempt_number'] == total)
 
     def credential(role):
         password_hash = storage.setting(role + '_password_hash')
@@ -344,6 +374,7 @@ def create_app(client=None):
                    storage=storage_target, archive=storage_target == 'archive',
                    quality=selected_quality, output_format=output_format,
                    compression=compression)
+        job.update(attempt_root_id=job['job_id'], attempt_number=1, attempt_total=1)
         if source == 'oryx':
             selected = next((s for s in storage.sources() if s['id'] == data.get('source_id')), None)
             if not selected:
@@ -363,7 +394,46 @@ def create_app(client=None):
         result = r.eval(ADMIT, 0, job['job_id'], json.dumps(job))
         if result != 'accepted':
             return jsonify(error='Masih ada rekaman yang berjalan. Tunggu sampai selesai, ya.' if result == 'busy' else 'Perekamnya belum siap. Coba lagi sebentar atau hubungi admin.'), 409
+        storage.save_capture_request(job)
         return jsonify(job_id=job['job_id']), 202
+
+    @app.post('/api/recordings/<job_id>/retry')
+    def retry_recording(job_id):
+        rows = storage.recordings()
+        previous = next((row for row in rows if row['job_id'] == job_id), None)
+        if not previous:
+            return jsonify(error='Capture yang mau dicoba lagi tidak ditemukan.'), 404
+        annotate_attempts(rows)
+        if previous.get('state') != 'failed' or not previous.get('can_retry'):
+            return jsonify(error='Capture ini tidak bisa dicoba lagi atau sudah memiliki percobaan pengganti.'), 409
+        original = storage.capture_request(job_id)
+        if not original:
+            return jsonify(error='Sumber asli capture ini tidak tersedia untuk dicoba lagi.'), 409
+        if not storage.disk_status()['can_record']:
+            return jsonify(error='Ruang penyimpanannya hampir habis. Kosongkan dulu sebelum mencoba lagi.'), 507
+        if original.get('storage') == 'archive' and os.getenv('ARCHIVE_ENABLED', 'false').lower() not in {'1', 'true', 'yes', 'on'}:
+            return jsonify(error='Tujuan arsip capture ini sedang tidak tersedia.'), 409
+        root = previous['attempt_root_id']
+        number = previous['attempt_number'] + 1
+        job = {key: original[key] for key in ('source', 'source_name', 'note', 'storage', 'archive',
+                                               'quality', 'output_format', 'compression', 'is_live',
+                                               'url', 'stream_url') if key in original}
+        job.update(job_id=uuid.uuid4().hex, origin='web', chat_id='web', requested_at=time.time(),
+                   attempt_root_id=root, retry_of=job_id, attempt_number=number, attempt_total=number)
+        if previous.get('filename'):
+            job['filename'] = previous['filename']
+        result = r.eval(RETRY_ADMIT, 0, job_id, job['job_id'], json.dumps(job))
+        if result != 'accepted':
+            messages = {
+                'duplicate': 'Percobaan pengganti sudah dibuat.',
+                'busy': 'Masih ada capture yang berjalan. Tunggu sampai selesai, ya.',
+                'offline': 'Perekamnya belum siap. Coba lagi sebentar atau hubungi admin.',
+            }
+            return jsonify(error=messages.get(result, messages['offline'])), 409
+        storage.save_capture_request(job)
+        storage.save_recording(job, 'queued', f'Percobaan {number}/{number} · Menunggu worker…')
+        return jsonify(job_id=job['job_id'], retry_of=job_id, attempt_root_id=root,
+                       attempt_number=number, attempt_total=number), 202
 
     @app.post('/api/stop')
     def stop():
@@ -417,6 +487,7 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
         for row in rows:
             if row['state'] not in {'ready', 'failed'} and row['job_id'] != owner and row['job_id'] not in queued_ids:
                 row.update(state='interrupted', detail='Proses rekaman terputus sebelum file dinyatakan siap.')
+        annotate_attempts(rows)
         query = request.args.get('q', '').casefold().strip()
         source = request.args.get('source', '')
         state = request.args.get('state', '')
@@ -432,6 +503,10 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
                 and (not source or row.get('source') == source)
                 and (not state or row.get('state') == state)
                 and (not date or time.strftime('%Y-%m-%d', time.localtime(row.get('requested_at', 0))) == date)]
+        if session.get('role') != 'admin':
+            for row in rows:
+                row.pop('download_count', None)
+                row.pop('last_downloaded_at', None)
         return jsonify(recordings=rows[:200], total=len(rows))
 
     @app.post('/api/recordings/<job_id>/transcript')
@@ -506,15 +581,23 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
 
     @app.get('/api/files/<filename>')
     def download(filename):
-        if not any((row.get('filename') == filename and row['state'] == 'ready') or
-                   (row.get('original_filename') == filename and row['state'] in {'ready', 'finalizing'})
-                   for row in storage.recordings()):
+        row = next((item for item in storage.recordings()
+                    if (item.get('filename') == filename and item['state'] == 'ready') or
+                    (item.get('original_filename') == filename and item['state'] in {'ready', 'finalizing'})), None)
+        if not row:
             return jsonify(error='File rekaman tidak ditemukan atau belum siap.'), 404
         root = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve()
         path = root / filename
         if Path(filename).name != filename or path.parent.resolve() != root or path.is_symlink():
             return jsonify(error='File rekaman tidak ditemukan.'), 404
-        return send_from_directory(root, filename, as_attachment=request.args.get('inline') != '1', conditional=True)
+        inline = request.args.get('inline') == '1'
+        response = send_from_directory(root, filename, as_attachment=not inline, conditional=True)
+        if request.method == 'GET' and not inline and response.status_code in {200, 206}:
+            try:
+                storage.record_download(row['job_id'])
+            except Exception:
+                app.logger.exception('Unable to persist download count for %s', row['job_id'])
+        return response
 
     def remove_recording(row):
         """Delete a local final file and its catalogue row, never its archive."""

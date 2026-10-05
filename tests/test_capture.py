@@ -388,9 +388,27 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
             await worker.run_download(job)
         capture.assert_not_called()
         public = json.loads(self.redis.get('web:job:test-job'))
-        self.assertEqual(public['detail'], error.detail)
+        self.assertEqual(public['error_code'], 'http_403')
+        self.assertEqual(public['error_title'], 'Gagal mengambil media')
+        self.assertEqual(public['error_message'], 'YouTube menolak permintaan media. Coba lagi untuk mengambil sumber media baru.')
+        self.assertIn('http error 403', public['detail'].lower())
+        self.assertNotIn(public['detail'], public['error_message'])
         self.assertEqual(public['state'], 'failed')
         self.assertIsNone(self.redis.get('capture:owner'))
+
+    def test_failure_classification_maps_unavailable_network_cancelled_and_unknown(self):
+        job = self.job('youtube')
+        cases = [
+            (worker.SourceInspectionError('unavailable', 'Video unavailable', 'ERROR: HTTP Error 404'), 'unavailable', 'Video tidak tersedia'),
+            (TimeoutError('Source inspection timed out'), 'network', 'Koneksi bermasalah'),
+            (RuntimeError('unexpected extractor state'), 'unknown', 'Capture gagal'),
+        ]
+        for error, code, title in cases:
+            with self.subTest(code=code):
+                self.assertEqual(worker.classify_failure(job, error)[:2], (code, title))
+        job['stop_reason'] = 'operator_stop'
+        self.assertEqual(worker.classify_failure(job, worker.MediaValidationError('incomplete', 'partial'))[:2],
+                         ('cancelled', 'Dibatalkan'))
 
     async def test_tiktok_offline_does_not_capture(self):
         job = self.job('tiktok')

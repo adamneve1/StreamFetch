@@ -15,8 +15,6 @@
   <script src="/static/transcript.js" defer></script>
 </head>
 <body class="reader-page">
-<div id="reader-smooth-wrapper">
-<div id="reader-smooth-content">
   <header class="app-header reader-header"><a class="brand" href="/"><img class="brand-logo" src="/static/favicon.svg" alt=""><strong>StreamFetch</strong></a><a class="reader-back" href="/">← Workspace</a></header>
   <main class="reader-shell">
     <p class="eyebrow">TRANSCRIPT READER</p>
@@ -54,11 +52,13 @@
           <details class="reader-menu reader-more"><summary>More</summary><div class="reader-menu-content"><label class="reader-raw-toggle"><input id="raw-view" type="checkbox"> Raw view</label></div></details>
         </div>
         </div>
-        <article id="transcript-text" class="reader-prose" aria-label="Transcript text"></article>
+        <div id="reader-smooth-wrapper" class="reader-transcript-scroll" tabindex="0" aria-label="Transcript segments">
+          <div id="reader-smooth-content">
+            <article id="transcript-text" class="reader-prose" aria-label="Transcript text"></article>
+          </div>
+        </div>
       </section>
     </div>
   </main>
-</div>
-</div>
 </body>
 </html>
