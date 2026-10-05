@@ -22,8 +22,24 @@
   settle(name);
   if(!gsap||reduced())return;
   const region={element,ghost};regions.set(name,region);
-  const cleanup=()=>{if(regions.get(name)===region)settle(name);};
+  const cleanup=()=>{if(regions.get(name)!==region)return false;settle(name);return true;};
   try{region.context=gsap.context(()=>animate(cleanup));}catch{cleanup();}
+ }
+ function dialogOpen(dialog,panel){
+  settle('dialog');
+  if(!gsap||reduced())return;
+  choreograph('dialog',dialog,done=>gsap.timeline({onComplete:done,defaults:{ease:tokens.ease}})
+   .fromTo(dialog,{'--dialog-backdrop-opacity':0},{'--dialog-backdrop-opacity':.28,duration:tokens.micro},0)
+   .fromTo(panel,{opacity:0,y:8,scale:.985},{opacity:1,y:0,scale:1,duration:tokens.micro*1.25},0));
+ }
+ function dialogClose(dialog,panel,onComplete){
+  settle('dialog');
+  if(!gsap||reduced()){onComplete?.();return;}
+  const region={element:dialog,onSettled:onComplete};regions.set('dialog',region);
+  const cleanup=()=>{if(regions.get('dialog')!==region)return false;settle('dialog');onComplete?.();return true;};
+  try{region.context=gsap.context(()=>gsap.timeline({onComplete:cleanup,defaults:{ease:tokens.settle}})
+   .to(dialog,{'--dialog-backdrop-opacity':0,duration:tokens.micro*1.25},0)
+   .to(panel,{opacity:0,y:5,scale:.99,duration:tokens.micro*1.25},0));}catch{cleanup();}
  }
  function loginParts(root){
   let ring=root?.querySelector?.('.login-ring')||env.document.getElementById('login-ring');
@@ -165,7 +181,38 @@
    });
   }catch{cleanup();} // The final DOM state must work even when motion is unavailable.
  }
+ function sourcePress(tab){
+  choreograph('source-press',tab,done=>gsap.timeline({onComplete:done,defaults:{ease:tokens.settle}})
+   .fromTo(tab,{scale:1},{scale:.985,duration:tokens.micro/2,overwrite:true},0)
+   .to(tab,{scale:1,duration:tokens.micro,overwrite:true},tokens.micro/2));
+ }
+ function sourceMode(panel,change,{nextTab,indicator,outgoing,incoming,shared=[],direction=1}={}){
+  settle('source');
+  const targets=[...new Set([panel,...shared,indicator,outgoing,incoming].filter(Boolean))];
+  if(!available||reduced()){settle('source-mode');settle('source-press');change();return;}
+  let before;
+  try{before=Flip.getState(targets,{kill:false,props:'padding,borderRadius,backgroundColor,boxShadow'});}
+  catch{settle('source-mode');settle('source-press');change();return;}
+  settle('source-mode');settle('source-press');change();
+  const region={element:panel};regions.set('source-mode',region);panel.dataset.motion='true';
+  const cleanup=()=>{if(regions.get('source-mode')===region)settle('source-mode');};
+  const shift=(direction||1)*12;
+  try{
+   region.context=gsap.context(()=>{
+    gsap.timeline({defaults:{ease:tokens.settle}})
+     .fromTo(nextTab,{scale:1},{scale:.985,duration:tokens.micro/2,overwrite:true},0)
+     .to(nextTab,{scale:1,duration:tokens.micro,overwrite:true},tokens.micro/2);
+    Flip.from(before,{
+     duration:tokens.navigation,ease:tokens.settle,nested:true,prune:true,absoluteOnLeave:true,
+     onLeave:items=>gsap.to(items,{opacity:0,x:-shift,y:-2,scale:.985,duration:tokens.micro,stagger:.018,ease:'power2.in',overwrite:true}),
+     onEnter:items=>gsap.fromTo(items,{opacity:0,x:shift,y:2,scale:.985},{opacity:1,x:0,y:0,scale:1,duration:tokens.micro,stagger:.018,ease:tokens.ease,overwrite:true}),
+     onComplete:cleanup,
+    });
+   });
+  }catch{cleanup();}
+ }
  function source(panel,collapsed,change,{accepted=false,job,onSettled}={}){
+  settle('source-mode');settle('source-press');
   const content=env.document.getElementById('capture-content');
   const compact=env.document.getElementById('capture-another');
   if(panel.dataset.collapsed===String(collapsed)){change();return;}
@@ -304,5 +351,5 @@
  env.addEventListener?.('resize',()=>{pendingNavigation?.finish();for(const name of [...regions.keys()])settle(name,true);});
  env.addEventListener?.('pagehide',reset);
  env.addEventListener?.('pageshow',event=>{if(event.persisted)reset();});
- return {tokens,source,island,progress,reset,reduced,loginReveal,loginError,loginSuccess,loginInteract,pageReveal,contextChange,followLink,returnReveal};
+ return {tokens,source,sourceMode,sourcePress,island,progress,reset,reduced,dialogOpen,dialogClose,loginReveal,loginError,loginSuccess,loginInteract,pageReveal,contextChange,followLink,returnReveal};
 });

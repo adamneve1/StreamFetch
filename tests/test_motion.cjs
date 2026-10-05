@@ -11,7 +11,7 @@ function fixture(reduced=false,available=true){
   cloneNode(){const clone=element(),cloneGlyph=element(),cloneRing=element();clone.action=element();clone.inputs=[element()];clone.inputs[0].value='not-to-be-retained';clone.queries={'.login-glyph':cloneGlyph,'.login-ring':cloneRing,'.login-logo':element(),'.login-surface':element(),'.login-brand span':element()};return clone;},
   getBoundingClientRect(){return {width:640,left:20,top:30};},offsetLeft:12,offsetTop:12});
  const panel=element(),content=element(),compact=element(),island=element(),bar=element(),job=element();
- const shell=element(),form=element(),brand=element(),label=element(),password=element(),button=element(),credit=element(),error=element(),workspace=element(),mark=element(),ring=element(),glyph=element(),wordmark=element(),surface=element(),body=element();
+ const shell=element(),form=element(),brand=element(),label=element(),password=element(),button=element(),credit=element(),error=element(),workspace=element(),mark=element(),ring=element(),glyph=element(),wordmark=element(),surface=element(),body=element(),dialog=element(),dialogPanel=element();
  ring.tagName='circle';glyph.tagName='path';
  form.queries={'.login-brand':brand,label};
  const ids={'capture-content':content,'capture-another':compact,'login-form':form,password,'login-submit':button,'login-credit':credit,'login-mark':mark,'login-ring':ring,'login-glyph':glyph,'login-wordmark':wordmark,'login-surface':surface,login:shell};
@@ -39,7 +39,7 @@ function fixture(reduced=false,available=true){
  },{accepted,job});
  const status=(key,phase)=>motion.island(island,key,phase,()=>{island.hidden=false;island.detail=phase;});
  const tick=()=>{const callbacks=[...timers.values()];timers.clear();callbacks.forEach(fn=>fn());};
- return {motion,source,status,tick,flips,states,tweens,contexts,timelines,conversions,timers,listeners,media,panel,content,compact,island,bar,job,Flip,shell,form,brand,label,password,button,credit,error,workspace,mark,ring,glyph,wordmark,surface,body,navigations,stored};
+ return {motion,source,status,tick,flips,states,tweens,contexts,timelines,conversions,timers,listeners,media,panel,content,compact,island,bar,job,Flip,shell,form,brand,label,password,button,credit,error,workspace,mark,ring,glyph,wordmark,surface,body,dialog,dialogPanel,navigations,stored};
 }
 test('Source admission snapshots before mutation, morphs surface, and keeps snapshot inert',()=>{
  const f=fixture();f.source(true,true);
@@ -205,6 +205,26 @@ test('expanded Source controls reveal in order and focus only after current geom
  assert.equal(focused,0);const incoming=f.tweens.find(t=>Array.isArray(t.target)&&t.from?.y===6);assert.ok(incoming);assert.equal(incoming.vars.stagger,.018);
  f.flips[0].vars.onComplete();assert.equal(focused,0);f.flips[1].vars.onComplete();assert.equal(focused,1);
 });
+test('platform switching Flips shared geometry and directionally stages only entering/leaving fields',()=>{
+ const f=fixture();let changed=0;
+ f.motion.sourceMode(f.panel,()=>{changed++;f.compact.style.left='48px';},{currentTab:f.button,nextTab:f.job,indicator:f.compact,outgoing:f.island,incoming:f.bar,shared:[f.content],direction:1});
+ assert.equal(changed,1);assert.deepEqual(f.states[0].targets,[f.panel,f.content,f.compact,f.island,f.bar]);
+ assert.equal(f.flips[0].vars.duration,f.motion.tokens.navigation);assert.equal(f.flips[0].vars.ease,f.motion.tokens.settle);assert.equal(f.flips[0].vars.absoluteOnLeave,true);
+ f.flips[0].vars.onLeave([f.island]);let outgoing=f.tweens.at(-1);assert.equal(outgoing.target[0],f.island);assert.equal(outgoing.vars.x,-12);assert.equal(outgoing.vars.scale,.985);assert.equal(outgoing.vars.stagger,.018);
+ f.flips[0].vars.onEnter([f.bar]);let incoming=f.tweens.at(-1);assert.equal(incoming.target[0],f.bar);assert.equal(incoming.from.x,12);assert.equal(incoming.vars.x,0);assert.equal(incoming.vars.stagger,.018);
+ assert.equal(f.tweens.some(t=>t.target===f.button),false);assert.ok(f.tweens.some(t=>t.target===f.job&&t.vars.scale===.985));
+});
+test('rapid platform switches replace stale Flip/press motion and keep the latest DOM state',()=>{
+ const f=fixture();let value='oryx';const options={currentTab:f.button,nextTab:f.job,indicator:f.compact,outgoing:f.island,incoming:f.bar,shared:[f.content],direction:1};
+ f.motion.sourceMode(f.panel,()=>value='youtube',options);const first=f.flips[0],firstContext=f.contexts[0];
+ f.motion.sourceMode(f.panel,()=>value='instagram',{...options,direction:-1});assert.equal(value,'instagram');assert.equal(first.t.killed,true);assert.equal(firstContext.reverted,true);
+ first.vars.onComplete();assert.equal(f.panel.dataset.motion,'true');f.flips[1].vars.onComplete();assert.equal(f.panel.dataset.motion,undefined);
+ f.motion.sourcePress(f.job);const press=f.timelines.at(-1);f.motion.sourcePress(f.button);assert.equal(press.animations.every(t=>t.killed),true);
+});
+test('reduced-motion platform switching applies final state immediately without Flip',()=>{
+ const f=fixture(true);let value='oryx';f.motion.sourceMode(f.panel,()=>value='youtube',{nextTab:f.job,outgoing:f.island,incoming:f.bar,direction:-1});
+ assert.equal(value,'youtube');assert.equal(f.flips.length,0);assert.equal(f.timelines.length,0);f.motion.sourcePress(f.job);assert.equal(f.timelines.length,0);
+});
 function follow(f,href='/next',target=''){
  const link={href,target},event={button:0,preventDefault(){this.defaultPrevented=true;}};
  f.motion.followLink(link,event,{shell:f.workspace,origin:f.wordmark,row:f.job});return event;
@@ -238,6 +258,21 @@ test('reduced motion/resize settle pending navigation; pagehide cancels and bfca
 test('reduced-motion Source expansion focuses immediately without creating snapshots',()=>{
  const f=fixture(true);f.source(true);let focused=false;f.motion.source(f.panel,false,()=>f.content.hidden=false,{onSettled:()=>focused=true});
  assert.equal(focused,true);assert.equal(f.panel.children.length,0);assert.equal(f.flips.length,0);
+});
+test('dialog motion fades the backdrop, enters sharply, and ignores an interrupted close',()=>{
+ const f=fixture();let closed=0;f.motion.dialogOpen(f.dialog,f.dialogPanel);
+ const opening=f.timelines.at(-1);assert.equal(opening.animations.length,2);
+ assert.equal(opening.animations[0].from['--dialog-backdrop-opacity'],0);assert.equal(opening.animations[0].vars['--dialog-backdrop-opacity'],.28);
+ assert.equal(opening.animations[1].from.y,8);assert.equal(opening.animations[1].from.scale,.985);assert.equal(opening.animations[1].vars.duration,.2);
+ f.motion.dialogClose(f.dialog,f.dialogPanel,()=>closed++);const staleClose=f.timelines.at(-1);
+ assert.equal(opening.animations.every(t=>t.killed),true);assert.equal(staleClose.animations[1].vars.y,5);assert.equal(staleClose.animations[1].vars.duration,.2);
+ f.motion.dialogOpen(f.dialog,f.dialogPanel);assert.equal(staleClose.animations.every(t=>t.killed),true);
+ staleClose.vars.onComplete();assert.equal(closed,0);
+ f.motion.dialogClose(f.dialog,f.dialogPanel,()=>closed++);f.timelines.at(-1).vars.onComplete();assert.equal(closed,1);
+});
+test('dialog reduced motion closes immediately without creating animation',()=>{
+ const f=fixture(true);let closed=false;f.motion.dialogOpen(f.dialog,f.dialogPanel);f.motion.dialogClose(f.dialog,f.dialogPanel,()=>closed=true);
+ assert.equal(closed,true);assert.equal(f.timelines.length,0);
 });
 test('Flip completion fired during context revert cannot recursively revert or focus stale Source',()=>{
  const f=fixture();let focused=0;f.motion.source(f.panel,true,()=>f.panel.dataset.collapsed='true',{onSettled:()=>focused++});

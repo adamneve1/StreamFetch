@@ -10,7 +10,7 @@ class Element {
   constructor(tag = 'div') {
     this.tagName = tag; this.children = []; this.dataset = {}; this.attributes = {};
     this.className = ''; this.value = ''; this.checked = false; this.hidden = false;
-    this.open = false; this.disabled = false; this.listeners = {}; this._text = '';
+    this.open = false; this.disabled = false; this.listeners = {}; this._text = ''; this.focusCount = 0;
     this.classList = { toggle: (name, enabled) => {
       const classes = new Set(this.className.split(' ').filter(Boolean));
       if (enabled) classes.add(name); else classes.delete(name);
@@ -29,7 +29,10 @@ class Element {
   setAttribute(name, value) { this.attributes[name] = String(value); }
   removeAttribute(name) { delete this.attributes[name]; if (name === 'value') this.value = ''; }
   addEventListener(name, callback) { this.listeners[name] = callback; }
-  focus() { this.focused = true; }
+  focus() { this.focused = true; this.focusCount++; }
+  showModal() { this.open = true; }
+  close() { this.open = false; }
+  setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
   scrollIntoView() { this.scrolled = true; }
   querySelectorAll(selector) {
     const [base, pseudo] = selector.split(':');
@@ -184,6 +187,52 @@ test('history keeps expanded errors and selection through refresh without interp
   assert.equal(table.querySelector('.recording-details').open, false);
 });
 
+test('one accessible native dialog replaces every user-facing prompt and confirm',()=>{
+  const root=path.resolve(__dirname,'../app/static');
+  const html=fs.readFileSync(path.join(root,'index.html'),'utf8');
+  assert.match(html,/<dialog id="app-dialog" class="stream-dialog" aria-labelledby="app-dialog-title" aria-describedby="app-dialog-message">/);
+  assert.match(html,/id="app-dialog-input"[^>]*autocomplete="off"/);
+  assert.match(html,/id="app-dialog-cancel"[^>]*type="button">Batal<\/button>/);
+  assert.match(html,/id="app-dialog-confirm"[^>]*type="submit">Simpan<\/button>/);
+  for(const file of ['app.js','motion.js','transcript.js']){
+    const source=fs.readFileSync(path.join(root,file),'utf8');
+    assert.doesNotMatch(source,/\b(?:window\.)?(?:prompt|confirm|alert)\s*\(/,file);
+  }
+});
+
+test('rename dialog selects the editable title, supports cancel, and preserves rename API validation',async()=>{
+  const f=fixture(),requests=[];f.context.requests=requests;
+  f.run("api=async(path,data)=>{requests.push({path,data});return {}};refresh=async()=>{}");
+  f.context.row={job_id:'rename-me',filename:'Dialog Batam.mp4',archive_status:'local'};
+  const trigger=f.get('delete-selected'),cancelled=f.run('renameJob(row,$("delete-selected"))');
+  assert.equal(f.get('app-dialog').open,true);assert.equal(f.get('app-dialog-title').textContent,'Ubah nama');
+  assert.equal(f.get('app-dialog-input').value,'Dialog Batam.mp4');assert.equal(f.get('app-dialog-input').focused,true);
+  assert.equal(f.get('app-dialog-input').selectionStart,0);assert.equal(f.get('app-dialog-input').selectionEnd,'Dialog Batam'.length);
+  f.get('app-dialog-cancel').onclick();await cancelled;
+  assert.equal(requests.length,0);assert.equal(f.get('app-dialog').open,false);assert.ok(trigger.focusCount>0);
+  const empty=f.run('renameJob(row,$("delete-selected"))');f.get('app-dialog-input').value='   ';
+  f.get('app-dialog-form').onsubmit({preventDefault(){}});await empty;assert.equal(requests.length,0);
+  const renamed=f.run('renameJob(row,$("delete-selected"))');f.get('app-dialog-input').value='  Dialog Baru.mp4  ';
+  f.get('app-dialog-form').onsubmit({preventDefault(){}});await renamed;
+  assert.equal(JSON.stringify(requests),JSON.stringify([{path:'recordings/rename-me/rename',data:{filename:'Dialog Baru.mp4'}}]));
+  assert.match(f.get('notice').textContent,/nama file sudah diganti/i);
+});
+
+test('delete dialog identifies the target, defaults focus to cancel, and confirms destructively',async()=>{
+  const f=fixture(),requests=[];f.context.requests=requests;
+  f.run("api=async(path,data)=>{requests.push({path,data});return {deleted:data.job_ids,skipped:[]}};refresh=async()=>{};historyRows=[{job_id:'delete-me',filename:'Siaran Batam.mp4'}]");
+  const trigger=f.get('delete-selected'),cancelled=f.run('deleteJobs(["delete-me"],$("delete-selected"))');
+  assert.equal(f.get('app-dialog-title').textContent,'Hapus rekaman?');
+  assert.match(f.get('app-dialog-message').textContent,/Siaran Batam\.mp4.*file lokalnya.*tidak dapat dibatalkan/);
+  assert.equal(f.get('app-dialog').dataset.tone,'destructive');assert.equal(f.get('app-dialog-confirm').textContent,'Hapus');
+  assert.equal(f.get('app-dialog-cancel').focused,true);
+  f.get('app-dialog').listeners.cancel({preventDefault(){this.defaultPrevented=true;}});await cancelled;assert.equal(requests.length,0);
+  const confirmed=f.run('deleteJobs(["delete-me"],$("delete-selected"))');
+  f.get('app-dialog-form').onsubmit({preventDefault(){}});await confirmed;
+  assert.equal(JSON.stringify(requests),JSON.stringify([{path:'recordings/delete',data:{job_ids:['delete-me']}}]));
+  assert.equal(f.get('notice').textContent,'1 item berhasil dihapus.');assert.equal(f.get('app-dialog').open,false);assert.ok(trigger.focusCount>0);
+});
+
 test('legacy presets are not invented and MP3 retains its own label and download action', () => {
   const f = fixture();
   f.context.rows = [
@@ -309,11 +358,15 @@ test('StreamFetch branding retains the existing mark and removes old user-facing
 });
 test('segmented sources preserve mode behavior and expose the selected state accessibly',()=>{
   const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
+  const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8');
+  assert.match(html,/id="source-tabs" class="tabs" role="group" aria-label="Source"><span id="source-tab-indicator" class="source-tab-indicator" aria-hidden="true"><\/span>/);
+  assert.match(css,/\.source-tab-indicator\{position:absolute;z-index:0/);assert.match(css,/\.tabs\[data-motion-ready=true\] \.tab\.selected\{background:transparent;box-shadow:none\}/);
   assert.ok(html.indexOf('id="tab-youtube"')<html.indexOf('id="tab-tiktok"'));
   assert.ok(html.indexOf('id="tab-tiktok"')<html.indexOf('id="tab-instagram"'));
   assert.ok(html.indexOf('id="tab-instagram"')<html.indexOf('id="tab-oryx"'));
   const f=fixture();
   for(const source of ['youtube','tiktok','instagram','oryx']){
+    assert.match(html,new RegExp('id="tab-'+source+'" class="tab(?: selected)?" type="button" aria-pressed="(?:true|false)" aria-controls="'+source+'-fields"'));
     f.run(`setMode('${source}')`);
     for(const tab of ['youtube','tiktok','instagram','oryx'])assert.equal(f.get('tab-'+tab).attributes['aria-pressed'],String(tab===source));
     assert.equal(f.get(source+'-fields').hidden,false);
@@ -512,10 +565,22 @@ function motionSpy(){
   contextChange(shell,title,change){calls.push(['contextChange']);change();},
   followLink(link,event,options){calls.push(['followLink',link,event,options]);},
   source(panel,collapsed,change,options){calls.push(['source',collapsed,options,panel.dataset.collapsed]);change();},
+  sourceMode(panel,change,options){calls.push(['sourceMode',panel,options]);change();},
+  sourcePress(tab){calls.push(['sourcePress',tab]);},
   island(panel,key,phase,change){calls.push(['island',key,phase]);change();},
   progress(panel,value){if(value===null)panel.removeAttribute('value');else panel.value=value;},
 };
 }
+test('platform tabs hand synchronous state changes and direction to scoped Source motion',()=>{
+ const motion=motionSpy(),f=fixture(motion);
+ f.run("setMode('youtube')");let call=motion.calls.findLast(item=>item[0]==='sourceMode');
+ assert.equal(f.run('mode'),'youtube');assert.equal(call[1],f.get('capture-panel'));assert.equal(call[2].outgoing,f.get('oryx-fields'));assert.equal(call[2].incoming,f.get('youtube-fields'));assert.equal(call[2].direction,-1);
+ assert.ok(call[2].shared.includes(f.get('capture-content')));assert.equal(f.get('youtube-fields').hidden,false);
+ f.run("setMode('tiktok');setMode('instagram');setMode('oryx')");assert.equal(f.run('mode'),'oryx');
+ assert.equal(motion.calls.filter(item=>item[0]==='sourceMode').at(-1)[2].direction,1);
+ const switches=motion.calls.filter(item=>item[0]==='sourceMode').length;f.run("setMode('oryx')");
+ assert.equal(motion.calls.filter(item=>item[0]==='sourceMode').length,switches);assert.deepEqual(motion.calls.at(-1),['sourcePress',f.get('tab-oryx')]);
+});
 test('navigation hooks preserve native transcript links and immediate Settings state',()=>{
  const motion=motionSpy(),f=fixture(motion);
  f.run("renderHistory([{job_id:'done',state:'ready',filename:'Dialog.mp4',transcript:{status:'completed'}}])");

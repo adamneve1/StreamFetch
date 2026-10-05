@@ -322,6 +322,7 @@ footer{padding:18px 2px 4px}
 .workspace-page .login-logo{display:block;overflow:visible}
 .workspace-page .login-ring{transform-box:fill-box;transform-origin:center}
 #login-wordmark{display:inline-block}
+.workspace-page #capture-panel .tabs{position:relative}.workspace-page #capture-panel .tab{position:relative;z-index:1}.workspace-page #capture-panel .source-tab-indicator{position:absolute;z-index:0;top:3px;bottom:3px;left:3px;width:0;border-radius:6px;background:#fff;box-shadow:0 1px 2px #00000012;pointer-events:none;visibility:hidden}.workspace-page #capture-panel .tabs[data-motion-ready=true] .source-tab-indicator{visibility:visible}.workspace-page #capture-panel .tabs[data-motion-ready=true] .tab.selected{background:transparent;box-shadow:none}
 .workspace-page .auth-exit-snapshot{position:fixed;z-index:100;pointer-events:none;margin:0}
 /* Telegram discovery management shares the quiet Settings list styling. */
 .watch-list{list-style:none;margin:0;padding:0;max-height:360px;overflow:auto}
@@ -335,6 +336,7 @@ footer{padding:18px 2px 4px}
 .history-mobile-meta{display:none}.history-selection{display:inline-grid;place-items:center;width:24px;height:24px;margin:0}.history-selection input{width:16px;height:16px;margin:0}
 .transcription-stop,.capture-stop{display:inline-grid;place-items:center;width:44px;min-width:44px;height:44px;padding:0;color:#a54f40;vertical-align:middle}.transcription-stop svg,.capture-stop svg{width:16px;height:16px}.transcription-stop:hover:not(:disabled),.capture-stop:hover:not(:disabled){background:#fff6f4;filter:none}
 .transcript-box .transcription-stop{margin-left:6px}.workspace-page #status-monitor[data-phase=cancelled]{min-width:0;min-height:0;max-width:min(100%,360px)}
+.dialog-open{overflow:hidden}.stream-dialog{--dialog-backdrop-opacity:.28;width:min(440px,calc(100vw - 32px));max-width:none;padding:0;border:0;border-radius:14px;background:transparent;color:var(--ink);overflow:visible}.stream-dialog::backdrop{background:rgba(24,41,39,var(--dialog-backdrop-opacity))}.stream-dialog-card{padding:24px;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:0 20px 60px #18292726}.stream-dialog-heading{display:flex;align-items:center;gap:10px;margin-bottom:12px}.stream-dialog-heading h2{font-size:18px;letter-spacing:-.35px}.stream-dialog-mark{display:grid;place-items:center;width:28px;height:28px;border-radius:8px;background:var(--deep);color:var(--green);font-size:9px;font-weight:800;letter-spacing:.5px}.stream-dialog-message{margin:0 0 18px;color:var(--muted);line-height:1.6}.stream-dialog label{margin-bottom:7px}.stream-dialog input{font-size:14px}.stream-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:22px}.stream-dialog-actions button{min-width:88px}.stream-dialog[data-tone=destructive] .stream-dialog-mark{background:#a54f40;color:#fff}.stream-dialog .dialog-danger{background:#a54f40;color:#fff}.stream-dialog .dialog-danger:hover:not(:disabled){background:#93463a;filter:none}
 /* Phones use a composition, not a scaled-down desktop table/grid. */
 @media(max-width:600px){
  .app-header{padding-top:calc(6px + env(safe-area-inset-top));padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right))}
@@ -361,4 +363,5 @@ footer{padding:18px 2px 4px}
  .workspace-page #status-monitor{grid-template-columns:auto minmax(0,1fr) auto;grid-template-areas:'state summary action' 'title title title' 'progress progress progress' 'detail detail details';gap:6px 8px;padding:10px 12px;min-height:0}
  .workspace-page #status-monitor #status-job-title{font-size:12px;line-height:1.5;max-width:none}.workspace-page #status-monitor .island-state{font-size:11px}.workspace-page #status-monitor .island-summary{font-size:10px;gap:6px}
  .workspace-page #status-monitor[data-phase=completed]{grid-template-columns:auto minmax(0,1fr);grid-template-areas:'state title';padding:12px;width:fit-content}
+ .stream-dialog-card{padding:20px}.stream-dialog-actions button{min-height:44px}
 }

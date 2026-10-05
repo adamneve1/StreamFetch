@@ -4,6 +4,37 @@ let csrf='', isAdmin=false, mode='oryx', sources=[], editing='', active=null, on
 let focusedJobId=null, submittedJob=null, focusPending=false;
 const expandedHistoryDetails=new Set();
 let watchRefreshId=0,watchLoading=false;
+let dialogRequest=null;
+function finishDialog(value){
+ const request=dialogRequest;if(!request)return;
+ dialogRequest=null;request.resolve(value);
+ const dialog=$('app-dialog'),panel=$('app-dialog-form');
+ const complete=()=>{
+  if(dialogRequest)return;
+  if(dialog.open)dialog.close();
+  document.body.classList.toggle('dialog-open',false);
+  if(request.trigger?.isConnected)request.trigger.focus({preventScroll:true});
+ };
+ if(motion?.dialogClose)motion.dialogClose(dialog,panel,complete);else complete();
+}
+function streamDialog({title,message='',value,confirmLabel='Lanjutkan',destructive=false,trigger}={}){
+ if(dialogRequest)finishDialog(dialogRequest.cancelValue);
+ const dialog=$('app-dialog'),input=$('app-dialog-input'),hasInput=value!==undefined;
+ $('app-dialog-title').textContent=title;$('app-dialog-message').textContent=message;
+ $('app-dialog-message').hidden=!message;$('app-dialog-label').hidden=!hasInput;input.hidden=!hasInput;
+ input.value=hasInput?value:'';$('app-dialog-confirm').textContent=confirmLabel;
+ $('app-dialog-confirm').className=destructive?'dialog-danger':'primary';
+ dialog.dataset.tone=destructive?'destructive':'default';
+ const promise=new Promise(resolve=>{dialogRequest={resolve,trigger,cancelValue:hasInput?null:false,hasInput};});
+ if(!dialog.open)dialog.showModal();document.body.classList.toggle('dialog-open',true);
+ motion?.dialogOpen?.(dialog,$('app-dialog-form'));
+ if(hasInput){input.focus({preventScroll:true});const dot=value.lastIndexOf('.');input.setSelectionRange(0,dot>0?dot:value.length);}
+ else $('app-dialog-cancel').focus({preventScroll:true});
+ return promise;
+}
+$('app-dialog-form').onsubmit=event=>{event.preventDefault();if(!dialogRequest)return;finishDialog(dialogRequest.hasInput?$('app-dialog-input').value:true);};
+$('app-dialog-cancel').onclick=()=>finishDialog(dialogRequest?.cancelValue);
+$('app-dialog').addEventListener('cancel',event=>{event.preventDefault();finishDialog(dialogRequest?.cancelValue);});
 function showSection(section){
  const admin=section==='admin';
  $('workspace').dataset.destination=admin?'settings':'workspace';
@@ -241,7 +272,18 @@ function updateCompressionHint(){
  $('compression-spec').textContent=specs[$('compression').value];$('compression-details').hidden=audio;
 }
 function updateFormatControls(){const audio=mode==='youtube'&&$('media-format').value==='mp3';$('format-field').hidden=mode!=='youtube';$('media-options').classList.toggle('has-format',mode==='youtube');$('media-format').disabled=mode!=='youtube';$('quality').disabled=mode==='oryx'||audio;$('compression').disabled=audio;if(mode==='oryx'||audio)$('quality').value='best';if(audio)$('compression').value='original';updateCompressionHint();$('note').placeholder=mode==='youtube'?'Kosongkan untuk memakai judul asli':'Contoh: Batam menyapa';$('filename-hint').textContent='Nama file: DDMMYYNN - '+(mode==='youtube'?'Judul video':'Judul')+'.'+(audio?'mp3':'mp4');$('record').textContent=mode==='youtube'?'Download':'Mulai';}
-function setMode(value){mode=value;for(const source of ['youtube','tiktok','instagram','oryx']){$('tab-'+source).setAttribute('aria-pressed',String(source===mode));$('tab-'+source).classList.toggle('selected',source===mode);$(source+'-fields').hidden=source!==mode;}if(mode!=='youtube')$('media-format').value='mp4';updateFormatControls();scheduleEstimate();controls();}
+const sourceModes=['youtube','tiktok','instagram','oryx'];
+function positionSourceTab(value=mode){const tabs=$('source-tabs'),tab=$('tab-'+value),indicator=$('source-tab-indicator');if(!tabs||!tab||!indicator||!Number.isFinite(tab.offsetLeft)||!tab.offsetWidth)return;indicator.style.left=tab.offsetLeft+'px';indicator.style.width=tab.offsetWidth+'px';tabs.dataset.motionReady='true';}
+function applyMode(value){mode=value;for(const source of sourceModes){$('tab-'+source).setAttribute('aria-pressed',String(source===mode));$('tab-'+source).classList.toggle('selected',source===mode);$(source+'-fields').hidden=source!==mode;}if(mode!=='youtube')$('media-format').value='mp4';updateFormatControls();scheduleEstimate();controls();positionSourceTab();}
+function setMode(value){
+ const previous=mode,nextTab=$('tab-'+value),tabs=$('source-tabs');
+ if(!tabs.dataset.motionReady)positionSourceTab(previous);
+ const change=()=>applyMode(value);
+ if(previous===value){change();motion?.sourcePress?.(nextTab);return;}
+ const shared=[$('capture-content'),tabs,$('source-tab-indicator'),...$('capture-content').querySelectorAll('.capture-options,.capture-options .field,.capture-footer')];
+ if(motion?.sourceMode)motion.sourceMode($('capture-panel'),change,{nextTab,indicator:$('source-tab-indicator'),outgoing:$(previous+'-fields'),incoming:$(value+'-fields'),shared,direction:Math.sign(sourceModes.indexOf(value)-sourceModes.indexOf(previous))});
+ else change();
+}
 function historyDetails(row){
  const details=document.createElement('details'),summary=document.createElement('summary'),body=document.createElement('div');
  details.className='recording-details';details.dataset.jobId=row.job_id;details.open=expandedHistoryDetails.has(row.job_id);
@@ -342,7 +384,7 @@ async function refresh(){
   closeActionMenu();renderHistory(rows);renderOperationalStatus();
  }catch(error){online=false;controls();notice(error.message);}
 }
-async function enter(auth){isAdmin=!!auth?.is_admin;motion?.loginSuccess?.($('workspace'));$('login').hidden=true;$('workspace').hidden=false;$('role-badge').textContent=isAdmin?'Admin':'Pengguna';$('admin-panel').hidden=!isAdmin;$('watches-panel').hidden=!isAdmin;$('delete-selected').hidden=!isAdmin;updateFormatControls();await loadSources();await refresh();motion?.returnReveal?.($('workspace'),$('page-title'),[$('capture-panel'),$('history-panel')]);}
+async function enter(auth){isAdmin=!!auth?.is_admin;motion?.loginSuccess?.($('workspace'));$('login').hidden=true;$('workspace').hidden=false;positionSourceTab();$('role-badge').textContent=isAdmin?'Admin':'Pengguna';$('admin-panel').hidden=!isAdmin;$('watches-panel').hidden=!isAdmin;$('delete-selected').hidden=!isAdmin;updateFormatControls();await loadSources();await refresh();motion?.returnReveal?.($('workspace'),$('page-title'),[$('capture-panel'),$('history-panel')]);}
 let loginBusy=false;
 function loginLoading(busy){loginBusy=busy;if(busy)motion?.loginInteract?.('submit');$('login-form').setAttribute('aria-busy',String(busy));$('login-submit').disabled=busy;$('login-submit').textContent=busy?'Masuk…':'Masuk';}
 $('login-form').onsubmit=async e=>{e.preventDefault();if(loginBusy)return;loginLoading(true);$('login-error').textContent='';$('password').removeAttribute('aria-invalid');try{const auth=await api('login',{password:$('password').value});csrf=auth.csrf;$('password').value='';await enter(auth);}catch(err){$('login-error').textContent=err.message;$('password').setAttribute('aria-invalid','true');motion?.loginError?.($('login-error'));$('password').focus({preventScroll:true});}finally{loginLoading(false);}};
@@ -378,17 +420,29 @@ function selectedJobs(){return [...$('results').querySelectorAll('.history-selec
 function selectedRows(){const ids=new Set(selectedJobs());return historyRows.filter(row=>ids.has(row.job_id));}
 function updateDeleteControls(){$('history-panel').dataset.selected=String(selectedJobs().length>0);$('delete-selected').hidden=!isAdmin;$('delete-selected').disabled=!isAdmin||!selectedJobs().length;$('download-selected').disabled=!selectedRows().some(row=>row.filename&&row.state==='ready');const boxes=[...$('results').querySelectorAll('.history-select')];$('select-all').checked=!!boxes.length&&boxes.every(box=>box.checked);$('select-all').indeterminate=boxes.some(box=>box.checked)&&!$('select-all').checked;}
 function downloadSelected(){const rows=selectedRows().filter(row=>row.filename&&row.state==='ready');for(const row of rows){const link=document.createElement('a');link.href='/api/files/'+encodeURIComponent(row.filename);link.download=row.filename;document.body.append(link);link.click();link.remove();}notice(rows.length+' file mulai diunduh. Kalau browser bertanya, izinkan download beberapa file, ya.');}
-async function deleteJobs(jobIds){if(!jobIds.length||!confirm('Yakin mau menghapus yang dipilih? File lokalnya juga ikut dihapus.'))return;pending=true;$('delete-selected').disabled=true;try{const result=await api('recordings/delete',{job_ids:jobIds});const failed=result.skipped?.length||0;notice(result.deleted.length+' item berhasil dihapus'+(failed?' · '+failed+' item belum bisa dihapus':'')+'.');await refresh();}catch(e){notice(e.message);}finally{pending=false;updateDeleteControls();}}
-async function renameJob(row){const value=prompt('Mau diberi nama apa?',row.filename||'');if(value===null||value.trim()===''||value.trim()===row.filename)return;try{await api('recordings/'+encodeURIComponent(row.job_id)+'/rename',{filename:value.trim()});notice(row.archive_status==='archived'?'Nama file lokal sudah diganti. Nama di arsip tetap sama.':'Sip, nama file sudah diganti.');await refresh();}catch(e){notice(e.message);}}
+async function deleteJobs(jobIds,trigger){
+ if(!jobIds.length)return;
+ const row=jobIds.length===1?historyRows.find(item=>item.job_id===jobIds[0]):null;
+ const subject=row?.filename?'“'+row.filename+'” dan file lokalnya':jobIds.length+' rekaman yang dipilih beserta file lokalnya';
+ const confirmed=await streamDialog({title:'Hapus rekaman?',message:subject+' akan dihapus. Tindakan ini tidak dapat dibatalkan.',confirmLabel:'Hapus',destructive:true,trigger});
+ if(!confirmed)return;
+ pending=true;$('delete-selected').disabled=true;
+ try{const result=await api('recordings/delete',{job_ids:jobIds});const failed=result.skipped?.length||0;notice(result.deleted.length+' item berhasil dihapus'+(failed?' · '+failed+' item belum bisa dihapus':'')+'.');await refresh();}catch(e){notice(e.message);}finally{pending=false;updateDeleteControls();}
+}
+async function renameJob(row,trigger){
+ const value=await streamDialog({title:'Ubah nama',value:row.filename||'',confirmLabel:'Simpan',trigger});
+ if(value===null||value.trim()===''||value.trim()===row.filename)return;
+ try{await api('recordings/'+encodeURIComponent(row.job_id)+'/rename',{filename:value.trim()});notice(row.archive_status==='archived'?'Nama file lokal sudah diganti. Nama di arsip tetap sama.':'Sip, nama file sudah diganti.');await refresh();}catch(e){notice(e.message);}
+}
 let openActionMenu=null;
 function closeActionMenu(focus=false){if(!openActionMenu)return;const {panel,trigger}=openActionMenu;panel.remove();trigger.setAttribute('aria-expanded','false');openActionMenu=null;if(focus)trigger.focus();}
-function menuButton(label,handler,danger=false){const button=document.createElement('button');button.type='button';button.textContent=label;button.setAttribute('role','menuitem');if(danger)button.className='danger';button.onclick=()=>{closeActionMenu();handler();};return button;}
-function toggleActionMenu(trigger,row){if(openActionMenu?.trigger===trigger){closeActionMenu();return;}closeActionMenu();const panel=document.createElement('div');panel.className='action-menu-panel';panel.setAttribute('role','menu');panel.setAttribute('aria-label','Aksi '+(row.filename||'riwayat'));if(row.filename&&row.state==='ready')panel.append(menuButton('Ubah nama',()=>renameJob(row)));if(isAdmin)panel.append(menuButton('Hapus',()=>deleteJobs([row.job_id]),true));document.body.append(panel);trigger.setAttribute('aria-expanded','true');openActionMenu={panel,trigger};const rect=trigger.getBoundingClientRect(),gap=6,margin=8,width=panel.offsetWidth,height=panel.offsetHeight;const left=Math.max(margin,Math.min(rect.right-width,window.innerWidth-width-margin));let top=rect.bottom+gap;if(top+height>window.innerHeight-margin)top=rect.top-height-gap;panel.style.left=left+'px';panel.style.top=Math.max(margin,top)+'px';panel.querySelector('button')?.focus();}
+function menuButton(label,handler,danger=false){const button=document.createElement('button');button.type='button';button.textContent=label;button.setAttribute('role','menuitem');if(danger)button.className='danger';button.onclick=()=>{const trigger=openActionMenu?.trigger||button;closeActionMenu();handler(trigger);};return button;}
+function toggleActionMenu(trigger,row){if(openActionMenu?.trigger===trigger){closeActionMenu();return;}closeActionMenu();const panel=document.createElement('div');panel.className='action-menu-panel';panel.setAttribute('role','menu');panel.setAttribute('aria-label','Aksi '+(row.filename||'riwayat'));if(row.filename&&row.state==='ready')panel.append(menuButton('Ubah nama',dialogTrigger=>renameJob(row,dialogTrigger)));if(isAdmin)panel.append(menuButton('Hapus',dialogTrigger=>deleteJobs([row.job_id],dialogTrigger),true));document.body.append(panel);trigger.setAttribute('aria-expanded','true');openActionMenu={panel,trigger};const rect=trigger.getBoundingClientRect(),gap=6,margin=8,width=panel.offsetWidth,height=panel.offsetHeight;const left=Math.max(margin,Math.min(rect.right-width,window.innerWidth-width-margin));let top=rect.bottom+gap;if(top+height>window.innerHeight-margin)top=rect.top-height-gap;panel.style.left=left+'px';panel.style.top=Math.max(margin,top)+'px';panel.querySelector('button')?.focus();}
 function downloadIcon(){const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-hidden','true');svg.setAttribute('fill','none');svg.setAttribute('stroke','currentColor');svg.setAttribute('stroke-width','1.8');svg.setAttribute('stroke-linecap','round');svg.setAttribute('stroke-linejoin','round');for(const d of ['M12 3v12','M7 10l5 5 5-5','M5 21h14']){const path=document.createElementNS(ns,'path');path.setAttribute('d',d);svg.append(path);}return svg;}
 document.addEventListener('pointerdown',event=>{if(openActionMenu&&!openActionMenu.panel.contains(event.target)&&event.target!==openActionMenu.trigger)closeActionMenu();});
 document.addEventListener('keydown',event=>{if(event.key==='Escape')closeActionMenu(true);});
-window.addEventListener('resize',()=>closeActionMenu());window.addEventListener('scroll',()=>closeActionMenu(),true);
+window.addEventListener('resize',()=>{closeActionMenu();positionSourceTab();});window.addEventListener('scroll',()=>closeActionMenu(),true);
 $('select-all').onchange=()=>{for(const box of $('results').querySelectorAll('.history-select'))box.checked=$('select-all').checked;updateDeleteControls();};
 $('download-selected').onclick=downloadSelected;
-$('delete-selected').onclick=()=>deleteJobs(selectedJobs());
+$('delete-selected').onclick=()=>deleteJobs(selectedJobs(),$('delete-selected'));
 $('password-form').onsubmit=async event=>{event.preventDefault();const feedback=$('password-feedback');const next=$('new-password').value;const confirmation=$('confirm-password').value;if(next!==confirmation){feedback.textContent='Password yang kamu ulangi belum sama.';return;}try{await api('admin/password',{target:$('password-target').value,current_password:$('current-admin-password').value,new_password:next});event.target.reset();feedback.textContent='Sip, password-nya sudah diganti.';}catch(error){feedback.textContent=error.message;}};

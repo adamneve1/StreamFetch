@@ -8,7 +8,7 @@
 <div id="notice" role="status" hidden></div>
 <section id="control-room" aria-label="StreamFetch">
 <section id="capture-panel" class="panel capture-panel"><button id="capture-another" class="secondary capture-another" type="button" aria-expanded="false" aria-controls="capture-content" hidden>＋ Capture another source</button><div id="capture-content"><div class="panel-heading"><h2>Source</h2></div>
-<div class="tabs" role="group" aria-label="Source"><button id="tab-youtube" class="tab" type="button" aria-pressed="false" aria-controls="youtube-fields">YouTube</button><button id="tab-tiktok" class="tab" type="button" aria-pressed="false" aria-controls="tiktok-fields">TikTok</button><button id="tab-instagram" class="tab" type="button" aria-pressed="false" aria-controls="instagram-fields">Instagram</button><button id="tab-oryx" class="tab selected" type="button" aria-pressed="true" aria-controls="oryx-fields">Oryx</button></div>
+<div id="source-tabs" class="tabs" role="group" aria-label="Source"><span id="source-tab-indicator" class="source-tab-indicator" aria-hidden="true"></span><button id="tab-youtube" class="tab" type="button" aria-pressed="false" aria-controls="youtube-fields">YouTube</button><button id="tab-tiktok" class="tab" type="button" aria-pressed="false" aria-controls="tiktok-fields">TikTok</button><button id="tab-instagram" class="tab" type="button" aria-pressed="false" aria-controls="instagram-fields">Instagram</button><button id="tab-oryx" class="tab selected" type="button" aria-pressed="true" aria-controls="oryx-fields">Oryx</button></div>
 <div id="oryx-fields" class="source-field"><label for="source">Sumber live</label><select id="source"><option value="">Belum ada sumber</option></select></div>
 <div id="tiktok-fields" class="source-field" hidden><label for="tiktok-url">Link TikTok</label><input id="tiktok-url" type="url" placeholder="https://www.tiktok.com/@username/video/…"><p class="hint">Video/post atau @username/live.</p></div>
 <div id="instagram-fields" class="source-field" hidden><label for="instagram-url">Link Instagram</label><input id="instagram-url" type="url" placeholder="https://www.instagram.com/reel/…/"><p class="hint">Reel atau post video. Tidak mendukung Stories, Live, atau foto.</p></div>
@@ -46,4 +46,14 @@
 <section class="panel admin-panel"><div class="panel-heading"><h2>System</h2></div><p class="muted small">Pengaturan sistem dikelola melalui .env dan Docker Compose. Perubahan memerlukan restart layanan terkait; tidak mengubah opsi capture yang sudah dikirim.</p><dl class="system-settings"><dt>Transkripsi</dt><dd>TRANSCRIPTION_PROVIDER, WHISPER_MODEL, WHISPER_CPU_THREADS</dd><dt>Cloudflare</dt><dd>CLOUDFLARE_TRANSCRIPTION_CONCURRENCY, CLOUDFLARE_TRANSCRIPTION_CHUNK_SECONDS, CLOUDFLARE_TRANSCRIPTION_TIMEOUT</dd><dt>Batas resource</dt><dd>TRANSCRIPTION_CPUS, TRANSCRIPTION_MEMORY_LIMIT</dd></dl><p class="hint">Quality, format, kompresi, dan tujuan penyimpanan tetap dipilih per capture di Source. Kredensial tidak ditampilkan di sini.</p></section>
 </section>
 <footer class="product-footer" aria-label="StreamFetch"><a class="product-wordmark" href="/"><img src="/static/favicon.svg" alt="" width="20" height="20"><strong>StreamFetch</strong></a><a class="product-github" href="https://github.com/adamneve1" target="_blank" rel="noopener noreferrer" aria-label="GitHub (opens in a new tab)">GitHub <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2h5v5M14 2 7 9M6 3H2v11h11v-4"/></svg></a></footer>
-</main></div></body></html>
+</main></div>
+<dialog id="app-dialog" class="stream-dialog" aria-labelledby="app-dialog-title" aria-describedby="app-dialog-message">
+ <form id="app-dialog-form" class="stream-dialog-card">
+  <div class="stream-dialog-heading"><span class="stream-dialog-mark" aria-hidden="true">SF</span><h2 id="app-dialog-title"></h2></div>
+  <p id="app-dialog-message" class="stream-dialog-message"></p>
+  <label id="app-dialog-label" for="app-dialog-input">Nama file</label>
+  <input id="app-dialog-input" type="text" autocomplete="off" spellcheck="false">
+  <div class="stream-dialog-actions"><button id="app-dialog-cancel" class="secondary" type="button">Batal</button><button id="app-dialog-confirm" class="primary" type="submit">Simpan</button></div>
+ </form>
+</dialog>
+</body></html>
