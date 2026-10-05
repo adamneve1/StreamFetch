@@ -440,9 +440,10 @@ test('login errors remain visible, retain input, support correction, and returni
 });
 test('wide Source form bounds input/options and connects the action row without overriding smaller layouts',()=>{
   const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8');
-  const wide=css.slice(css.indexOf('/* Wide Source cards')).split('/* Only admission')[0];
+  const wide=css.slice(css.indexOf('/* Source and History share')).split('/* Only admission')[0];
   assert.match(wide,/@media\(min-width:1100px\)/);
-  assert.match(wide,/#capture-panel\{max-width:1240px\}/);
+  assert.match(wide,/--workspace-panel-width:1240px/);
+  assert.match(wide,/#capture-panel,\.workspace-page #history-panel\{width:100%;max-width:var\(--workspace-panel-width\);padding:16px\}/);
   assert.match(wide,/#capture-content\{width:100%;max-width:none\}/);
   assert.match(wide,/\.source-field\{max-width:none\}/);
   assert.match(wide,/#oryx-fields\{max-width:380px\}/);
@@ -453,6 +454,20 @@ test('wide Source form bounds input/options and connects the action row without 
   const f=fixture();f.get('quality').value='720';f.get('storage-target').value='archive';f.get('note').value='Dialog';
   for(const source of ['youtube','tiktok','instagram']){f.run(`setMode('${source}')`);assert.equal(f.get('quality').value,'720');assert.equal(f.get('storage-target').value,'archive');assert.equal(f.get('note').value,'Dialog');}
   assert.equal(f.get('compression-details').hidden,false);
+});
+
+test('desktop Source and History share container, control geometry and spacing without changing mobile rules',()=>{
+ const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8');
+ const wide=css.slice(css.indexOf('/* Source and History share')).split('/* Only admission')[0];
+ assert.match(wide,/max-width:calc\(var\(--workspace-panel-width\) \+ 80px\)/);
+ assert.doesNotMatch(wide,/1480px/);
+ assert.match(wide,/#history-panel \.filters button\{height:34px;min-height:34px;border-radius:7px;padding:6px 10px;font-size:12px;font-weight:400;line-height:1\.4\}/);
+ assert.match(wide,/\.filters\{gap:14px var\(--workspace-gap\)\}/);
+ assert.match(wide,/\.capture-options\{[^}]*gap:14px var\(--workspace-gap\)/);
+ assert.match(css,/#status-monitor\[data-phase=transcribing\]\{width:100%;min-width:0;max-width:100%\}/);
+ const phone=css.slice(css.lastIndexOf('@media(max-width:600px)'));
+ assert.match(phone,/#capture-panel \.capture-options\{grid-template-columns:minmax\(0,1fr\)/);
+ assert.match(phone,/#history-panel\{padding:0;border:0;background:transparent/);
 });
 
 function motionSpy(){

@@ -244,14 +244,17 @@ footer{padding:18px 2px 4px}
 .workspace-page .login-card button{display:flex;align-items:center;justify-content:center;width:100%;min-height:44px;margin:12px 0 0;padding:10px 14px;border:1px solid #b7db79;border-radius:8px;font-size:13px;font-weight:600;line-height:1.4;color:var(--deep);background:var(--green)}.workspace-page .login-card button:hover:not(:disabled){background:#b8e461;filter:none}.workspace-page .login-card button:active:not(:disabled){background:#add957}.workspace-page .login-card button:focus-visible{outline:2px solid #629d45;outline-offset:3px}.workspace-page .login-card button:disabled{cursor:wait;opacity:.7}
 .workspace-page #login-error{font-size:12px;line-height:1.5;color:#a54f40;overflow-wrap:anywhere;margin:14px 0 0}.workspace-page #login-error:empty{display:none}
 @media(max-width:480px){.workspace-page .login-card{padding:24px}.workspace-page .login-brand{margin-bottom:24px}}
-/* Wide Source cards keep a short, connected reading path through the form. */
+/* Source and History share one bounded desktop workspace grid. */
 @media(min-width:1100px){
- .workspace-page #workspace[data-destination=workspace] main{max-width:1480px}
- .workspace-page #capture-panel{max-width:1240px}
+ .workspace-page #workspace[data-destination=workspace] main{--workspace-panel-width:1240px;--workspace-gap:20px;max-width:calc(var(--workspace-panel-width) + 80px)}
+ .workspace-page #capture-panel,.workspace-page #history-panel{width:100%;max-width:var(--workspace-panel-width);padding:16px}
+ .workspace-page #capture-panel input,.workspace-page #capture-panel select,.workspace-page #capture-panel .tab,.workspace-page #record,.workspace-page #history-panel .filters input,.workspace-page #history-panel .filters select,.workspace-page #history-panel .filters button{height:34px;min-height:34px;border-radius:7px;padding:6px 10px;font-size:12px;font-weight:400;line-height:1.4}
+ .workspace-page #capture-panel .tab.selected,.workspace-page #record{font-weight:500}
+ .workspace-page #history-panel .filters{gap:14px var(--workspace-gap)}
  .workspace-page #capture-content{width:100%;max-width:none}
  .workspace-page #capture-panel .source-field{max-width:none}.workspace-page #capture-panel #oryx-fields{max-width:380px}
- .workspace-page #capture-panel .capture-options{max-width:none;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 20px}
- .workspace-page #capture-panel #format-field{grid-column:1/-1;width:100%;max-width:calc((100% - 20px)/2)}
+ .workspace-page #capture-panel .capture-options{max-width:none;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px var(--workspace-gap)}
+ .workspace-page #capture-panel #format-field{grid-column:1/-1;width:100%;max-width:calc((100% - var(--workspace-gap))/2)}
  .workspace-page #capture-panel .capture-footer{max-width:none;justify-content:flex-start;margin-top:16px;padding-top:12px;border-top:1px solid var(--line)}
  .workspace-page #capture-panel #record{min-width:128px}
 }
