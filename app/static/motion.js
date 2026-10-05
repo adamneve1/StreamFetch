@@ -3,13 +3,20 @@
  if(typeof module==='object'&&module.exports)module.exports=factory;
  else root.StreamFetchMotion=factory(root);
 })(typeof window==='undefined'?{}:window, function(env) {
- const {gsap,Flip}=env, media=env.matchMedia?.('(prefers-reduced-motion: reduce)');
+ const {gsap,Flip,MorphSVGPlugin}=env, media=env.matchMedia?.('(prefers-reduced-motion: reduce)');
  const available=!!(gsap&&Flip), regions=new Map(), progressTweens=new Map();
  let islandKey='',dismissedKey='',dismissTimer;
- let authState='idle',pendingNavigation;
+ let authState='idle',pendingNavigation,loginMarkMotion;
  const tokens=Object.freeze({micro:.16,navigation:.32,reveal:.8,geometry:.38,source:.44,accepted:.48,sourceMobile:.36,acceptedMobile:.4,ease:'power3.out',settle:'power2.inOut'});
+ const loginShapes=Object.freeze({
+  normal:'M32 25a7 7 0 1 1 0 14 7 7 0 1 1 0-14Z',
+  entry:'M24 32C28 26 30 23 32 23C34 23 36 26 40 32C36 38 34 41 32 41C30 41 28 38 24 32Z',
+  loading:'M25 31V28a7 7 0 0 1 14 0v3h2v12H23V31h2Zm4 0h6v-3a3 3 0 0 0-6 0v3Z',
+  success:'M20 32l7 7 17-18 4 4-21 22-11-11 4-4Z',
+ });
  const phone=()=>!!env.matchMedia?.('(max-width:600px)').matches;
- if(available)gsap.registerPlugin(Flip);
+ if(gsap&&Flip)gsap.registerPlugin(Flip);
+ if(gsap&&MorphSVGPlugin)gsap.registerPlugin(MorphSVGPlugin);
  const reduced=()=>!!media?.matches;
  function choreograph(name,element,animate,ghost){
   settle(name);
@@ -18,18 +25,54 @@
   const cleanup=()=>{if(regions.get(name)===region)settle(name);};
   try{region.context=gsap.context(()=>animate(cleanup));}catch{cleanup();}
  }
+ function loginParts(root){
+  let ring=root?.querySelector?.('.login-ring')||env.document.getElementById('login-ring');
+  const glyph=root?.querySelector?.('.login-glyph')||env.document.getElementById('login-glyph');
+  if(ring&&MorphSVGPlugin?.convertToPath&&ring.tagName?.toLowerCase()!=='path'){
+   try{ring=MorphSVGPlugin.convertToPath(ring)[0]||ring;}catch{}
+  }
+  return {glyph,ring};
+ }
+ function applyLoginMark(state,root){
+  const {glyph,ring}=loginParts(root);if(!glyph||!ring)return;
+  glyph.setAttribute('d',loginShapes[state]||loginShapes.normal);
+  for(const property of ['transform','stroke-dasharray','stroke-dashoffset']){
+   ring.style?.removeProperty?.(property);
+   if(ring.style&&!ring.style.removeProperty)delete ring.style[property];
+  }
+  ring.removeAttribute('transform');ring.removeAttribute('stroke-dasharray');ring.removeAttribute('stroke-dashoffset');
+  if(state==='loading'){ring.setAttribute('stroke-dasharray','52 61');ring.setAttribute('stroke-dashoffset','-12');}
+ }
+ function stopLoginMark(finalState){
+  loginMarkMotion?.timeline?.kill();loginMarkMotion=null;
+  if(finalState)applyLoginMark(finalState);
+ }
+ function animateLoginMark(state){
+  const parts=loginParts();stopLoginMark();
+  if(!parts.glyph||!parts.ring)return;
+  if(!gsap||!MorphSVGPlugin||reduced()){applyLoginMark(state);return;}
+  const motion={state};loginMarkMotion=motion;
+  const finish=()=>{if(loginMarkMotion!==motion)return;loginMarkMotion=null;applyLoginMark(state);};
+  const timeline=motion.timeline=gsap.timeline({onComplete:state==='loading'?undefined:finish,defaults:{ease:tokens.ease}})
+   .to(parts.glyph,{morphSVG:{shape:loginShapes[state],map:'complexity'},duration:tokens.navigation},0);
+  if(state==='loading')timeline
+   .to(parts.ring,{strokeDasharray:'52 61',strokeDashoffset:-12,rotation:90,transformOrigin:'50% 50%',duration:tokens.navigation},0)
+   .to(parts.ring,{strokeDashoffset:-125,rotation:450,duration:tokens.reveal,ease:'none',repeat:-1},tokens.navigation);
+  else timeline.to(parts.ring,{strokeDasharray:'114 0',strokeDashoffset:0,rotation:0,transformOrigin:'50% 50%',duration:tokens.navigation},0);
+ }
  function loginReveal(shell){
+  stopLoginMark('normal');
   choreograph('login',shell,done=>{
    const form=env.document.getElementById('login-form');
-   const mark=env.document.getElementById('login-mark'),ring=env.document.getElementById('login-ring');
+   const mark=env.document.getElementById('login-mark'),{ring,glyph}=loginParts();
    const wordmark=env.document.getElementById('login-wordmark'),surface=env.document.getElementById('login-surface');
    const fields=[form.querySelector('label'),env.document.getElementById('password'),env.document.getElementById('login-submit')].filter(Boolean);
    const credit=env.document.getElementById('login-credit');
    // The surface alone is masked: inputs remain in flow, focusable, and usable.
    gsap.timeline({onComplete:done,defaults:{ease:tokens.ease}})
     .fromTo(mark,{opacity:0,scale:.88,x:10,y:6},{opacity:1,scale:1,x:0,y:0,duration:tokens.navigation},0)
-    .fromTo(ring,{scale:1,svgOrigin:'32 32'},{scale:1.075,svgOrigin:'32 32',duration:tokens.micro},tokens.micro/2)
-    .to(ring,{scale:1,duration:tokens.micro,ease:tokens.settle},tokens.micro*1.5)
+    .fromTo(ring,{strokeDasharray:'0 114',strokeDashoffset:28,rotation:-18,transformOrigin:'50% 50%'},{strokeDasharray:'114 0',strokeDashoffset:0,rotation:0,duration:tokens.geometry},0)
+    .fromTo(glyph,{morphSVG:{shape:loginShapes.entry,map:'complexity'}},{morphSVG:{shape:loginShapes.normal,map:'complexity'},duration:tokens.navigation},0)
     .fromTo(wordmark,{clipPath:'inset(0 100% 0 0)',x:-3},{clipPath:'inset(0 0% 0 0)',x:0,duration:tokens.navigation},tokens.micro)
     .fromTo(surface,{clipPath:'inset(0 0 72% 0 round 12px)',opacity:.5},{clipPath:'inset(0 0 0% 0 round 12px)',opacity:1,duration:tokens.geometry},tokens.micro*1.5)
     .fromTo(fields,{opacity:0,y:4},{opacity:1,y:0,duration:tokens.micro,stagger:tokens.micro/4},tokens.reveal/2)
@@ -38,7 +81,7 @@
  }
  function loginError(element){
   // A fast response during entrance should settle the form before showing feedback.
-  authState='error';settle('login');settle('login-input');
+  authState='error';settle('login');settle('login-input');animateLoginMark('normal');
   choreograph('login-error',element,done=>gsap.timeline({onComplete:done})
    .fromTo(env.document.getElementById('password'),{borderColor:'#dfe5df'},{borderColor:'#b65e55',duration:tokens.micro},0)
    .fromTo(element,{opacity:0,y:3},{opacity:1,y:0,duration:tokens.micro,ease:tokens.ease},0));
@@ -46,16 +89,21 @@
  function loginInteract(state='focus'){
   if(state===authState||authState==='submit'&&state!=='idle'||authState==='error'&&state==='focus')return;
   authState=state;settle('login');settle('login-error');
+  if(state==='submit')animateLoginMark('loading');
   const surface=env.document.getElementById('login-surface'),ring=env.document.getElementById('login-ring');
-  choreograph('login-input',surface,done=>gsap.timeline({onComplete:done,defaults:{ease:tokens.ease}})
-   .fromTo(surface,{borderColor:'#e1e4df'},{borderColor:state==='idle'?'#e1e4df':'#a8bc8e',duration:tokens.micro},0)
-   .fromTo(ring,{scale:1,svgOrigin:'32 32'},{scale:state==='typing'?1.025:1.01,svgOrigin:'32 32',duration:tokens.micro},0)
-   .to(ring,{scale:1,duration:tokens.micro,ease:tokens.settle},tokens.micro));
+  choreograph('login-input',surface,done=>{
+   const timeline=gsap.timeline({onComplete:done,defaults:{ease:tokens.ease}})
+    .fromTo(surface,{borderColor:'#e1e4df'},{borderColor:state==='idle'?'#e1e4df':'#a8bc8e',duration:tokens.micro},0);
+   if(state!=='submit')timeline
+    .fromTo(ring,{scale:1,svgOrigin:'32 32'},{scale:state==='typing'?1.025:1.01,svgOrigin:'32 32',duration:tokens.micro},0)
+    .to(ring,{scale:1,duration:tokens.micro,ease:tokens.settle},tokens.micro);
+   return timeline;
+  });
  }
  function loginSuccess(workspace){
   authState='idle';settle('login');settle('login-error');settle('login-input');
-  if(!gsap||reduced())return;
   const form=env.document.getElementById('login-form');
+  if(!gsap||reduced()){stopLoginMark();applyLoginMark('success');return;}
   // A non-interactive visual exit keeps navigation immediate. Never retain passwords.
   const ghost=env.document.getElementById('login')?.hidden?null:form.cloneNode(true);
   if(ghost){
@@ -65,15 +113,22 @@
    ghost.className+=' auth-exit-snapshot';Object.assign(ghost.style,{left:rect.left+'px',top:rect.top+'px',width:rect.width+'px'});
    env.document.body.append(ghost);
   }
+  stopLoginMark('normal');
   // enter() does not await this timeline, and the snapshot cannot intercept input.
   choreograph('login-success',workspace,done=>{
+   const ghostGlyph=ghost?.querySelector('.login-glyph'),ghostRing=ghost?.querySelector('.login-ring');
    const timeline=gsap.timeline({onComplete:done,defaults:{ease:tokens.ease}})
     .fromTo(workspace,{opacity:.96},{opacity:1,duration:tokens.micro*1.25},0);
-   if(ghost)timeline
-    .to([...ghost.querySelectorAll('label,input,button')],{opacity:0,y:-3,duration:tokens.micro},0)
-    .to(ghost.querySelector('.login-surface'),{clipPath:'inset(0 0 72% 0 round 12px)',opacity:0,duration:tokens.micro},0)
-    .to(ghost.querySelector('.login-brand span'),{clipPath:'inset(0 100% 0 0)',duration:tokens.micro},tokens.micro/4)
-    .to(ghost.querySelector('.login-logo'),{opacity:0,scale:.96,duration:tokens.micro/2},tokens.micro*.75);
+   if(ghost){
+    if(ghostGlyph&&MorphSVGPlugin)timeline.to(ghostGlyph,{morphSVG:{shape:loginShapes.success,map:'complexity'},duration:tokens.navigation},0);
+    else if(ghostGlyph)ghostGlyph.setAttribute('d',loginShapes.success);
+    if(ghostRing)timeline.to(ghostRing,{strokeDasharray:'114 0',strokeDashoffset:0,rotation:0,duration:tokens.navigation},0);
+    timeline
+     .to([...ghost.querySelectorAll('label,input,button')],{opacity:0,y:-3,duration:tokens.micro},tokens.navigation*.75)
+     .to(ghost.querySelector('.login-surface'),{clipPath:'inset(0 0 72% 0 round 12px)',opacity:0,duration:tokens.micro},tokens.navigation*.75)
+     .to(ghost.querySelector('.login-brand span'),{clipPath:'inset(0 100% 0 0)',duration:tokens.micro},tokens.navigation*.75)
+     .to(ghost.querySelector('.login-logo'),{opacity:0,scale:.96,duration:tokens.micro},tokens.navigation*.75);
+   }
   },ghost);
  }
  function settle(name,complete=false){
@@ -233,7 +288,7 @@
   state.tween=gsap.to(element,{value,duration:tokens.micro,ease:tokens.ease,overwrite:true});
  }
  function reset(){
-  authState='idle';pendingNavigation?.cancel();pendingNavigation=null;
+  authState='idle';pendingNavigation?.cancel();pendingNavigation=null;stopLoginMark('normal');
   env.clearTimeout(dismissTimer);islandKey='';dismissedKey='';
   for(const name of [...regions.keys()])settle(name);
   for(const [element,state] of progressTweens){state.tween?.kill();element.value=state.value;}
@@ -241,6 +296,7 @@
  }
  media?.addEventListener?.('change',()=>{
   if(!reduced())return;
+  if(loginMarkMotion)applyLoginMark(loginMarkMotion.state);stopLoginMark();
   pendingNavigation?.finish();
   for(const name of [...regions.keys()])settle(name,true);
   for(const [element,state] of progressTweens){state.tween?.kill();element.value=state.value;}

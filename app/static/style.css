@@ -320,6 +320,7 @@ footer{padding:18px 2px 4px}
 .workspace-page .login-card{position:relative;isolation:isolate;background:transparent;border-color:transparent;box-shadow:none}
 .login-surface{position:absolute;inset:-1px;z-index:-1;pointer-events:none;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 2px 12px #18292706}
 .workspace-page .login-logo{display:block;overflow:visible}
+.workspace-page .login-ring{transform-box:fill-box;transform-origin:center}
 #login-wordmark{display:inline-block}
 .workspace-page .auth-exit-snapshot{position:fixed;z-index:100;pointer-events:none;margin:0}
 /* Telegram discovery management shares the quiet Settings list styling. */

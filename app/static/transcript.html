@@ -9,10 +9,14 @@
   <link rel="stylesheet" href="/static/transcript.css">
   <script src="/static/vendor/gsap.min.js" defer></script>
   <script src="/static/vendor/Flip.min.js" defer></script>
+  <script src="/static/vendor/ScrollTrigger.min.js" defer></script>
+  <script src="/static/vendor/ScrollSmoother.min.js" defer></script>
   <script src="/static/motion.js" defer></script>
   <script src="/static/transcript.js" defer></script>
 </head>
 <body class="reader-page">
+<div id="reader-smooth-wrapper">
+<div id="reader-smooth-content">
   <header class="app-header reader-header"><a class="brand" href="/"><img class="brand-logo" src="/static/favicon.svg" alt=""><strong>StreamFetch</strong></a><a class="reader-back" href="/">← Workspace</a></header>
   <main class="reader-shell">
     <p class="eyebrow">TRANSCRIPT READER</p>
@@ -54,5 +58,7 @@
       </section>
     </div>
   </main>
+</div>
+</div>
 </body>
 </html>

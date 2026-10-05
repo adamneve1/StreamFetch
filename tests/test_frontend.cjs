@@ -781,10 +781,12 @@ test('transcription started from History is observed by the same island without 
 test('workspace and reader load the same local GSAP motion system',()=>{
  const root=path.resolve(__dirname,'..'),html=fs.readFileSync(path.join(root,'app/static/index.html'),'utf8');
  const scripts=[...html.matchAll(/<script defer src="([^"]+)"/g)].map(match=>match[1]);
- assert.deepEqual(scripts,['/static/vendor/gsap.min.js','/static/vendor/Flip.min.js','/static/motion.js','/static/app.js']);
+ assert.deepEqual(scripts,['/static/vendor/gsap.min.js','/static/vendor/Flip.min.js','/static/vendor/MorphSVGPlugin.min.js','/static/motion.js','/static/app.js']);
  assert.equal(fs.readFileSync(path.join(root,'package.json'),'utf8').includes('"gsap": "3.15.0"'),true);
  const reader=fs.readFileSync(path.join(root,'app/static/transcript.html'),'utf8');
- assert.deepEqual([...reader.matchAll(/<script src="([^"]+)" defer/g)].map(match=>match[1]),['/static/vendor/gsap.min.js','/static/vendor/Flip.min.js','/static/motion.js','/static/transcript.js']);
+ assert.deepEqual([...reader.matchAll(/<script src="([^"]+)" defer/g)].map(match=>match[1]),['/static/vendor/gsap.min.js','/static/vendor/Flip.min.js','/static/vendor/ScrollTrigger.min.js','/static/vendor/ScrollSmoother.min.js','/static/motion.js','/static/transcript.js']);
+ const build=fs.readFileSync(path.join(root,'scripts/build-frontend.mjs'),'utf8');
+ assert.match(build,/ScrollTrigger\.min\.js/);assert.match(build,/ScrollSmoother\.min\.js/);
 });
 test('rapid repeated submission cannot duplicate admission and a changed source retains its action label',async()=>{
  const motion=motionSpy(),f=fixture(motion);let reject,count=0;
