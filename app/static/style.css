@@ -327,3 +327,33 @@ footer{padding:18px 2px 4px}
 .watch-cancel{min-height:44px;font-size:11px;padding:6px 10px;color:#a54f40}.watch-cancel:hover:not(:disabled){background:#fff6f4;filter:none}
 #watch-feedback:empty{display:none}#watches-panel>.panel-heading{margin-bottom:8px}#watches-panel>p{margin-bottom:12px}
 @media(max-width:680px){.watch-row{grid-template-columns:minmax(0,1fr) auto}.watch-copy{grid-column:1/-1}.watch-row .badge{justify-self:start}#watch-refresh{min-height:44px}.watch-copy small{overflow-wrap:anywhere}}
+.history-mobile-meta{display:none}.history-selection{display:inline-grid;place-items:center;width:24px;height:24px;margin:0}.history-selection input{width:16px;height:16px;margin:0}
+.transcription-stop,.capture-stop{display:inline-grid;place-items:center;width:44px;min-width:44px;height:44px;padding:0;color:#a54f40;vertical-align:middle}.transcription-stop svg,.capture-stop svg{width:16px;height:16px}.transcription-stop:hover:not(:disabled),.capture-stop:hover:not(:disabled){background:#fff6f4;filter:none}
+.transcript-box .transcription-stop{margin-left:6px}.workspace-page #status-monitor[data-phase=cancelled]{min-width:0;min-height:0;max-width:min(100%,360px)}
+/* Phones use a composition, not a scaled-down desktop table/grid. */
+@media(max-width:600px){
+ .app-header{padding-top:calc(6px + env(safe-area-inset-top));padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right))}
+ .workspace-page main{padding:16px}.workspace-page #workspace[data-destination=workspace] .page-heading{display:none}
+ .workspace-page #capture-panel{padding:16px}.workspace-page #capture-panel[data-collapsed=true]{padding:6px 10px}
+ .workspace-page #capture-panel .capture-options{grid-template-columns:minmax(0,1fr);gap:14px}
+ .workspace-page #capture-panel .field,.workspace-page #capture-panel #format-field{width:100%;max-width:none;grid-column:auto}
+ .workspace-page #capture-panel input,.workspace-page #capture-panel select{height:44px;min-height:44px;width:100%;font-size:16px}
+ .workspace-page #capture-panel label{font-size:11px}.workspace-page #capture-panel .hint{white-space:normal;overflow-wrap:anywhere;margin-bottom:0;line-height:1.5}
+ .workspace-page #capture-panel .capture-footer,.workspace-page #capture-panel .record-actions{display:block;width:100%}.workspace-page #record{width:100%;min-height:44px}
+ .workspace-page #capture-panel .tab{padding-inline:2px;font-size:11px;min-height:44px}
+ .workspace-page #history-panel{padding:0;border:0;background:transparent;overflow:visible}.workspace-page .history-heading{gap:8px;margin-bottom:12px}
+ .workspace-page .history-toolbar{display:none}.workspace-page #history-panel[data-selected=true] .history-toolbar{display:flex;flex-basis:100%;margin:0}.workspace-page .history-toolbar button{font-size:11px;padding:6px 10px}
+ .workspace-page .filters{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.workspace-page .filters input[type=search]{grid-column:1/-1}.workspace-page .filters input[type=date]{grid-column:1}.workspace-page .filters>*{width:100%;min-width:0;min-height:44px}
+ .workspace-page .table-scroll{overflow:visible}.workspace-page .history-table{display:block;min-width:0;width:100%;max-width:100%}.workspace-page .history-table colgroup,.workspace-page .history-table thead{display:none}
+ .workspace-page .history-table tbody{display:grid;gap:10px;width:100%}.workspace-page .history-table tr{display:block;position:relative;width:100%;min-width:0;padding:12px;border:1px solid var(--line);border-radius:10px;background:#fff}
+ .workspace-page .history-table td{display:block;width:100%;padding:0;border:0;white-space:normal}.workspace-page .history-table td:nth-child(n+3):nth-child(-n+5){display:none}
+ .workspace-page .history-table .select-cell{position:absolute;top:2px;right:2px;width:44px;height:44px}.workspace-page .history-selection{width:44px;height:44px}.workspace-page .history-select{min-height:0;width:18px;height:18px}
+ .workspace-page .recording-heading{padding-right:34px;gap:6px;flex-wrap:nowrap;min-height:24px}.workspace-page .recording-heading .status-badge{flex:none}.workspace-page .recording-heading strong{font-size:12px;font-weight:500}
+ .workspace-page .history-table td:nth-child(2)>small,.workspace-page .history-table td:nth-child(2)>.preset-badge{display:none}
+ .workspace-page .history-mobile-meta{display:block;font-size:11px;line-height:1.5;color:var(--muted);margin:4px 0;overflow-wrap:anywhere}
+ .workspace-page .history-table .row-actions{display:flex;gap:6px;align-items:center;justify-content:flex-end;margin-top:6px}.workspace-page .row-actions a,.workspace-page .row-actions button{min-width:44px;min-height:44px;margin:0}
+ .workspace-page .transcript-box .transcript-cta{display:inline-flex;align-items:center;min-height:44px;padding:7px 10px!important}.workspace-page .transcript-box small{white-space:normal!important}
+ .workspace-page #status-monitor{grid-template-columns:auto minmax(0,1fr) auto;grid-template-areas:'state summary action' 'title title title' 'progress progress progress' 'detail detail details';gap:6px 8px;padding:10px 12px;min-height:0}
+ .workspace-page #status-monitor #status-job-title{font-size:12px;line-height:1.5;max-width:none}.workspace-page #status-monitor .island-state{font-size:11px}.workspace-page #status-monitor .island-summary{font-size:10px;gap:6px}
+ .workspace-page #status-monitor[data-phase=completed]{grid-template-columns:auto minmax(0,1fr);grid-template-areas:'state title';padding:12px;width:fit-content}
+}

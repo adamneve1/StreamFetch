@@ -465,6 +465,54 @@ function motionSpy(){
   progress(panel,value){if(value===null)panel.removeAttribute('value');else panel.value=value;},
  };
 }
+test('phone Source and History use deliberate single-column/cards while tablet rules stay intact',()=>{
+ const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8');
+ const phone=css.split('/* Phones use a composition')[1];
+ assert.match(phone,/@media\(max-width:600px\)/);
+ assert.match(phone,/\.capture-options\{grid-template-columns:minmax\(0,1fr\);gap:14px\}/);
+ assert.match(phone,/#record\{width:100%;min-height:44px\}/);
+ assert.match(phone,/\.history-table thead\{display:none\}/);
+ assert.match(phone,/\.history-table tr\{display:block;position:relative/);
+ assert.match(phone,/\.history-table tbody\{display:grid;gap:10px/);
+ assert.match(phone,/grid-template-areas:'state summary action' 'title title title' 'progress progress progress'/);
+ assert.match(phone,/env\(safe-area-inset-top\)/);
+ assert.match(phone,/data-destination=workspace\] \.page-heading\{display:none\}/);
+});
+test('phone History metadata and bulk selection reuse existing recording and selection state',()=>{
+ const f=fixture();f.context.rows=[{job_id:'phone',state:'ready',filename:'Long filename.mp4',source:'instagram',size:1000000,requested_at:100}];
+ f.run('historyRows=rows;renderHistory(rows)');
+ assert.match(f.get('results').querySelector('.history-mobile-meta').textContent,/Instagram.*1.0 MB/);
+ assert.equal(f.get('history-panel').dataset.selected,'false');
+ const checkbox=f.get('results').querySelector('.history-select');checkbox.checked=true;checkbox.onchange();
+ assert.equal(f.get('history-panel').dataset.selected,'true');assert.equal(f.get('download-selected').disabled,false);
+});
+test('History and island Stop request real transcription cancellation and expose restart after cancelled',async()=>{
+ const f=fixture();f.context.row={job_id:'transcribe',state:'ready',filename:'recording.mp4',source:'youtube',transcript:{status:'transcribing',progress_percent:42}};
+ f.run('lastObservedJob=row;renderHistory([row]);controls()');
+ assert.equal(f.get('stop').hidden,false);assert.equal(f.get('stop').disabled,false);assert.equal(f.get('stop').attributes['aria-label'],'Hentikan transkripsi');
+ const calls=[];f.context.fetch=async(url,options)=>{calls.push([url,options.method]);return {ok:true,status:200,headers:{get:()=> 'application/json'},json:async()=>({status:'cancelled'})};};
+ await f.get('stop').onclick();assert.deepEqual(calls,[['/api/recordings/transcribe/transcript/cancel','POST']]);
+ assert.equal(f.get('state').textContent,'Dibatalkan');assert.equal(f.get('status-monitor').dataset.phase,'cancelled');
+ f.run("row.transcript.status='cancelled';renderHistory([row])");
+ assert.equal(f.get('results').querySelector('.transcript-cta').disabled,false);assert.equal(f.get('results').querySelector('.transcription-stop'),null);
+ f.run("row.transcript.status='queued';renderHistory([row])");const button=f.get('results').querySelector('.transcription-stop');assert.ok(button.querySelector('svg'));
+ await button.onclick();assert.equal(calls.at(-1)[0],'/api/recordings/transcribe/transcript/cancel');
+});
+test('History capture Stop retains the existing immediate capture request',()=>{
+ const f=fixture();f.run("active={job_id:'capture',state:'recording',source:'youtube',is_live:true};renderHistory([active]);controls()");
+ const calls=[];f.context.fetch=(url,options)=>{calls.push([url,JSON.parse(options.body)]);return new Promise(()=>{});};
+ f.get('results').querySelector('.capture-stop').onclick();assert.deepEqual(calls,[['/api/stop',{job_id:'capture'}]]);
+});
+test('phone reader stacks safe metadata labels and compacts prose, timestamps and toolbar without changing seek',()=>{
+ const css=fs.readFileSync(path.resolve(__dirname,'../app/static/transcript.css'),'utf8').split('@media(max-width:600px)')[1];
+ assert.match(css,/grid-template-columns:94px minmax\(0,1fr\)/);
+ assert.match(css,/overflow-wrap:normal;word-break:normal/);
+ assert.match(css,/\.reader-prose\{font-size:14px;line-height:1.65/);
+ assert.match(css,/grid-template-columns:42px minmax\(0,1fr\)/);
+ assert.match(css,/\.reader-tools \.reader-search\{grid-column:1\/-1/);
+ assert.match(css,/\.reader-tools \.reader-toolbar\{display:contents\}/);
+ assert.match(fs.readFileSync(path.resolve(__dirname,'../app/static/transcript.css'),'utf8'),/@media\(max-width:600px\) and \(max-height:500px\)\{\.reader-tools\{position:static\}\}/);
+});
 test('Settings Watches show shared schedules, compact WIB metadata, terminal states and last item safely',()=>{
  const f=fixture();
  f.context.watches=[{id:'active',channel:'https://www.youtube.com/@rribatam',name:'<script>RRI Batam</script>',start:Date.UTC(2026,9,5,1)/1000,end:Date.UTC(2026,9,5,3)/1000,mode:'every',auto_transcribe:true,status:'active',last_capture:{title:'Dialog Batam',state:'ready'}},

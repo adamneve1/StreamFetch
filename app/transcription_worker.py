@@ -2,7 +2,9 @@
 import base64
 import json
 import logging
+import multiprocessing
 import os
+import signal
 import socket
 import subprocess
 import tempfile
@@ -693,7 +695,9 @@ def transcribe_cloudflare(media_path, cancel_event=None, progress=None):
 
 
 def set_state(job_id, status, **fields):
-    storage.save_transcription_state(job_id, status, **fields)
+    saved = storage.save_transcription_state(job_id, status, **fields)
+    if not saved:
+        raise TranscriptionCancelled('Transkripsi dibatalkan atau diganti.')
     try:
         r.set(f"transcription:state:{job_id}", status)
     except redis.exceptions.RedisError:
@@ -710,6 +714,9 @@ def transcribe(job, model=None, cancel_event=None):
     provider = None
     active_model = MODEL_NAME
     last_progress = 0.0
+    current = storage.recording(job_id) or {}
+    request_id = job.get('request_id', (current.get('transcript') or {}).get('request_id'))
+    guard = dict(guarded=True, request_id=request_id)
 
     def progress(percent, eta):
         nonlocal last_progress
@@ -718,15 +725,16 @@ def transcribe(job, model=None, cancel_event=None):
         # Local inference can emit thousands of segments; avoid a write per word.
         now = time.monotonic()
         if percent == 0 or now - last_progress >= 1 or percent >= 95:
-            storage.save_transcription_state(
+            if not storage.save_transcription_state(
                 job_id, 'transcribing', progress_percent=round(percent, 1),
-                eta_seconds=round(eta) if eta is not None else None)
+                eta_seconds=round(eta) if eta is not None else None, **guard):
+                raise TranscriptionCancelled('Transkripsi dibatalkan atau diganti.')
             last_progress = now
     try:
         provider = configured_provider()
         active_model = configured_model(provider)
         set_state(job_id, "transcribing", started_at=started,
-                  model=active_model, error="", progress_percent=0, eta_seconds=None)
+                  model=active_model, error="", progress_percent=0, eta_seconds=None, **guard)
         row = storage.recording(job_id)
         if not row or row.get("state") != "ready":
             raise TranscriptionError("Rekaman belum siap untuk ditranskripsi.")
@@ -760,9 +768,12 @@ def transcribe(job, model=None, cancel_event=None):
             (media_path.with_suffix(".srt"), srt),
             (media_path.with_suffix(".vtt"), vtt),
         ]
-        for path, content in outputs:
-            atomic_write(path, content, job_id)
-            published.append(path)
+        def publish():
+            for path, content in outputs:
+                if cancel_event and cancel_event.is_set():
+                    raise TranscriptionCancelled('Transkripsi dibatalkan.')
+                atomic_write(path, content, job_id)
+                published.append(path)
         elapsed = round(time.time() - started, 1)
         set_state(
             job_id, "completed", completed_at=time.time(),
@@ -770,7 +781,7 @@ def transcribe(job, model=None, cancel_event=None):
             language_probability=info.language_probability,
             model=active_model, txt_filename=outputs[0][0].name,
             srt_filename=outputs[1][0].name, vtt_filename=outputs[2][0].name,
-            error="", progress_percent=100, eta_seconds=0,
+            error="", progress_percent=100, eta_seconds=0, publish=publish, **guard,
         )
         log.info("transcription job=%s provider=%s total_seconds=%.3f model=%s",
                  job_id, "local" if active_model == MODEL_NAME else "cloudflare",
@@ -780,6 +791,8 @@ def transcribe(job, model=None, cancel_event=None):
             path.unlink(missing_ok=True)
         log.info("transcription job=%s state=cancelled total_seconds=%.3f",
                  job_id, time.time() - started)
+        if cancel_event and cancel_event.is_set():
+            storage.save_transcription_state(job_id, 'cancelled', **guard)
         raise
     except Exception as exc:
         for path in published:
@@ -789,18 +802,91 @@ def transcribe(job, model=None, cancel_event=None):
                    else "Transkripsi gagal diproses. Periksa log worker dan coba lagi.")
         set_state(job_id, "failed", completed_at=time.time(),
                   processing_seconds=round(time.time() - started, 1),
-                  model=active_model, error=message)
+                  model=active_model, error=message, **guard)
         log.exception(
             "transcription job=%s provider=%s failed error_type=%s total_seconds=%.3f",
             job_id, provider or "unknown", type(exc).__name__,
             time.time() - started)
     finally:
         current = storage.recording(job_id)
-        if current and (current.get("transcript") or {}).get("status") == "failed":
+        if current and (current.get("transcript") or {}).get("status") in {"failed", "cancelled"}:
             try:
                 r.delete(f"transcription:guard:{job_id}")
             except redis.exceptions.RedisError:
                 log.warning("transcription job=%s redis_guard_cleanup=failed", job_id)
+
+
+class PersistentCancellation:
+    def __init__(self, job):
+        self.job = job
+
+    def is_set(self):
+        transcript = (storage.recording(self.job['job_id']) or {}).get('transcript') or {}
+        return transcript.get('status') == 'cancelled' or transcript.get('request_id') != self.job.get('request_id')
+
+
+def _child_transcribe(job):
+    # One process group includes native Whisper, FFmpeg and Cloudflare threads.
+    os.setsid()
+    if job.get('_temp_dir'):
+        tempfile.tempdir = job['_temp_dir']
+    def stop_execution(signum, frame):
+        raise TranscriptionCancelled('Transkripsi dibatalkan.')
+    signal.signal(signal.SIGTERM, stop_execution)
+    try:
+        transcribe(job, LocalModelCache(), PersistentCancellation(job))
+    except TranscriptionCancelled:
+        pass
+
+
+def signal_execution(process, signum):
+    """Stop the execution group, including any FFmpeg descendants."""
+    try:
+        if os.getpgid(process.pid) == process.pid:
+            os.killpg(process.pid, signum)
+        elif signum == signal.SIGTERM:
+            process.terminate()
+        else:
+            process.kill()
+    except ProcessLookupError:
+        pass
+
+
+def run_cancellable_job(job, process_factory=None):
+    """Keep queue ownership in the parent; stop even blocked native execution."""
+    job = dict(job)
+    transcript = (storage.recording(job['job_id']) or {}).get('transcript') or {}
+    job.setdefault('request_id', transcript.get('request_id'))
+    cancelled = PersistentCancellation(job)
+    if cancelled.is_set():
+        return
+    working_dir = tempfile.TemporaryDirectory(prefix='streamfetch-transcription-job-')
+    job['_temp_dir'] = working_dir.name
+    process_factory = process_factory or multiprocessing.get_context('spawn').Process
+    process = process_factory(target=_child_transcribe, args=(job,))
+    try:
+        process.start()
+        while process.is_alive():
+            if cancelled.is_set():
+                signal_execution(process, signal.SIGTERM)
+                process.join(3)
+                if process.is_alive():
+                    signal_execution(process, signal.SIGKILL)
+                break
+            process.join(.2)
+        process.join()
+        if process.exitcode and not cancelled.is_set():
+            storage.save_transcription_state(job['job_id'], 'failed', guarded=True,
+                request_id=job['request_id'], error='Transcription worker execution interrupted.')
+    finally:
+        if process.is_alive():
+            signal_execution(process, signal.SIGTERM)
+            process.join(3)
+            if process.is_alive():
+                signal_execution(process, signal.SIGKILL)
+                process.join()
+        process.close()
+        working_dir.cleanup()
 
 
 def queued_job_ids():
@@ -827,7 +913,8 @@ def recover_jobs():
         except (json.JSONDecodeError, KeyError, TypeError):
             continue
         if status in {"queued", "transcribing"}:
-            r.rpush(QUEUE, payload)
+            transcript = row.get('transcript') or {}
+            r.rpush(QUEUE, json.dumps({'job_id': job_id, 'request_id': transcript.get('request_id')}))
     existing = queued_job_ids()
     for row in storage.recordings():
         transcript = row.get("transcript") or {}
@@ -835,10 +922,11 @@ def recover_jobs():
             continue
         job_id = row["job_id"]
         if job_id not in existing:
-            r.rpush(QUEUE, json.dumps({"job_id": job_id}))
+            r.rpush(QUEUE, json.dumps({"job_id": job_id, 'request_id': transcript.get('request_id')}))
             existing.add(job_id)
-        storage.save_transcription_state(
-            job_id, "queued", model=configured_model())
+        if not storage.save_transcription_state(
+            job_id, "queued", model=configured_model(), guarded=True, request_id=transcript.get('request_id')):
+            continue
         r.set(f"transcription:guard:{job_id}", "queued")
         r.set(f"transcription:state:{job_id}", "queued")
 
@@ -860,7 +948,6 @@ def main():
         raise SystemExit(2) from exc
     log.info("Transcription worker running provider=%s model=%s local_fallback=%s",
              provider, startup_model, provider == "auto")
-    model = LocalModelCache()
     last_recovery = 0.0
     stop = threading.Event()
     monitor = threading.Thread(target=heartbeat, args=(stop,), daemon=True)
@@ -881,7 +968,7 @@ def main():
                 if status not in {"queued", "transcribing"}:
                     r.eval(ACK_JOB, 1, PROCESSING, payload)
                     continue
-                transcribe(job, model)
+                run_cancellable_job(job)
                 r.eval(ACK_JOB, 1, PROCESSING, payload)
             except redis.exceptions.RedisError:
                 log.error("Redis unavailable")

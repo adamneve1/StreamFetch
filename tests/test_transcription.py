@@ -1,4 +1,6 @@
 import os
+import multiprocessing
+import signal
 import re
 import socket
 import tempfile
@@ -12,9 +14,25 @@ from unittest.mock import patch
 
 import fakeredis
 
-from app import storage, transcription_worker, web
+from app import storage, transcription_worker, transcription_queue, web
 
 REAL_ENSURE_AUDIO_STREAM = transcription_worker.ensure_audio_stream
+
+
+def blocked_native_execution(job):
+    os.setsid()
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    storage.save_transcription_state(job['job_id'], 'transcribing', guarded=True, request_id=job['request_id'])
+    (Path(job['_temp_dir']) / 'audio.flac').write_bytes(b'temporary audio')
+    (Path(os.environ['DATA_DIR']) / 'execution-started').write_text(job['_temp_dir'])
+    time.sleep(20)
+
+
+def supervised_local_execution(job):
+    transcription_worker.r = fakeredis.FakeRedis(decode_responses=True)
+    with patch.dict(os.environ, TRANSCRIPTION_PROVIDER='local'), patch.object(transcription_worker, 'ensure_audio_stream'), patch.object(transcription_worker, 'load_model', return_value=FakeModel()):
+        transcription_worker._child_transcribe(job)
+
 
 
 class FakeModel:
@@ -36,6 +54,76 @@ class FakeModel:
 
 
 class TranscriptionWorkerTests(unittest.TestCase):
+    def test_durable_cancellation_prevents_outputs_and_stale_worker_after_retry(self):
+        transcription_queue.enqueue(self.redis, 'video-job')
+        old = storage.recording('video-job')['transcript']['request_id']
+        event = transcription_worker.PersistentCancellation(dict(job_id='video-job', request_id=old))
+        class CancellingModel(FakeModel):
+            def transcribe(model, path, **kwargs):
+                transcription_queue.cancel(self.redis, 'video-job')
+                return super().transcribe(path, **kwargs)
+        with self.assertRaises(transcription_worker.TranscriptionCancelled):
+            transcription_worker.transcribe(dict(job_id='video-job', request_id=old), CancellingModel(), event)
+        self.assertEqual(storage.recording('video-job')['transcript']['status'], 'cancelled')
+        transcription_worker.run_cancellable_job(dict(job_id='video-job', request_id=old),
+            lambda **kwargs: self.fail('Cancelled queue executed'))
+        self.assertTrue(self.path.exists())
+        self.assertFalse(self.path.with_suffix('.txt').exists())
+        transcription_queue.enqueue(self.redis, 'video-job')
+        new = storage.recording('video-job')['transcript']['request_id']
+        with self.assertRaises(transcription_worker.TranscriptionCancelled):
+            transcription_worker.transcribe(dict(job_id='video-job', request_id=old), FakeModel(), event)
+        transcription_worker.transcribe(dict(job_id='video-job', request_id=new), FakeModel(),
+            transcription_worker.PersistentCancellation(dict(job_id='video-job', request_id=new)))
+        self.assertEqual(storage.recording('video-job')['transcript']['status'], 'completed')
+        self.assertTrue(self.path.with_suffix('.txt').exists())
+        self.assertEqual(transcription_queue.cancel(self.redis, 'video-job'), ('completed', False))
+        self.assertTrue(self.path.with_suffix('.txt').exists())
+
+    def test_cancellation_at_publication_boundary_never_publishes_partial_sidecars(self):
+        transcription_queue.enqueue(self.redis, 'video-job')
+        job = dict(job_id='video-job', request_id=storage.recording('video-job')['transcript']['request_id'])
+        original = transcription_worker.render_outputs
+        def cancel_before_publish(segments):
+            transcription_queue.cancel(self.redis, 'video-job')
+            return original(segments)
+        with patch.object(transcription_worker, 'render_outputs', side_effect=cancel_before_publish), self.assertRaises(transcription_worker.TranscriptionCancelled):
+            transcription_worker.transcribe(job, FakeModel(), transcription_worker.PersistentCancellation(job))
+        for extension in ['.txt', '.srt', '.vtt']:
+            self.assertFalse(self.path.with_suffix(extension).exists())
+        self.assertEqual(storage.recording('video-job')['transcript']['status'], 'cancelled')
+
+    def test_supervisor_stops_real_blocked_execution_and_preserves_media(self):
+        transcription_queue.enqueue(self.redis, 'video-job')
+        marker = Path(self.tmp.name) / 'execution-started'
+        def cancel_when_started():
+            deadline = time.monotonic() + 5
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(.02)
+            if marker.exists():
+                transcription_queue.cancel(self.redis, 'video-job')
+        cancellation = threading.Thread(target=cancel_when_started)
+        cancellation.start()
+        started = time.monotonic()
+        def process_factory(target, args):
+            return multiprocessing.get_context('spawn').Process(target=blocked_native_execution, args=args)
+        transcription_worker.run_cancellable_job(dict(job_id='video-job'), process_factory)
+        cancellation.join()
+        self.assertLess(time.monotonic() - started, 6)
+        self.assertTrue(marker.exists())
+        self.assertFalse(Path(marker.read_text()).exists())
+        self.assertEqual(storage.recording('video-job')['transcript']['status'], 'cancelled')
+        self.assertEqual(self.path.read_bytes(), b'media fixture')
+
+    def test_supervised_child_completes_normal_local_execution_with_shared_storage(self):
+        transcription_queue.enqueue(self.redis, 'video-job')
+        def process_factory(target, args):
+            return multiprocessing.get_context('spawn').Process(target=supervised_local_execution, args=args)
+        transcription_worker.run_cancellable_job(dict(job_id='video-job'), process_factory)
+        self.assertEqual(storage.recording('video-job')['transcript']['status'], 'completed')
+        self.assertTrue(self.path.with_suffix('.srt').exists())
+        self.assertEqual(self.path.read_bytes(), b'media fixture')
+
     def test_local_progress_estimates_from_segment_positions(self):
         updates = []
         segments = [SimpleNamespace(start=0, end=50, text='Speech'),

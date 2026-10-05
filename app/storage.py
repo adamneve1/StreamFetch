@@ -163,7 +163,7 @@ def save_archive_state(job_id, archive_status, **fields):
                    (time.time(), json.dumps(data), job_id))
 
 
-def save_transcription_state(job_id, status, replace=False, **fields):
+def save_transcription_state(job_id, status, replace=False, guarded=False, request_id=None, publish=None, **fields):
     """Persist transcript metadata without changing the recording state."""
     allowed = {
         'requested_at', 'started_at', 'completed_at', 'processing_seconds',
@@ -171,10 +171,17 @@ def save_transcription_state(job_id, status, replace=False, **fields):
         'srt_filename', 'vtt_filename', 'error', 'progress_percent', 'eta_seconds',
     }
     with connection() as db:
+        if guarded:
+            db.execute('BEGIN IMMEDIATE')
         row = db.execute('SELECT data FROM recordings WHERE id=?', (job_id,)).fetchone()
         if not row:
             return False
         data = json.loads(row['data'])
+        current = data.get('transcript') or {}
+        if guarded and (current.get('request_id') != request_id or current.get('status') in {'cancelled', 'completed'}):
+            return False
+        if publish:
+            publish()
         transcript = {} if replace else dict(data.get('transcript') or {})
         transcript.update(status=status, updated_at=time.time())
         transcript.update({key: value for key, value in fields.items() if key in allowed})

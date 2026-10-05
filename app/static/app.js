@@ -106,7 +106,10 @@ function sourceDisplayName(job){return job.source==='tiktok'&&(!job.source_name|
 function statusTone(state){return ({starting:'working',recording:'working',waiting:'waiting',stopping:'waiting',finalizing:'working',ready:'success',failed:'error',interrupted:'error'})[state]||'idle';}
 function presetName(row){if(row.output_format==='mp3'||row.filename?.toLowerCase().endsWith('.mp3'))return 'Audio MP3';return ({original:'Original',balanced:'Seimbang',compact:'Hemat'})[row.compression]||'Preset tidak tercatat';}
 function duration(n=0){return [Math.floor(n/3600),Math.floor(n/60)%60,Math.floor(n)%60].map(x=>String(x).padStart(2,'0')).join(':');}
-function transcriptStateName(state){return ({queued:'Queued',transcribing:'Transcribing',completed:'Completed',failed:'Failed'})[state]||state;}
+function transcriptStateName(state){return ({queued:'Queued',transcribing:'Transcribing',completed:'Completed',failed:'Failed',cancelled:'Cancelled'})[state]||state;}
+function stopIcon(){const icon=document.createElementNS('http://www.w3.org/2000/svg','svg');icon.setAttribute('viewBox','0 0 24 24');icon.setAttribute('aria-hidden','true');icon.setAttribute('fill','currentColor');const rect=document.createElementNS('http://www.w3.org/2000/svg','rect');for(const [key,value] of Object.entries({x:6,y:6,width:12,height:12,rx:1}))rect.setAttribute(key,value);icon.append(rect);return icon;}
+function transcriptionStop(row){const button=document.createElement('button');button.type='button';button.className='transcription-stop quiet';button.title='Hentikan transkripsi';button.setAttribute('aria-label','Hentikan transkripsi');button.append(stopIcon());button.onclick=()=>cancelTranscript(row,button);return button;}
+async function cancelTranscript(row,button){if(button?.disabled)return;if(button)button.disabled=true;try{await api('recordings/'+encodeURIComponent(row.job_id)+'/transcript/cancel',row.transcript?.request_id?{request_id:row.transcript.request_id}:{});lastObservedJob={...row,transcript:{...row.transcript,status:'cancelled'}};renderOperationalStatus();notice('Transkripsi dibatalkan. Media asli tetap tersimpan.');await refresh();}catch(error){notice(error.message);}finally{if(button)button.disabled=false;}}
 function languageName(code){if(!code)return '—';try{const name=new Intl.DisplayNames(['id'],{type:'language'}).of(code);return name.charAt(0).toUpperCase()+name.slice(1);}catch{return code;}}
 function processingTime(seconds){if(seconds===undefined||seconds===null)return '—';const value=Math.round(seconds);return value>=60?Math.floor(value/60)+'m '+value%60+'s':value+'s';}
 async function generateTranscript(row){try{await api('recordings/'+encodeURIComponent(row.job_id)+'/transcript',{});lastObservedJob={...row,transcript:{...row.transcript,status:'queued'}};renderOperationalStatus();notice('Transkrip masuk antrean. Statusnya akan diperbarui otomatis.');await refresh();}catch(error){notice(error.message);}}
@@ -124,9 +127,10 @@ function renderTranscript(row,cell){
   const link=transcriptLink(row,'view','View Transcript');link.className='transcript-cta';box.append(link);
  }else{
   const button=document.createElement('button');button.type='button';button.className='transcript-cta transcript-generate';
-  button.textContent=({queued:'Waiting',transcribing:'Generating',failed:'Retry Transcript'})[state]||'Generate Transcript';
+  button.textContent=({queued:'Waiting',transcribing:'Generating',failed:'Retry Transcript',cancelled:'Generate Transcript'})[state]||'Generate Transcript';
   button.disabled=['queued','transcribing'].includes(state);button.onclick=()=>generateTranscript(row);box.append(button);
   if(state==='queued'||state==='transcribing'){
+   box.append(transcriptionStop(row));
    const progress=document.createElement('progress');progress.max=100;progress.className='transcript-progress';progress.setAttribute('aria-label','Transcript progress');
    if(state==='transcribing'&&Number.isFinite(transcript.progress_percent))progress.value=Math.min(100,Math.max(0,transcript.progress_percent));
    const hint=document.createElement('small');hint.setAttribute('role','status');
@@ -134,6 +138,7 @@ function renderTranscript(row,cell){
    box.append(progress,hint);
   }
   if(state==='failed'&&transcript.error){const error=document.createElement('small');error.className='transcript-status failed';error.textContent=transcript.error;box.append(error);}
+  if(state==='cancelled'){const hint=document.createElement('small');hint.textContent='Cancelled';box.append(hint);}
  }
  cell.append(box);
 }
@@ -171,25 +176,28 @@ function islandTime(job,transcript){
 function renderOperationalStatus(){
  const job=active||submittedJob||lastObservedJob,connection=$('connection');
  const transcript=job?.state==='ready'?job.transcript:null;
- const phase=transcript?.status==='transcribing'?'transcribing':transcript?.status==='queued'?'queued':transcript?.status==='failed'?'failed':
+ const phase=transcript?.status==='transcribing'?'transcribing':transcript?.status==='queued'?'queued':transcript?.status==='cancelled'?'cancelled':transcript?.status==='failed'?'failed':
   ({starting:'starting',waiting:'queued',recording:'downloading',stopping:'processing',finalizing:'processing',ready:'completed',failed:'failed',interrupted:'failed'})[job?.state]||(queued?'queued':'hidden');
- const canStop=!!active&&!['finalizing','stopping','ready','failed'].includes(active.state);
+ const canCancelTranscript=['queued','transcribing'].includes(transcript?.status);
+ const canStop=canCancelTranscript||!!active&&!['finalizing','stopping','ready','failed'].includes(active.state);
  const canMark=!!active&&active.state==='recording'&&active.is_live!==false;
  const change=()=>{
  $('status-monitor').hidden=phase==='hidden';
  $('status-monitor').dataset.phase=phase;
  $('stop').hidden=!canStop;$('marker-controls').hidden=!canMark;
+ $('stop').disabled=pending||!canStop;
+ $('stop').title=canCancelTranscript?'Hentikan transkripsi':'Hentikan proses';$('stop').setAttribute('aria-label',$('stop').title);
  connection.textContent=online?'Online':'Offline';connection.classList.toggle('online',online);connection.classList.toggle('offline',!online);
  connection.title=online?'Sistem siap':'Sistem offline';connection.setAttribute('aria-label',connection.title);
  $('status-monitor').dataset.tone=statusTone(job?.state);
- $('state').textContent=({starting:'Menyiapkan',queued:'Menunggu',downloading:isFiniteDownload(job)?'Mengunduh':'Merekam',processing:'Memproses',transcribing:'Transkripsi',completed:'Selesai',failed:'Gagal'})[phase]||'';
+ $('state').textContent=({starting:'Menyiapkan',queued:'Menunggu',downloading:isFiniteDownload(job)?'Mengunduh':'Merekam',processing:'Memproses',transcribing:'Transkripsi',completed:'Selesai',failed:'Gagal',cancelled:'Dibatalkan'})[phase]||'';
  $('state').dataset.tone=statusTone(job?.state);
  $('status-job-title').textContent=job?islandTitle(job):queued+' capture';
  $('status-job-title').title=$('status-job-title').textContent;
  $('status-detail').hidden=phase!=='failed';
  $('status-detail').textContent=phase==='failed'?(transcript?.status==='failed'?'Transkripsi gagal.':'Capture gagal.') : '';
  $('island-details').hidden=phase!=='failed'||!(job?.detail||transcript?.error||historyRows.some(row=>row.job_id===job?.job_id));
- $('duration').textContent=['completed','failed'].includes(phase)?'':islandTime(job,transcript);
+ $('duration').textContent=['completed','failed','cancelled'].includes(phase)?'':islandTime(job,transcript);
  $('progress-value').textContent='';
  if(!transcript||!['queued','transcribing'].includes(transcript.status))renderDownloadProgress(job);
  if(transcript&&['queued','transcribing'].includes(transcript.status)){
@@ -259,7 +267,7 @@ function renderHistory(rows){
   if(row.job_id===focusedJobId){tr.className='focused-job';tr.tabIndex=-1;tr.setAttribute('aria-label','Capture terbaru');}
   selectCell.className='select-cell';checkbox.type='checkbox';checkbox.className='history-select';checkbox.value=row.job_id;
   checkbox.checked=selection.has(row.job_id);checkbox.setAttribute('aria-label','Pilih '+(row.filename||'riwayat'));checkbox.onchange=updateDeleteControls;
-  selectCell.append(checkbox);tr.append(selectCell);
+  const selectionLabel=document.createElement('label');selectionLabel.className='history-selection';selectionLabel.append(checkbox);selectCell.append(selectionLabel);tr.append(selectCell);
   const file=document.createElement('td'),strong=document.createElement('strong'),small=document.createElement('small');
   strong.textContent=row.filename||'Rekaman '+row.job_id.slice(0,8);strong.title=strong.textContent;
   small.textContent=row.note||(['failed','interrupted'].includes(row.state)?'Proses belum selesai. Buka detail untuk melihat penyebab.':row.detail||'Tanpa catatan');
@@ -268,6 +276,7 @@ function renderHistory(rows){
   const heading=document.createElement('div'),badge=document.createElement('span');heading.className='recording-heading';
   badge.className='status-badge';badge.dataset.tone=statusTone(row.state);badge.textContent=jobStateName(row);
   heading.append(badge,strong);file.append(heading,small,preset,historyDetails(row));
+  const meta=document.createElement('div');meta.className='history-mobile-meta';meta.textContent=[sourceDisplayName(row),row.requested_at?new Date(row.requested_at*1000).toLocaleString('id-ID'):null,row.size?bytes(row.size):null].filter(Boolean).join(' · ');file.append(meta);
   if(row.markers?.length){
    const details=document.createElement('details'),summary=document.createElement('summary'),list=document.createElement('ul');summary.textContent=row.markers.length+' tanda momen';
    for(const marker of row.markers){const li=document.createElement('li');li.textContent=duration(marker.seconds)+' — '+marker.note;list.append(li);}
@@ -278,6 +287,7 @@ function renderHistory(rows){
    const cell=document.createElement('td');cell.textContent=value;tr.append(cell);
   }
   const action=document.createElement('td');action.className='row-actions';
+  if(active?.job_id===row.job_id&&!['finalizing','stopping','ready','failed'].includes(row.state)){const stop=document.createElement('button');stop.type='button';stop.className='capture-stop quiet';stop.title='Hentikan proses';stop.setAttribute('aria-label',stop.title);stop.append(stopIcon());stop.onclick=()=>$('stop').onclick();action.append(stop);}
   if(row.filename&&row.state==='ready'){
    const download=document.createElement('a');download.href='/api/files/'+encodeURIComponent(row.filename);download.className='download-direct';
    download.setAttribute('aria-label','Unduh '+row.filename);download.title='Unduh';download.append(downloadIcon());action.append(download);
@@ -350,8 +360,8 @@ $('check').onclick=async()=>{$('check').disabled=true;$('source-feedback').textC
 $('record').onclick=async()=>{if(pending)return;pending=true;$('record').textContent='Mengirim…';$('capture-panel').setAttribute('aria-busy','true');controls();notice('');const payload={source:mode,source_id:$('source').value,url:mode==='oryx'?'':sourceInput().value,note:$('note').value,storage:$('storage-target').value,quality:$('quality').value,format:$('media-format').value,compression:$('compression').value};try{const result=await api('record',payload);captureSubmitted(result,payload);await refresh();}catch(e){collapseSource(false);notice(e.message);}finally{pending=false;$('record').textContent=mode==='youtube'?'Download':'Mulai';$('capture-panel').setAttribute('aria-busy','false');controls();}};
 $('storage-target').onchange=updateStorageHint;
 $('quality').onchange=scheduleEstimate;$('compression').onchange=()=>{updateCompressionHint();scheduleEstimate();};$('media-format').onchange=()=>{updateFormatControls();scheduleEstimate();};$('youtube-url').oninput=scheduleEstimate;$('tiktok-url').oninput=scheduleEstimate;$('instagram-url').oninput=scheduleEstimate;
-$('stop').onclick=async()=>{pending=true;controls();try{await api('stop',{job_id:active.job_id});notice('Lagi dihentikan. File-nya akan muncul sebentar lagi.');await refresh();}catch(e){notice(e.message);}finally{pending=false;controls();}};
-setInterval(()=>{const job=active||submittedJob||lastObservedJob;if(!['completed','failed'].includes($('status-monitor').dataset.phase))$('duration').textContent=islandTime(job,job?.transcript);},1000);
+$('stop').onclick=async()=>{const job=active||submittedJob||lastObservedJob;if(job?.state==='ready'&&['queued','transcribing'].includes(job.transcript?.status))return cancelTranscript(job,$('stop'));pending=true;controls();try{await api('stop',{job_id:active.job_id});notice('Lagi dihentikan. File-nya akan muncul sebentar lagi.');await refresh();}catch(e){notice(e.message);}finally{pending=false;controls();}};
+setInterval(()=>{const job=active||submittedJob||lastObservedJob;if(!['completed','failed','cancelled'].includes($('status-monitor').dataset.phase))$('duration').textContent=islandTime(job,job?.transcript);},1000);
 motion?.loginReveal?.($('login'));
 (async()=>{try{const auth=await api('session');csrf=auth.csrf;await enter(auth);}catch{showLogin();}})();
 async function poll(){await refresh();if(isAdmin&&!$('admin-view').hidden)loadWatches();setTimeout(poll,2500);}setTimeout(poll,2500);
@@ -364,7 +374,7 @@ $('filter-reset').onclick=()=>{for(const id of ['filter-q','filter-source','filt
 
 function selectedJobs(){return [...$('results').querySelectorAll('.history-select:checked')].map(input=>input.value);}
 function selectedRows(){const ids=new Set(selectedJobs());return historyRows.filter(row=>ids.has(row.job_id));}
-function updateDeleteControls(){$('delete-selected').hidden=!isAdmin;$('delete-selected').disabled=!isAdmin||!selectedJobs().length;$('download-selected').disabled=!selectedRows().some(row=>row.filename&&row.state==='ready');const boxes=[...$('results').querySelectorAll('.history-select')];$('select-all').checked=!!boxes.length&&boxes.every(box=>box.checked);$('select-all').indeterminate=boxes.some(box=>box.checked)&&!$('select-all').checked;}
+function updateDeleteControls(){$('history-panel').dataset.selected=String(selectedJobs().length>0);$('delete-selected').hidden=!isAdmin;$('delete-selected').disabled=!isAdmin||!selectedJobs().length;$('download-selected').disabled=!selectedRows().some(row=>row.filename&&row.state==='ready');const boxes=[...$('results').querySelectorAll('.history-select')];$('select-all').checked=!!boxes.length&&boxes.every(box=>box.checked);$('select-all').indeterminate=boxes.some(box=>box.checked)&&!$('select-all').checked;}
 function downloadSelected(){const rows=selectedRows().filter(row=>row.filename&&row.state==='ready');for(const row of rows){const link=document.createElement('a');link.href='/api/files/'+encodeURIComponent(row.filename);link.download=row.filename;document.body.append(link);link.click();link.remove();}notice(rows.length+' file mulai diunduh. Kalau browser bertanya, izinkan download beberapa file, ya.');}
 async function deleteJobs(jobIds){if(!jobIds.length||!confirm('Yakin mau menghapus yang dipilih? File lokalnya juga ikut dihapus.'))return;pending=true;$('delete-selected').disabled=true;try{const result=await api('recordings/delete',{job_ids:jobIds});const failed=result.skipped?.length||0;notice(result.deleted.length+' item berhasil dihapus'+(failed?' · '+failed+' item belum bisa dihapus':'')+'.');await refresh();}catch(e){notice(e.message);}finally{pending=false;updateDeleteControls();}}
 async function renameJob(row){const value=prompt('Mau diberi nama apa?',row.filename||'');if(value===null||value.trim()===''||value.trim()===row.filename)return;try{await api('recordings/'+encodeURIComponent(row.job_id)+'/rename',{filename:value.trim()});notice(row.archive_status==='archived'?'Nama file lokal sudah diganti. Nama di arsip tetap sama.':'Sip, nama file sudah diganti.');await refresh();}catch(e){notice(e.message);}}

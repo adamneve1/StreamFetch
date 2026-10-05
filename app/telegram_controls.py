@@ -433,6 +433,8 @@ class Controls:
                 await bot.send_message(task['chat_id'], 'Transkripsi selesai.', reply_markup=self.view_button(row['job_id']))
             elif status == 'failed':
                 await bot.send_message(task['chat_id'], 'Transkripsi gagal. Coba /transcribe untuk retry.')
+            elif status == 'cancelled':
+                await bot.send_message(task['chat_id'], 'Transkripsi dibatalkan. Gunakan /transcribe untuk mulai lagi.')
             task['transcript_notice'] = status
         telegram_store.save_task(key, task)
 

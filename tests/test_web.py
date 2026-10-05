@@ -33,6 +33,34 @@ class WebTests(unittest.TestCase):
         telegram_store.save_watch(value)
         return value
 
+    def test_transcription_cancel_queue_restart_auth_and_completed_race(self):
+        from app import transcription_queue, transcription_worker
+        storage.save_recording(dict(job_id='cancel-me', filename='recording.mp4', source='youtube'), 'ready')
+        self.assertEqual(self.post('recordings/cancel-me/transcript', {}).status_code, 202)
+        old = storage.recording('cancel-me')['transcript']['request_id']
+        anonymous = self.app.test_client()
+        self.assertEqual(anonymous.post('/api/recordings/cancel-me/transcript/cancel', json={}).status_code, 401)
+        self.assertEqual(self.client.post('/api/recordings/cancel-me/transcript/cancel', json={}).status_code, 403)
+        self.redis.set('capture:owner', 'media')
+        self.assertEqual(self.post('recordings/cancel-me/transcript/cancel', {}).json['status'], 'cancelled')
+        self.assertEqual(self.post('recordings/cancel-me/transcript/cancel', {}).status_code, 200)
+        self.assertFalse(storage.save_transcription_state('cancel-me', 'completed', guarded=True, request_id=old))
+        with patch.object(transcription_worker, 'r', self.redis):
+            transcription_worker.recover_jobs()
+        self.assertEqual(storage.recording('cancel-me')['transcript']['status'], 'cancelled')
+        self.assertEqual(self.post('recordings/cancel-me/transcript', {}).status_code, 202)
+        new = storage.recording('cancel-me')['transcript']['request_id']
+        self.assertNotEqual(old, new)
+        self.assertEqual(self.post('recordings/cancel-me/transcript/cancel', {'request_id': old}).status_code, 409)
+        self.assertEqual(storage.recording('cancel-me')['transcript']['status'], 'queued')
+        self.assertFalse(storage.save_transcription_state('cancel-me', 'failed', guarded=True, request_id=old))
+        self.assertTrue(storage.save_transcription_state('cancel-me', 'completed', guarded=True, request_id=new))
+        self.assertEqual(self.post('recordings/cancel-me/transcript/cancel', {}).status_code, 409)
+        self.assertEqual(storage.recording('cancel-me')['transcript']['status'], 'completed')
+        self.assertEqual(self.redis.get('capture:owner'), 'media')
+        self.assertEqual(self.redis.keys('stop:*'), [])
+        self.assertEqual(self.post('recordings/missing/transcript/cancel', {}).status_code, 404)
+
     def test_admin_watches_use_shared_ledger_with_derived_status_and_no_private_chat_data(self):
         self.save_watch('waiting', start=160, end=200)
         self.save_watch('active', mode='every', auto_transcribe=True)

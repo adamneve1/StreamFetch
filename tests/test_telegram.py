@@ -113,6 +113,17 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.watches()[0]['status'], 'cancelled')
         self.assertEqual(self.redis.keys('stop:*'), [])
 
+    async def test_shared_transcription_cancellation_notifies_once_and_can_restart(self):
+        self.recording(transcript='cancelled')
+        store.subscribe('video-job', 77, 7, monitor_transcript=True)
+        await self.controls.notify_jobs(self.sender)
+        await self.controls.notify_jobs(self.sender)
+        self.assertEqual(self.sender.send_message.await_count, 1)
+        self.assertIn('dibatalkan', self.sender.send_message.call_args.args[1])
+        status, created = transcription_queue.enqueue(self.redis, 'video-job')
+        self.assertTrue(created)
+        self.assertEqual(status, 'queued')
+
     async def test_expiry_stops_discovery_not_capture_and_notifies_once(self):
         self.watch('every')
         self.redis.set('capture:owner', 'existing-job')
@@ -151,7 +162,9 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         store.subscribe('video-job', 77, 7, monitor_capture=True, auto_transcribe=True)
         await self.controls.notify_jobs(self.sender)
         self.assertEqual(self.redis.llen('transcription_queue'), 1)
-        self.assertEqual(json.loads(self.redis.lindex('transcription_queue', 0)), {'job_id': 'video-job'})
+        queued = json.loads(self.redis.lindex('transcription_queue', 0))
+        self.assertEqual(queued['job_id'], 'video-job')
+        self.assertEqual(queued['request_id'], storage.recording('video-job')['transcript']['request_id'])
         storage.save_transcription_state('video-job', 'transcribing')
         await self.controls.notify_jobs(self.sender)
         storage.save_transcription_state('video-job', 'completed')

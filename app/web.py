@@ -434,6 +434,16 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
             return jsonify(error='Transkrip untuk rekaman ini sudah ada atau sedang diproses.'), 409
         return jsonify(job_id=job_id, status='queued'), 202
 
+    @app.post('/api/recordings/<job_id>/transcript/cancel')
+    def cancel_transcript(job_id):
+        try:
+            status, cancelled = transcription_queue.cancel(r, job_id, (request.get_json() or {}).get('request_id'))
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 404
+        if not cancelled and status != 'cancelled':
+            return jsonify(error='Transkripsi sudah selesai atau tidak sedang diproses.', status=status), 409
+        return jsonify(job_id=job_id, status='cancelled')
+
     def transcript_file(job_id, kind, attachment):
         row = storage.recording(job_id)
         transcript = (row or {}).get('transcript') or {}
