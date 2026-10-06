@@ -46,7 +46,7 @@ test('old TXT-only jobs have readable copy without fabricated timestamps or meta
 });
 
 class Node {
-  constructor(){this.children=[];this.dataset={};this.listeners={};this._text='';this.value='';this.checked=false;this.disabled=false;this.hidden=false;this.className='';this.scrolled=false;this.clientHeight=600;const styles=new Map();this.style={setProperty:(name,value)=>styles.set(name,value),removeProperty:name=>styles.delete(name),getPropertyValue:name=>styles.get(name)||''};this.classList={toggle:(name,on)=>{const values=new Set(this.className.split(' ').filter(Boolean));on?values.add(name):values.delete(name);this.className=[...values].join(' ');}};}
+  constructor(){this.children=[];this.dataset={};this.listeners={};this._text='';this.value='';this.checked=false;this.disabled=false;this.hidden=false;this.className='';this.scrolled=false;this.clientHeight=600;this.offsetHeight=100;const styles=new Map();this.style={setProperty:(name,value)=>styles.set(name,value),removeProperty:name=>styles.delete(name),getPropertyValue:name=>styles.get(name)||''};this.classList={toggle:(name,on)=>{const values=new Set(this.className.split(' ').filter(Boolean));on?values.add(name):values.delete(name);this.className=[...values].join(' ');}};}
   append(...nodes){for(const node of nodes){node.parentNode=this;this.children.push(node);}}
   replaceChildren(){this.children=[];this._text='';}
   set textContent(value){this.replaceChildren();this._text=String(value);}
@@ -62,24 +62,26 @@ function mediaQuery(matches=false){
   return {matches,addEventListener(type,listener){if(type==='change')listeners.add(listener);},removeEventListener(type,listener){if(type==='change')listeners.delete(listener);},change(value){this.matches=value;for(const listener of [...listeners])listener({matches:value});},get listenerCount(){return listeners.size;}};
 }
 test('desktop Reader creates one subtle smoother and routes jumps without native competition',()=>{
-  const reduced=mediaQuery(false),desktop=mediaQuery(true),wrapper=new Node(),content=new Node(),root=new Node(),body=new Node(),registrations=[],creates=[],scrolls=[];
+  const reduced=mediaQuery(false),desktop=mediaQuery(true),wrapper=new Node(),content=new Node(),tools=new Node(),documentPanel=new Node(),root=new Node(),body=new Node(),scrollingElement=new Node(),registrations=[],creates=[],pins=[],scrolls=[],restores=[];
   let current=null;
   const ScrollSmoother={get:()=>current,create:options=>{const instance={options,killed:false,kill(){this.killed=true;if(current===this)current=null;},scrollTo(...args){scrolls.push(args);},scrollTop(){return 42;},refresh(){this.refreshed=true;}};creates.push(instance);return current=instance;}};
   const events={};
-  const env={innerHeight:900,document:{documentElement:root,body,getElementById:id=>id==='reader-smooth-wrapper'?wrapper:id==='reader-smooth-content'?content:null},gsap:{registerPlugin:(...plugins)=>registrations.push(plugins)},ScrollTrigger:{},ScrollSmoother,
-    matchMedia:query=>query.includes('reduced')?reduced:desktop,addEventListener:(type,listener)=>events[type]=listener,removeEventListener:type=>delete events[type]};
+  const ScrollTrigger={create:options=>{const pin={options,killed:false,kill(){this.killed=true;}};pins.push(pin);return pin;}};
+  const env={document:{documentElement:root,body,scrollingElement,getElementById:id=>id==='reader-smooth-wrapper'?wrapper:id==='reader-smooth-content'?content:null,querySelector:selector=>selector==='.reader-tools'?tools:selector==='.reader-document'?documentPanel:null},gsap:{registerPlugin:(...plugins)=>registrations.push(plugins)},ScrollTrigger,ScrollSmoother,
+    matchMedia:query=>query.includes('reduced')?reduced:desktop,scrollTo:options=>restores.push(options),addEventListener:(type,listener)=>events[type]=listener,removeEventListener:type=>delete events[type]};
   const scroller=reader.createReaderScroller(env);scroller.start();scroller.start();
   assert.equal(creates.length,1);assert.deepEqual(registrations[0],[env.ScrollTrigger,ScrollSmoother]);
   assert.deepEqual(creates[0].options,{wrapper,content,smooth:1,smoothTouch:0,effects:false,normalizeScroll:false,ignoreMobileResize:true});
+  assert.equal(pins.length,1);assert.equal(pins[0].options.trigger,documentPanel);assert.equal(pins[0].options.pin,tools);assert.equal(pins[0].options.pinSpacing,false);assert.equal(pins[0].options.start,'top top+=76');assert.equal(pins[0].options.end(),'bottom top+=176');
   assert.match(root.className,/reader-smoothing/);assert.match(body.className,/reader-smoothing/);
-  assert.equal(content.style.getPropertyValue('--reader-scroll-compensation'),'300px');
+  assert.equal(content.style.getPropertyValue('--reader-scroll-compensation'),'');
   const target=new Node();content.append(target);assert.equal(scroller.jumpTo(target,true,'center center'),true);
   assert.deepEqual(scrolls,[[target,true,'center center']]);assert.equal(target.scrolled,false);
   const stationaryTarget=new Node();scroller.jumpTo(stationaryTarget,true,'top top+=24');
   assert.equal(stationaryTarget.scrolled,false);assert.equal(scrolls.length,1);
   scroller.refresh();assert.equal(creates[0].refreshed,true);
-  reduced.change(true);assert.equal(creates[0].killed,true);assert.equal(scroller.isActive(),false);
-  assert.doesNotMatch(root.className,/reader-smoothing/);assert.equal(wrapper.scrollTop,42);
+  reduced.change(true);assert.equal(creates[0].killed,true);assert.equal(pins[0].killed,true);assert.equal(scroller.isActive(),false);
+  assert.doesNotMatch(root.className,/reader-smoothing/);assert.deepEqual(restores,[{top:42,behavior:'auto'}]);
   scroller.jumpTo(target,true,'center center');assert.deepEqual(target.scrolled,{behavior:'auto',block:'center'});
   assert.equal(reduced.listenerCount,1);events.pagehide();assert.equal(reduced.listenerCount,0);
   reduced.matches=false;events.pageshow({persisted:true});assert.equal(creates.length,2);
@@ -246,28 +248,35 @@ test('desktop player sizing is capped and centered without changing the 16:9 emb
   const css=fs.readFileSync(require.resolve('../app/static/transcript.css'),'utf8');
   assert.match(css,/\.reader-shell \.reader-player\{max-width:680px;width:100%;margin:8px auto 12px;aspect-ratio:16\/9\}/);
 });
-test('reader workspace fixes desktop chrome around the transcript body and stacks on tablet',()=>{
+test('Reader uses one page-level scroll surface while preserving sticky chrome and tablet flow',()=>{
   const html=fs.readFileSync(require.resolve('../app/static/transcript.html'),'utf8');
   const css=fs.readFileSync(require.resolve('../app/static/transcript.css'),'utf8');
+  const js=fs.readFileSync(require.resolve('../app/static/transcript.js'),'utf8');
   const sidebar=html.slice(html.indexOf('<aside'),html.indexOf('</aside>'));
   const tools=html.slice(html.indexOf('<div class="reader-tools">'),html.indexOf('<article'));
   assert.ok(html.indexOf('class="app-header reader-header"')<html.indexOf('id="reader-smooth-wrapper"'));
-  assert.match(html,/class="reader-tools"[\s\S]*id="reader-smooth-wrapper"[\s\S]*id="reader-smooth-content"[\s\S]*id="transcript-text"/);
-  assert.match(html,/class="reader-transcript-scroll" tabindex="0" aria-label="Transcript segments"/);
+  assert.match(html,/id="reader-smooth-wrapper"[\s\S]*id="reader-smooth-content"[\s\S]*class="reader-shell"[\s\S]*class="reader-sidebar"[\s\S]*class="reader-tools"[\s\S]*id="transcript-text"/);
+  assert.doesNotMatch(html,/reader-transcript-scroll|aria-label="Transcript segments"/);
   for(const id of ['reader-player','reader-title','program-info','full-description'])assert.ok(sidebar.includes('id="'+id+'"'));
   for(const id of ['transcript-search','timestamp-mode','copy-transcript','copy-info','copy-all','transcript-exports','raw-view'])assert.ok(tools.includes('id="'+id+'"'));
   assert.match(css,/grid-template-columns:minmax\(0,38fr\) minmax\(0,62fr\)/);
-  assert.match(css,/\.reader-sidebar\{position:sticky;top:16px/);
+  assert.match(css,/\.reader-sidebar\{min-width:0\}/);
   assert.match(css,/\.reader-tools\{position:sticky;top:16px/);
   assert.match(css,/@media\(max-width:1000px\)\{\.reader-workspace\{grid-template-columns:minmax\(0,1fr\)/);
-  assert.match(css,/\.reader-sidebar\{position:static;max-height:none;overflow:visible\}/);
   assert.match(css,/user-select:text/);
   assert.match(css,/\.reader-segment\+\.reader-segment\{border-top:0\}/);
   assert.match(css,/@media\(min-width:1001px\) and \(hover:hover\) and \(pointer:fine\)/);
-  assert.match(css,/body\.reader-page\{height:100dvh;min-height:0;overflow:hidden\}/);
-  assert.match(css,/\.reader-document\{position:relative;display:grid;grid-template-rows:auto minmax\(0,1fr\);height:100%;min-height:0;overflow:hidden\}/);
-  assert.match(css,/#reader-smooth-wrapper\{position:relative!important;inset:auto!important;[\s\S]*overflow-y:auto/);
-  assert.match(css,/\.reader-smoothing #reader-smooth-wrapper\{overflow:hidden\}/);
+  assert.match(css,/\.reader-header\{position:sticky;top:0;z-index:20;height:60px\}/);
+  assert.match(css,/\.reader-smoothing #reader-smooth-wrapper\{position:fixed!important;inset:0!important;[\s\S]*height:100dvh!important;overflow:hidden!important\}/);
+  assert.match(css,/\.reader-smoothing \.reader-shell\{padding-top:76px\}/);
+  assert.match(css,/\.reader-tools\{top:76px\}/);
+  assert.match(css,/\.reader-smoothing \.reader-tools\{position:relative;top:auto\}/);
+  assert.equal((css.match(/overflow-y:auto/g)||[]).length,1);
+  assert.doesNotMatch(css,/#reader-smooth-wrapper[^}]*overflow-y:auto|overscroll-behavior|scrollbar-gutter|\.reader-sidebar\{[^}]*overflow|\.reader-info pre\{[^}]*overflow:auto/);
+  assert.doesNotMatch(js,/addEventListener\(['"](?:wheel|touchmove)['"]|onwheel|ontouchmove/);
+  assert.match(js,/seek\(segment\.start\);readerScroll\.jumpTo\(row,true,'center center'\)/);
+  assert.match(js,/matchNodes\[current\]\)readerScroll\.jumpTo\(matchNodes\[current\],true,'center center'\)/);
+  assert.match(js,/readerScroll\.jumpTo\(\$\(id\),smooth,'top top\+=24'\)/);
   assert.match(html,/<summary>More<\/summary>.*id="raw-view"/);
 });
 test('non-YouTube timestamps remain readable, exports omit absent files, and display changes make no requests',async()=>{

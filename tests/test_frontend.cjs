@@ -604,6 +604,8 @@ function motionSpy(){
   source(panel,collapsed,change,options){calls.push(['source',collapsed,options,panel.dataset.collapsed]);change();},
   sourceMode(panel,change,options){calls.push(['sourceMode',panel,options]);change();},
   sourcePress(tab){calls.push(['sourcePress',tab]);},
+  dialogOpen(dialog,panel){calls.push(['dialogOpen',dialog,panel]);},
+  dialogClose(dialog,panel,complete){calls.push(['dialogClose',dialog,panel]);complete();},
   island(panel,key,phase,change){calls.push(['island',key,phase]);change();},
   progress(panel,value){if(value===null)panel.removeAttribute('value');else panel.value=value;},
 };
@@ -711,7 +713,8 @@ test('Watches load for authenticated roles and handle list errors locally',async
  assert.equal(f.get('notice').textContent,'');
  const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
  const panel=html.split('id="watches-panel"')[1].split('</section>')[0];
- assert.match(panel,/hidden/);assert.match(panel,/Watches/);assert.match(html,/id="tab-watch"/);assert.match(html,/id="watch-url"/);
+ assert.match(panel,/hidden/);assert.match(panel,/Watches/);assert.match(panel,/id="watch-create"[^>]*>\+ Tambah Watch/);assert.match(panel,/id="watch-url"/);
+ assert.doesNotMatch(html,/id="tab-watch"|id="watch-fields"/);assert.equal((html.match(/id="watch-url"/g)||[]).length,1);
 });
 test('Watches visibility follows authenticated roles and cancellation reuses the shared API without stopping capture',async()=>{
  const f=fixture();captureAPI(f);await f.run('enter({is_admin:false})');assert.equal(f.get('watches-panel').hidden,false);
@@ -722,18 +725,33 @@ test('Watches visibility follows authenticated roles and cancellation reuses the
  assert.deepEqual(calls,[['/api/watches/watch/cancel','POST'],['/api/watches','GET']]);
  assert.equal(f.get('watch-count').textContent,'0 aktif');assert.equal(f.get('watch-list').querySelector('button'),null);
 });
-test('Watch Source validates locally, posts canonical WIB fields, and immediately opens the shared list',async()=>{
- const f=fixture(),calls=[];f.run("setMode('watch')");
+test('Settings Watch form uses the existing endpoint, refreshes Waiting state, and keeps validation inline',async()=>{
+ const motion=motionSpy(),f=fixture(motion),calls=[];
+ assert.equal(f.get('watch-create-panel').hidden,true);f.get('watch-create').onclick();
+ assert.equal(f.get('watch-create-panel').hidden,false);assert.equal(f.get('watch-create').attributes['aria-expanded'],'true');assert.equal(f.get('watch-url').focused,true);
  f.get('watch-url').value='@rribatam';f.get('watch-day').value='date';f.get('watch-day').onchange();
  f.get('watch-date').value='2099-10-06';f.get('watch-start').value='08:00';f.get('watch-end').value='10:00';
- f.get('watch-mode').value='every';f.get('watch-auto').checked=true;f.get('watch-url').oninput();
+ f.get('watch-mode').value='every';f.get('watch-auto').checked=true;
  f.context.fetch=async(url,options)=>{calls.push([url,options?.method,options?.body&&JSON.parse(options.body)]);return {ok:true,status:url==='/api/watches'&&options?.method==='POST'?201:200,headers:{get:()=> 'application/json'},json:async()=>url==='/api/watches'&&options?.method==='POST'?{id:'watch',status:'waiting'}:{active_count:1,watches:[{id:'watch',channel:'@rribatam',start:1,end:2,status:'waiting',mode:'every',auto_transcribe:true}]}};};
- await f.get('record').onclick();
+ await f.get('watch-form').onsubmit({preventDefault(){}});
  assert.deepEqual(calls[0],['/api/watches','POST',{channel:'@rribatam',date:'2099-10-06',start_time:'08:00',end_time:'10:00',mode:'every',auto_transcribe:true}]);
- assert.equal(f.get('workspace').dataset.destination,'settings');assert.equal(f.get('watch-count').textContent,'1 aktif');
- assert.equal(f.get('notice').textContent,'Watch tersimpan · Waiting.');assert.equal(f.get('watch-url').value,'');
- f.run("setMode('watch')");f.get('watch-url').value='@rribatam';f.get('watch-date').value='2099-10-06';f.get('watch-start').value='10:00';f.get('watch-end').value='09:00';
- calls.length=0;await f.get('record').onclick();assert.equal(calls.length,0);assert.match(f.get('notice').textContent,/Jam akhir/);
+ assert.deepEqual(calls[1].slice(0,2),['/api/watches','GET']);assert.equal(f.get('watch-count').textContent,'1 aktif');assert.match(f.get('watch-list').textContent,/Waiting/);
+ assert.equal(f.get('watch-create-panel').hidden,true);assert.equal(f.get('watch-create').attributes['aria-expanded'],'false');assert.equal(f.get('watch-url').value,'');
+ assert.equal(motion.calls.filter(call=>call[0]==='dialogOpen').length,1);assert.equal(motion.calls.filter(call=>call[0]==='dialogClose').length,1);
+ f.get('watch-create').onclick();f.get('watch-url').value='@rribatam';f.get('watch-start').value='10:00';f.get('watch-end').value='09:00';
+ calls.length=0;await f.get('watch-form').onsubmit({preventDefault(){}});assert.equal(calls.length,0);assert.match(f.get('watch-error').textContent,/Jam akhir/);assert.equal(f.get('watch-create-panel').hidden,false);assert.equal(f.get('notice').textContent,'');
+});
+test('Settings Watch cancel resets the one creation form without calling the API',async()=>{
+ const motion=motionSpy(),f=fixture(motion);let requests=0;f.context.fetch=async()=>{requests++;throw Error('unexpected');};
+ f.get('watch-create').onclick();f.get('watch-url').value='@draft';await f.get('watch-create-cancel').onclick();
+ assert.equal(requests,0);assert.equal(f.get('watch-create-panel').hidden,true);assert.equal(f.get('watch-url').value,'');assert.equal(f.get('watch-create').focused,true);
+ assert.equal(motion.calls.filter(call=>call[0]==='dialogClose').length,1);
+});
+test('Watch endpoint validation remains inside the open Settings form',async()=>{
+ const f=fixture();f.get('watch-create').onclick();f.get('watch-url').value='invalid';f.get('watch-day').value='date';f.get('watch-day').onchange();f.get('watch-date').value='2099-10-06';
+ f.context.fetch=async()=>({ok:false,status:400,headers:{get:()=> 'application/json'},json:async()=>({error:'Channel YouTube tidak valid.'})});
+ await f.get('watch-form').onsubmit({preventDefault(){}});
+ assert.equal(f.get('watch-error').textContent,'Channel YouTube tidak valid.');assert.equal(f.get('watch-create-panel').hidden,false);assert.equal(f.get('watch-create-submit').disabled,false);
 });
 test('failed cancellation preserves watch controls, and a stale list cannot overwrite post-cancel data',async()=>{
  const f=fixture();f.run("isAdmin=true;renderWatches({active_count:1,watches:[{id:'watch',channel:'@rri',start:100,end:200,status:'active',mode:'first'}]})");
@@ -872,16 +890,16 @@ test('minimal island markup omits duplicate metadata and moves live markers outs
  assert.match(css,/width:fit-content/);assert.match(css,/\[data-phase=processing\]/);assert.match(css,/\[data-phase=completed\]\{min-width:0;min-height:0;max-width:min\(100%,360px\)/);
  assert.match(css,/white-space:nowrap;text-overflow:ellipsis;overflow:hidden/);
 });
-test('Source selector fills the bounded form with five equally sized, quieter controls',()=>{
+test('Source selector fills the bounded form with four equally sized, quieter controls',()=>{
  const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8').split('/* One continuous Source selector')[1];
- assert.match(css,/#capture-panel \.tabs\{display:grid;grid-template-columns:repeat\(5,minmax\(0,1fr\)\);width:100%\}/);
+ assert.match(css,/#capture-panel \.tabs\{display:grid;grid-template-columns:repeat\(4,minmax\(0,1fr\)\);width:100%\}/);
  assert.match(css,/#capture-panel \.tab\{min-width:0;text-align:center;font-weight:400/);
  assert.match(css,/\.tab\.selected\{font-weight:500\}/);
  assert.match(css,/#capture-panel label\{font-weight:500/);
  const f=fixture();
- for(const mode of ['youtube','tiktok','instagram','oryx','watch']){
+ for(const mode of ['youtube','tiktok','instagram','oryx']){
   f.run(`setMode('${mode}')`);
-  for(const source of ['youtube','tiktok','instagram','oryx','watch'])assert.equal(f.get('tab-'+source).attributes['aria-pressed'],String(source===mode));
+  for(const source of ['youtube','tiktok','instagram','oryx'])assert.equal(f.get('tab-'+source).attributes['aria-pressed'],String(source===mode));
  }
 });
 test('active island fills History while compact states and single-line title hierarchy remain scoped',()=>{
