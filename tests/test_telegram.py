@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 import fakeredis
 
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', '123456:TEST_TOKEN')
-from app import bot, storage, telegram_controls as tc, telegram_store as store, transcription_queue
+from app import bot, storage, telegram_controls as tc, telegram_store as store, transcription_queue, watch_service
 
 
 class TelegramTests(unittest.IsolatedAsyncioTestCase):
@@ -94,6 +94,28 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.watches()[0]['last_capture']['video_id'], 'abcdefghijk')
         self.assertEqual(store.watches()[0]['last_capture']['job_id'], payload['job_id'])
         self.assertIn('Live terdeteksi', self.sender.send_message.call_args.args[1])
+
+    async def test_web_watch_without_telegram_detects_canonical_job_and_auto_transcribes(self):
+        watch_service.create_watch('@rribatam', '1970-01-01', '07:01', '07:04', mode='first',
+                                   auto_transcribe=True, owner_type='web', owner_id='user',
+                                   now=datetime.fromtimestamp(0, tc.WIB))
+        with patch.object(tc, 'discover_live', return_value=[self.live()]):
+            await self.controls.tick(None, 100)
+        task = next(value for key, value in store.tasks() if key == 'capture:abcdefghijk')
+        job = task['job']
+        self.assertEqual(job['origin'], 'web_watch')
+        self.assertEqual(job['chat_id'], 'web')
+        self.assertNotIn('chat_id', task)
+        self.assertNotIn('user_id', task)
+        self.assertEqual(self.redis.llen('download_queue'), 1)
+        self.assertEqual(storage.recording(job['job_id'])['state'], 'queued')
+        self.assertEqual([key for key, _ in store.tasks() if key.startswith('subscription:')], [])
+        storage.save_recording(dict(job, filename='web-watch.mp4'), 'ready')
+        await self.controls.tick(self.sender, 110)
+        self.assertEqual(storage.recording(job['job_id'])['transcript']['status'], 'queued')
+        updated = dict(store.tasks())['capture:abcdefghijk']
+        self.assertTrue(updated['transcript_requested'])
+        self.sender.send_message.assert_not_awaited()
 
     def test_discovery_without_streams_tab_falls_back_to_live_metadata_only(self):
         missing = tc.subprocess.CalledProcessError(1, 'yt-dlp', stderr=b'This channel does not have a streams tab')

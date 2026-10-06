@@ -10,17 +10,18 @@ from datetime import timedelta
 from pathlib import Path
 
 import redis
-from flask import Flask, jsonify, request, session, send_from_directory
+from flask import Flask, jsonify, redirect, request, session, send_from_directory, url_for
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 try:
-    from . import quality, storage, telegram_store, transcript_reader, transcription_queue
+    from . import quality, storage, telegram_store, transcript_reader, transcription_queue, watch_service
 except ImportError:
     import quality
     import storage
     import telegram_store
     import transcript_reader
     import transcription_queue
+    import watch_service
 
 ADMIT = """
 if redis.call('EXISTS', 'worker:heartbeat') == 0 then return 'offline' end
@@ -108,9 +109,13 @@ def create_app(client=None):
         if not request.path.startswith('/api/'):
             return
         if request.path != '/api/login' and not session.get('operator'):
+            if request.endpoint == 'view_transcript' and request.method == 'GET':
+                return redirect(url_for('index', next=request.full_path.rstrip('?')))
             return jsonify(error='Masuk dulu untuk lanjut, ya.'), 401
         if request.path != '/api/login' and session.get('auth_version') != auth_version(session.get('role', 'user')):
             session.clear()
+            if request.endpoint == 'view_transcript' and request.method == 'GET':
+                return redirect(url_for('index', next=request.full_path.rstrip('?')))
             return jsonify(error='Password akun ini sudah diganti. Yuk, masuk lagi.'), 401
         if request.method != 'GET' and request.path != '/api/login':
             if not hmac.compare_digest(request.headers.get('X-CSRF-Token', ''), session.get('csrf', 'missing')):
@@ -205,14 +210,12 @@ def create_app(client=None):
             session['auth_version'] = version
         return jsonify(ok=True)
 
-    @app.get('/api/admin/watches')
-    def list_watches():
-        denied = require_admin()
-        if denied:
-            return denied
+    def watch_rows(role):
         now = time.time()
         rows = []
         for watch in telegram_store.watches():
+            if not watch_service.web_can_manage(watch, role):
+                continue
             status = watch['status']
             if status == 'active':
                 status = 'expired' if now >= watch['end'] else 'discovery_issue' if now >= watch['start'] and watch.get('discovery_error') else 'waiting'
@@ -230,7 +233,39 @@ def create_app(client=None):
                              discovery_error=watch.get('discovery_error')))
         visible = {'waiting', 'recording', 'discovery_issue'}
         rows.sort(key=lambda row: (row['status'] not in visible, -row['start']))
-        return jsonify(watches=rows, active_count=sum(row['status'] in visible for row in rows))
+        return rows, sum(row['status'] in visible for row in rows)
+
+    @app.get('/api/watches')
+    def list_watches():
+        rows, active_count = watch_rows(session.get('role', 'user'))
+        return jsonify(watches=rows, active_count=active_count)
+
+    @app.post('/api/watches')
+    def create_web_watch():
+        data = request.get_json() or {}
+        watch = watch_service.create_watch(
+            data.get('channel'), data.get('date'), data.get('start_time'), data.get('end_time'),
+            mode=data.get('mode', 'first'), auto_transcribe=data.get('auto_transcribe', False),
+            owner_type='web', owner_id=session.get('role', 'user'))
+        return jsonify(id=watch['id'], channel=watch['channel'], start=watch['start'], end=watch['end'],
+                       mode=watch['mode'], auto_transcribe=watch['auto_transcribe'], status='waiting'), 201
+
+    @app.post('/api/watches/<watch_id>/cancel')
+    def cancel_web_watch(watch_id):
+        role = session.get('role', 'user')
+        watch = (telegram_store.cancel_watch(watch_id) if role == 'admin' else
+                 telegram_store.cancel_watch(watch_id, owner_type='web', owner_id=role))
+        if not watch:
+            return jsonify(error='Watch tidak ditemukan.'), 404
+        return jsonify(ok=True)
+
+    @app.get('/api/admin/watches')
+    def list_admin_watches():
+        denied = require_admin()
+        if denied:
+            return denied
+        rows, active_count = watch_rows('admin')
+        return jsonify(watches=rows, active_count=active_count)
 
     @app.post('/api/admin/watches/<watch_id>/cancel')
     def cancel_watch(watch_id):

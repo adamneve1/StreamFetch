@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
 import fakeredis
@@ -232,8 +233,18 @@ class ReaderTests(unittest.TestCase):
 
     def test_reader_is_authenticated_and_never_enqueues(self):
         anonymous = web.create_app(self.redis).test_client()
-        self.assertEqual(anonymous.get('/api/recordings/reader-job/transcript/view').status_code, 401)
+        reader_url = '/api/recordings/reader-job/transcript/view?layout=compact'
+        response = anonymous.get(reader_url)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.mimetype, 'text/html')
+        self.assertEqual(parse_qs(urlsplit(response.location).query)['next'], [reader_url])
         self.assertEqual(anonymous.get('/api/recordings/reader-job/transcript/data').status_code, 401)
+        self.assertEqual(anonymous.get('/api/recordings/reader-job/transcript/data').json,
+                         {'error': 'Masuk dulu untuk lanjut, ya.'})
+        expired = web.create_app(self.redis).test_client()
+        with expired.session_transaction() as state:
+            state.update(operator=True, role='user', auth_version=99)
+        self.assertEqual(expired.get(reader_url).status_code, 302)
         self.assertIn('Search transcript', self.client.get(
             '/api/recordings/reader-job/transcript/view').text)
         self.data()

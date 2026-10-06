@@ -279,7 +279,7 @@ footer{padding:18px 2px 4px}
 .workspace-page .login-credit a:hover,.workspace-page .login-credit a:focus-visible{opacity:1}
 .workspace-page .login-credit a:focus-visible{outline:2px solid #629d45;outline-offset:3px;border-radius:3px}
 /* One continuous Source selector, aligned with the bounded form grid. */
-.workspace-page #capture-panel .tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));width:100%}
+.workspace-page #capture-panel .tabs{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));width:100%}
 .workspace-page #capture-panel .tab{min-width:0;text-align:center;font-weight:400;line-height:1.4;letter-spacing:0}
 .workspace-page #capture-panel .tab.selected{font-weight:500}
 .workspace-page #capture-panel .panel-heading h2{font-weight:600}
@@ -325,7 +325,8 @@ footer{padding:18px 2px 4px}
 #login-wordmark{display:inline-block}
 .workspace-page #capture-panel .tabs{position:relative}.workspace-page #capture-panel .tab{position:relative;z-index:1}.workspace-page #capture-panel .source-tab-indicator{position:absolute;z-index:0;top:3px;bottom:3px;left:3px;width:0;border-radius:6px;background:#fff;box-shadow:0 1px 2px #00000012;pointer-events:none;visibility:hidden}.workspace-page #capture-panel .tabs[data-motion-ready=true] .source-tab-indicator{visibility:visible}.workspace-page #capture-panel .tabs[data-motion-ready=true] .tab.selected{background:transparent;box-shadow:none}
 .workspace-page .auth-exit-snapshot{position:fixed;z-index:100;pointer-events:none;margin:0}
-/* Telegram discovery management shares the quiet Settings list styling. */
+/* Shared Watch management uses the quiet Settings list styling. */
+.watch-form-grid{display:grid;grid-template-columns:minmax(220px,2fr) repeat(4,minmax(120px,1fr));gap:10px 12px;align-items:end}.watch-form-grid>div{min-width:0}.watch-auto{display:flex!important;align-items:center;gap:8px;min-height:34px;margin:0!important;white-space:nowrap}.watch-auto input{flex:none;width:auto!important;height:auto!important}.watch-fields>.hint{margin-bottom:0!important}
 .watch-list{list-style:none;margin:0;padding:0;max-height:360px;overflow:auto}
 .watch-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:8px 12px;padding:12px 0;border-top:1px solid var(--line)}
 .watch-copy{min-width:0}.watch-copy strong{display:block;font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -333,7 +334,8 @@ footer{padding:18px 2px 4px}
 .watch-copy .watch-last{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .watch-cancel{min-height:44px;font-size:11px;padding:6px 10px;color:#a54f40}.watch-cancel:hover:not(:disabled){background:#fff6f4;filter:none}
 #watch-feedback:empty{display:none}#watches-panel>.panel-heading{margin-bottom:8px}#watches-panel>p{margin-bottom:12px}
-@media(max-width:680px){.watch-row{grid-template-columns:minmax(0,1fr) auto}.watch-copy{grid-column:1/-1}.watch-row .badge{justify-self:start}#watch-refresh{min-height:44px}.watch-copy small{overflow-wrap:anywhere}}
+@media(max-width:900px){.watch-form-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.watch-form-grid .watch-channel{grid-column:1/-1}}
+@media(max-width:680px){.workspace-page #capture-panel .tabs{grid-template-columns:repeat(3,minmax(0,1fr))}.workspace-page #capture-panel .source-tab-indicator{display:none}.workspace-page #capture-panel .tabs[data-motion-ready=true] .tab.selected{background:#fff;box-shadow:0 1px 2px #00000012}.watch-form-grid{grid-template-columns:1fr}.watch-form-grid .watch-channel{grid-column:auto}.watch-row{grid-template-columns:minmax(0,1fr) auto}.watch-copy{grid-column:1/-1}.watch-row .badge{justify-self:start}#watch-refresh{min-height:44px}.watch-copy small{overflow-wrap:anywhere}}
 .history-mobile-meta{display:none}.history-selection{display:inline-grid;place-items:center;width:24px;height:24px;margin:0}.history-selection input{width:16px;height:16px;margin:0}
 .transcription-stop,.capture-stop{display:inline-grid;place-items:center;width:44px;min-width:44px;height:44px;padding:0;color:#a54f40;vertical-align:middle}.transcription-stop svg,.capture-stop svg{width:16px;height:16px}.transcription-stop:hover:not(:disabled),.capture-stop:hover:not(:disabled){background:#fff6f4;filter:none}
 .transcript-box .transcription-stop{margin-left:6px}.workspace-page #status-monitor[data-phase=cancelled]{min-width:0;min-height:0;max-width:min(100%,360px)}

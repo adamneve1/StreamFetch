@@ -7,20 +7,21 @@ import re
 import subprocess
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from functools import wraps
 from urllib.parse import urlsplit
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 try:
-    from . import storage, telegram_store, transcription_queue
+    from . import storage, telegram_store, transcription_queue, watch_service
 except ImportError:
     import storage
     import telegram_store
     import transcription_queue
+    import watch_service
 
 log = logging.getLogger(__name__)
-WIB = timezone(timedelta(hours=7), 'WIB')
+WIB = watch_service.WIB
 
 
 def allowed(user_id):
@@ -52,23 +53,7 @@ def reader_url(job_id):
     return base + '/api/recordings/' + job_id + '/transcript/view'
 
 
-def channel_url(value):
-    value = value.strip()
-    if value.startswith('@'):
-        value = 'https://www.youtube.com/' + value
-    elif re.match(r'^(?:www\.|m\.)?youtube\.com/', value, re.I):
-        value = 'https://' + value
-    try:
-        storage.validate_url(value, youtube=True)
-    except ValueError:
-        raise ValueError('Kirim @channel atau URL channel YouTube, misalnya youtube.com/@rribatam.') from None
-    parsed = urlsplit(value)
-    if (parsed.hostname not in {'youtube.com', 'www.youtube.com', 'm.youtube.com'}
-            or parsed.username or parsed.password or parsed.port not in {None, 80, 443}
-            or not re.fullmatch(r'/(?:@[A-Za-z0-9_.-]+|channel/UC[A-Za-z0-9_-]+|(?:c|user)/[A-Za-z0-9_.-]+)(?:/(?:live|streams))?/?', parsed.path)):
-        raise ValueError('Kirim URL channel YouTube, misalnya https://youtube.com/@rribatam.')
-    path = re.sub(r'/(?:live|streams)/?$', '', parsed.path).rstrip('/')
-    return 'https://www.youtube.com' + path
+channel_url = watch_service.channel_url
 
 
 WINDOW_PATTERN = r'(\d{1,2})[:.](\d{2})\s*[-–—]\s*(\d{1,2})[:.](\d{2})(?:\s*WIB)?'
@@ -95,30 +80,8 @@ def watch_arguments(args):
     raise ValueError('Contoh: /watch @rribatam tomorrow 08:00-10:00 WIB [every] [yes|no]')
 
 
-def watch_day(value):
-    value = value.strip().lower()
-    aliases = {'today': 0, 'hari ini': 0, 'tomorrow': 1, 'besok': 1}
-    if value in aliases:
-        return (datetime.now(WIB).date() + timedelta(days=aliases[value])).isoformat()
-    try:
-        return datetime.strptime(value, '%Y-%m-%d').date().isoformat()
-    except ValueError:
-        raise ValueError('Pilih Today / Tomorrow atau kirim tanggal YYYY-MM-DD.') from None
-
-
-def watch_window(day, start, end, now=None):
-    now = now or datetime.now(WIB)
-    now = now.astimezone(WIB)
-    aliases = {'today': 0, 'hari ini': 0, 'tomorrow': 1, 'besok': 1}
-    date = (now.date() + timedelta(days=aliases[day.lower()]) if day.lower() in aliases
-            else datetime.strptime(day, '%Y-%m-%d').date())
-    if not all(re.fullmatch(r'\d{2}:\d{2}', value) for value in (start, end)):
-        raise ValueError('Gunakan jam HH:MM WIB.')
-    begins = datetime.combine(date, datetime.strptime(start, '%H:%M').time(), WIB)
-    ends = datetime.combine(date, datetime.strptime(end, '%H:%M').time(), WIB)
-    if ends <= begins or ends <= now:
-        raise ValueError('Jam akhir harus setelah jam mulai dan belum lewat (WIB).')
-    return begins.timestamp(), ends.timestamp()
+watch_day = watch_service.watch_day
+watch_window = watch_service.watch_window
 
 
 def discover_live(channel):
@@ -186,19 +149,15 @@ class Controls:
     def create_watch(self, values, user_id, chat_id):
         if len(values) not in {4, 5, 6}:
             raise ValueError('/watch channel today|tomorrow|YYYY-MM-DD HH:MM HH:MM [first|every] [yes|no]')
-        channel = channel_url(values[0])
-        start, end = watch_window(*values[1:4])
         mode = values[4].lower() if len(values) > 4 else 'first'
         auto = values[5].lower() if len(values) > 5 else 'no'
         if mode not in {'first', 'every'} or auto not in {'yes', 'no'}:
             raise ValueError('Pilih first/every dan yes/no.')
         if auto == 'yes':
             reader_url('setup')
-        watch = dict(id=uuid.uuid4().hex[:12], user_id=user_id, chat_id=chat_id,
-                     channel=channel, start=start, end=end, mode=mode,
-                     auto_transcribe=auto == 'yes', status='active')
-        telegram_store.save_watch(watch)
-        return watch
+        return watch_service.create_watch(values[0], *values[1:4], mode=mode,
+                                          auto_transcribe=auto == 'yes', owner_type='telegram',
+                                          owner_id=user_id, user_id=user_id, chat_id=chat_id)
 
     @authorized
     async def watch(self, update, context):
@@ -366,11 +325,12 @@ class Controls:
     async def dispatch(self, bot):
         # A failed Telegram chat must not block other watches or subscriptions.
         for key, task in telegram_store.tasks():
-            if key.startswith('capture:') and allowed(task['user_id']):
+            telegram_owned = task.get('owner_type', 'telegram') == 'telegram'
+            if key.startswith('capture:') and (not telegram_owned or allowed(task.get('user_id'))):
                 try:
                     await self.dispatch_task(bot, key, task)
                 except Exception:
-                    log.warning('telegram capture dispatch/notice unavailable job=%s', task['job']['job_id'])
+                    log.warning('watch capture dispatch/notice unavailable job=%s', task['job']['job_id'])
 
     async def dispatch_task(self, bot, key, task):
         if task.get('dispatch') != 'sent':
@@ -379,13 +339,27 @@ class Controls:
                 storage.save_recording(task['job'], 'queued', 'Live terdeteksi · capture masuk antrean.')
             if not row or row.get('state') == 'queued':
                 self.client.eval(CAPTURE_ADMIT, 0, task['job']['job_id'], json.dumps(task['job']))
-            telegram_store.subscribe(task['job']['job_id'], task['chat_id'], task['user_id'],
-                                     monitor_capture=True, auto_transcribe=task['auto_transcribe'])
+            if task.get('chat_id') is not None and task.get('user_id') is not None:
+                telegram_store.subscribe(task['job']['job_id'], task['chat_id'], task['user_id'],
+                                         monitor_capture=True, auto_transcribe=task['auto_transcribe'])
             task['dispatch'] = 'sent'
             telegram_store.save_task(key, task)
-        if not task.get('detected_notice'):
+        if bot is not None and task.get('chat_id') is not None and not task.get('detected_notice'):
             await bot.send_message(task['chat_id'], 'Live terdeteksi · capture masuk antrean.\n' + task['job']['url'])
             task['detected_notice'] = True
+            telegram_store.save_task(key, task)
+
+    async def advance_web_transcripts(self):
+        """Auto-transcribe web captures without creating Telegram subscriptions."""
+        for key, task in telegram_store.tasks():
+            if (not key.startswith('capture:') or task.get('owner_type') != 'web'
+                    or not task.get('auto_transcribe') or task.get('transcript_requested')):
+                continue
+            row = storage.recording(task['job']['job_id'])
+            if not row or row.get('state') != 'ready':
+                continue
+            transcription_queue.enqueue(self.client, row['job_id'])
+            task['transcript_requested'] = True
             telegram_store.save_task(key, task)
 
     async def tick(self, bot, now=None):
@@ -393,14 +367,19 @@ class Controls:
         clock_started = time.monotonic()
         await self.dispatch(bot)
         for watch in telegram_store.watches():
-            if watch['status'] != 'active' or not allowed(watch['user_id']):
+            telegram_owned = watch.get('owner_type', 'telegram') == 'telegram'
+            # The always-on worker owns web watches. Telegram watches remain
+            # with the bot so notification/retry behavior stays unchanged.
+            if (watch['status'] != 'active' or
+                    telegram_owned and (bot is None or not allowed(watch.get('user_id')))):
                 continue
             if now >= watch['end']:
-                try:
-                    await bot.send_message(watch['chat_id'], 'Watch ' + watch['id'] + ' berakhir. Capture aktif tetap berjalan.')
-                except Exception:
-                    log.warning('telegram watch=%s expiry notice unavailable', watch['id'])
-                    continue
+                if bot is not None and watch.get('chat_id') is not None:
+                    try:
+                        await bot.send_message(watch['chat_id'], 'Watch ' + watch['id'] + ' berakhir. Capture aktif tetap berjalan.')
+                    except Exception:
+                        log.warning('telegram watch=%s expiry notice unavailable', watch['id'])
+                        continue
                 watch['status'] = 'expired'
                 telegram_store.save_watch(watch)
                 continue
@@ -424,14 +403,21 @@ class Controls:
             if now + time.monotonic() - clock_started >= watch['end']:
                 continue
             for video in live:
-                job = dict(job_id=uuid.uuid4().hex, chat_id=watch['chat_id'], source='youtube',
-                           source_name='YouTube', url=video['url'], requested_at=now, origin='telegram_watch', is_live=True, compression='original')
-                task = dict(job=job, chat_id=watch['chat_id'], user_id=watch['user_id'],
+                chat_id = watch.get('chat_id', 'web')
+                job = dict(job_id=uuid.uuid4().hex, chat_id=chat_id, source='youtube',
+                           source_name='YouTube', url=video['url'], requested_at=now,
+                           origin='telegram_watch' if telegram_owned else 'web_watch',
+                           is_live=True, compression='original')
+                task = dict(job=job, owner_type='telegram' if telegram_owned else 'web',
                             auto_transcribe=watch['auto_transcribe'], dispatch='pending')
+                if telegram_owned:
+                    task.update(chat_id=watch['chat_id'], user_id=watch['user_id'])
                 if telegram_store.claim_video(watch['id'], video['id'], task) and watch['mode'] == 'first':
                     break
         await self.dispatch(bot)
-        await self.notify_jobs(bot)
+        await self.advance_web_transcripts()
+        if bot is not None:
+            await self.notify_jobs(bot)
 
     async def notify_jobs(self, bot):
         for key, task in telegram_store.tasks():

@@ -24,15 +24,17 @@ def save_watch(watch):
                    (watch['id'], json.dumps(watch)))
 
 
-def cancel_watch(watch_id, user_id=None, chat_id=None):
+def cancel_watch(watch_id, user_id=None, chat_id=None, owner_type=None, owner_id=None):
     """Cancel discovery in the shared ledger without touching queued/running jobs."""
     with storage.connection() as db:
         tables(db)
         db.execute('BEGIN IMMEDIATE')
         row = db.execute('SELECT data FROM telegram_watches WHERE id=?', (watch_id,)).fetchone()
         watch = json.loads(row['data']) if row else None
-        if not watch or (user_id is not None and watch['user_id'] != user_id) or (
-                chat_id is not None and watch['chat_id'] != chat_id):
+        if not watch or (user_id is not None and watch.get('user_id') != user_id) or (
+                chat_id is not None and watch.get('chat_id') != chat_id) or (
+                owner_type is not None and watch.get('owner_type') != owner_type) or (
+                owner_id is not None and watch.get('owner_id') != owner_id):
             return None
         watch['status'] = 'cancelled'
         db.execute('UPDATE telegram_watches SET data=? WHERE id=?', (json.dumps(watch), watch_id))

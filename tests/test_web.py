@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, AsyncMock
 from pathlib import Path
 import fakeredis
@@ -87,7 +88,7 @@ class WebTests(unittest.TestCase):
             self.assertEqual(next(w for w in self.client.get('/api/admin/watches').json['watches']
                                   if w['id'] == 'waiting')['status'], 'waiting')
 
-    def test_watch_apis_require_admin_auth_csrf_and_do_not_offer_web_creation(self):
+    def test_legacy_admin_watch_routes_remain_admin_only_and_read_cancel_only(self):
         self.save_watch()
         anonymous = self.app.test_client()
         self.assertEqual(anonymous.get('/api/admin/watches').status_code, 401)
@@ -100,6 +101,55 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.client.post('/api/admin/watches/watch/cancel', json={}).status_code, 403)
         self.assertEqual(self.post('admin/watches', {}).status_code, 405)
         self.assertEqual(telegram_store.watches()[0]['status'], 'active')
+
+    def test_web_watch_creation_validation_wib_and_sanitized_shared_listing(self):
+        payload = dict(channel='@rribatam', date='2099-10-06', start_time='08:00', end_time='10:30',
+                       mode='every', auto_transcribe=True)
+        created = self.post('watches', payload)
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.json['status'], 'waiting')
+        watch = telegram_store.watches()[0]
+        self.assertEqual(watch['owner_type'], 'web')
+        self.assertEqual(watch['owner_id'], 'admin')
+        self.assertNotIn('chat_id', watch)
+        self.assertNotIn('user_id', watch)
+        self.assertEqual(datetime.fromtimestamp(watch['start'], timezone(timedelta(hours=7))).strftime('%Y-%m-%d %H:%M'),
+                         '2099-10-06 08:00')
+        listed = self.client.get('/api/watches')
+        self.assertEqual(listed.json['active_count'], 1)
+        self.assertNotIn('chat_id', listed.text)
+        self.assertNotIn('user_id', listed.text)
+        for changes in [dict(channel='https://youtube.com/watch?v=abcdefghijk'),
+                        dict(end_time='07:00'), dict(mode='sometimes'),
+                        dict(date='2020-01-01')]:
+            invalid = self.post('watches', {**payload, **changes})
+            self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(len(telegram_store.watches()), 1)
+
+    def test_web_watch_auth_ownership_and_cancel_do_not_stop_capture(self):
+        admin_watch = self.post('watches', dict(channel='@admin', date='2099-10-06',
+                                start_time='08:00', end_time='10:00', mode='first',
+                                auto_transcribe=False)).json['id']
+        anonymous = self.app.test_client()
+        self.assertEqual(anonymous.post('/api/watches', json={}).status_code, 401)
+        user = self.app.test_client()
+        token = user.post('/api/login', json={'password': 'test-password'}).json['csrf']
+        headers = {'X-CSRF-Token': token}
+        created = user.post('/api/watches', json=dict(channel='@user', date='2099-10-06',
+                            start_time='08:00', end_time='10:00', mode='first',
+                            auto_transcribe=False), headers=headers)
+        self.assertEqual(created.status_code, 201)
+        user_watch = created.json['id']
+        self.assertEqual([row['id'] for row in user.get('/api/watches').json['watches']], [user_watch])
+        self.assertEqual(user.post('/api/watches/' + admin_watch + '/cancel', json={}, headers=headers).status_code, 404)
+        self.redis.set('capture:owner', 'running-job')
+        self.redis.rpush('download_queue', 'running-task')
+        self.assertEqual(user.post('/api/watches/' + user_watch + '/cancel', json={}, headers=headers).status_code, 200)
+        self.assertEqual(next(w for w in telegram_store.watches() if w['id'] == user_watch)['status'], 'cancelled')
+        self.assertEqual(self.redis.get('capture:owner'), 'running-job')
+        self.assertEqual(self.redis.lrange('download_queue', 0, -1), ['running-task'])
+        self.assertEqual(self.redis.keys('stop:*'), [])
+        self.assertEqual(len(self.client.get('/api/watches').json['watches']), 2)
 
     def test_watch_discovery_issue_and_recording_derive_from_shared_job_without_window_stop(self):
         self.save_watch('issue')

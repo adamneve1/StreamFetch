@@ -18,11 +18,12 @@ import redis
 # pyrefly: ignore [missing-import]
 from telegram import Bot
 try:
-    from . import archive, quality, storage
+    from . import archive, quality, storage, telegram_controls
 except ImportError:
     import archive
     import quality
     import storage
+    import telegram_controls
 
 
 DOWNLOAD_DIR = Path("/downloads")
@@ -1489,6 +1490,18 @@ async def main():
     log.info('Worker running')
     await asyncio.to_thread(recover_processing)
     archival = asyncio.create_task(archive_worker())
+    async def watch_loop():
+        controls = telegram_controls.Controls(r)
+        interval = max(10, int(os.getenv('TELEGRAM_WATCH_POLL_SECONDS', '30')))
+        while True:
+            try:
+                await controls.tick(None)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.warning('Shared watch tick failed', exc_info=True)
+            await asyncio.sleep(interval)
+    watching = asyncio.create_task(watch_loop())
     try:
         while True:
             try:
@@ -1503,7 +1516,8 @@ async def main():
                 await asyncio.sleep(3)
     finally:
         archival.cancel()
-        await asyncio.gather(archival, return_exceptions=True)
+        watching.cancel()
+        await asyncio.gather(archival, watching, return_exceptions=True)
 
 
 if __name__ == '__main__':

@@ -43,9 +43,12 @@ class Element {
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
 }
 
-function fixture(motion) {
+function fixture(motion, href = 'https://streamfetch.example/') {
   const root = path.resolve(__dirname, '..');
   const html = fs.readFileSync(path.join(root, 'app/static/index.html'), 'utf8');
+  const parsedLocation = new URL(href);
+  const location = { origin: parsedLocation.origin, search: parsedLocation.search, hash: parsedLocation.hash,
+    replace(value) { this.replaced = value; } };
   const body = new Element('body'); body.root = true;
   const ids = new Map([...html.matchAll(/id="([^"]+)"/g)].map(match => [match[1], new Element()]));
   body.append(...ids.values());
@@ -55,7 +58,7 @@ function fixture(motion) {
   const context = vm.createContext({
     document: { body, getElementById: id => ids.get(id), createElement: tag => new Element(tag),
       createElementNS: (_, tag) => new Element(tag), addEventListener() {} },
-    window: { addEventListener() {}, StreamFetchMotion:motion }, URLSearchParams, Intl,
+    window: { addEventListener() {}, StreamFetchMotion:motion, location }, URL, URLSearchParams, Intl,
     setInterval() {}, setTimeout() {}, clearTimeout() {},
     // Keep auto-login pending; each test drives the state itself.
     fetch: () => new Promise(() => {}),
@@ -456,7 +459,7 @@ test('mobile shell and island use dedicated composition, touch targets, and loca
   assert.match(shell,/\.app-header\{grid-template-columns:minmax\(0,1fr\) auto auto/);
   assert.match(shell,/width:44px;min-height:44px/);assert.match(shell,/env\(safe-area-inset-left\)/);
   assert.match(shell,/grid-template-areas:'state action' 'content content' 'metadata metadata' 'markers markers'/);
-  assert.match(shell,/grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/);
+  assert.match(shell,/grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
   assert.match(shell,/\.workspace-page \.table-scroll\{overflow-x:auto;overscroll-behavior-x:contain\}/);
   assert.match(shell,/overflow-wrap:anywhere/);assert.doesNotMatch(shell,/backdrop-filter:blur|overflow-x:hidden/);
 });
@@ -524,6 +527,28 @@ test('login submission shows busy state, preserves the API payload, and clears p
   assert.equal(f.run('csrf'),'test-csrf');assert.equal(entered.is_admin,true);
   assert.equal(f.get('password').value,'');assert.equal(f.get('login-submit').disabled,false);
   assert.equal(f.get('login-submit').textContent,'Masuk');assert.equal(f.get('login-form').attributes['aria-busy'],'false');
+});
+
+test('successful login returns to the safe Reader URL, including its query and fragment',async()=>{
+  const motion={loginReveal(){},loginInteract(){},loginSuccess(){this.succeeded=true;}};
+  const next=encodeURIComponent('/api/recordings/reader-job/transcript/view?mode=compact');
+  const f=fixture(motion,'https://streamfetch.example/?next='+next+'#segment-4');
+  f.context.fetch=async()=>({status:200,ok:true,headers:{get:()=> 'application/json'},json:async()=>({csrf:'reader-csrf',is_admin:false})});
+  f.context.enter=()=>{throw Error('Reader login must navigate instead of entering the workspace');};
+  f.get('password').value='reader-test';
+  await f.get('login-form').onsubmit({preventDefault(){}});
+  assert.equal(f.context.window.location.replaced,'/api/recordings/reader-job/transcript/view?mode=compact#segment-4');
+  assert.equal(motion.succeeded,true);assert.equal(f.get('password').value,'');
+});
+
+test('external and protocol-relative login return URLs are rejected',async()=>{
+  for(const target of ['https://evil.example/transcript','//evil.example/transcript','/\\evil.example/transcript']){
+    const f=fixture(undefined,'https://streamfetch.example/?next='+encodeURIComponent(target));let entered;
+    f.context.fetch=async()=>({status:200,ok:true,headers:{get:()=> 'application/json'},json:async()=>({csrf:'safe-csrf',is_admin:false})});
+    f.context.enter=async auth=>{entered=auth;};
+    await f.get('login-form').onsubmit({preventDefault(){}});
+    assert.equal(f.context.window.location.replaced,undefined);assert.equal(entered.csrf,'safe-csrf');
+  }
 });
 
 test('login errors remain visible, retain input, support correction, and returning to login focuses password',async()=>{
@@ -678,25 +703,37 @@ test('Settings Watches show shared schedules, compact WIB metadata, terminal sta
  assert.equal(f.run('watchWindow({})'),'—');
  f.run('renderWatches({watches:[],active_count:0})');assert.equal(f.get('watch-feedback').textContent,'Belum ada watch.');
 });
-test('Watches load only for admins, handle list errors locally, and expose no web creation form',async()=>{
+test('Watches load for authenticated roles and handle list errors locally',async()=>{
  const f=fixture(),calls=[];
  f.context.fetch=async url=>{calls.push(url);return {ok:false,status:503,headers:{get:()=> 'application/json'},json:async()=>({error:'Watch unavailable'})};};
- await f.run('loadWatches()');assert.deepEqual(calls,[]);
- f.run("isAdmin=true;showSection('admin')");await new Promise(setImmediate);
- assert.deepEqual(calls,['/api/admin/watches']);assert.equal(f.get('watch-feedback').textContent,'Watch unavailable');
+ await f.run('loadWatches()');assert.deepEqual(calls,['/api/watches']);
+ assert.equal(f.get('watch-feedback').textContent,'Watch unavailable');
  assert.equal(f.get('notice').textContent,'');
  const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
  const panel=html.split('id="watches-panel"')[1].split('</section>')[0];
- assert.match(panel,/hidden/);assert.match(panel,/Watches/);assert.doesNotMatch(panel,/<form|<input|<select/);
+ assert.match(panel,/hidden/);assert.match(panel,/Watches/);assert.match(html,/id="tab-watch"/);assert.match(html,/id="watch-url"/);
 });
-test('Watches visibility follows login roles and cancellation reuses the admin API without stopping capture',async()=>{
- const f=fixture();captureAPI(f);await f.run('enter({is_admin:false})');assert.equal(f.get('watches-panel').hidden,true);
+test('Watches visibility follows authenticated roles and cancellation reuses the shared API without stopping capture',async()=>{
+ const f=fixture();captureAPI(f);await f.run('enter({is_admin:false})');assert.equal(f.get('watches-panel').hidden,false);
  await f.run('enter({is_admin:true})');assert.equal(f.get('watches-panel').hidden,false);
  f.run("renderWatches({active_count:1,watches:[{id:'watch',channel:'@rri',start:100,end:200,status:'active',mode:'first',auto_transcribe:false}]})");
  const calls=[];f.context.fetch=async(url,options)=>{calls.push([url,options.method]);return {ok:true,status:200,headers:{get:()=> 'application/json'},json:async()=>url.endsWith('/cancel')?{ok:true}:{active_count:0,watches:[{id:'watch',channel:'@rri',start:100,end:200,status:'cancelled',mode:'first',auto_transcribe:false}]}};};
  const button=f.get('watch-list').querySelector('button');const pending=button.onclick();assert.equal(button.disabled,true);await pending;
- assert.deepEqual(calls,[['/api/admin/watches/watch/cancel','POST'],['/api/admin/watches','GET']]);
+ assert.deepEqual(calls,[['/api/watches/watch/cancel','POST'],['/api/watches','GET']]);
  assert.equal(f.get('watch-count').textContent,'0 aktif');assert.equal(f.get('watch-list').querySelector('button'),null);
+});
+test('Watch Source validates locally, posts canonical WIB fields, and immediately opens the shared list',async()=>{
+ const f=fixture(),calls=[];f.run("setMode('watch')");
+ f.get('watch-url').value='@rribatam';f.get('watch-day').value='date';f.get('watch-day').onchange();
+ f.get('watch-date').value='2099-10-06';f.get('watch-start').value='08:00';f.get('watch-end').value='10:00';
+ f.get('watch-mode').value='every';f.get('watch-auto').checked=true;f.get('watch-url').oninput();
+ f.context.fetch=async(url,options)=>{calls.push([url,options?.method,options?.body&&JSON.parse(options.body)]);return {ok:true,status:url==='/api/watches'&&options?.method==='POST'?201:200,headers:{get:()=> 'application/json'},json:async()=>url==='/api/watches'&&options?.method==='POST'?{id:'watch',status:'waiting'}:{active_count:1,watches:[{id:'watch',channel:'@rribatam',start:1,end:2,status:'waiting',mode:'every',auto_transcribe:true}]}};};
+ await f.get('record').onclick();
+ assert.deepEqual(calls[0],['/api/watches','POST',{channel:'@rribatam',date:'2099-10-06',start_time:'08:00',end_time:'10:00',mode:'every',auto_transcribe:true}]);
+ assert.equal(f.get('workspace').dataset.destination,'settings');assert.equal(f.get('watch-count').textContent,'1 aktif');
+ assert.equal(f.get('notice').textContent,'Watch tersimpan · Waiting.');assert.equal(f.get('watch-url').value,'');
+ f.run("setMode('watch')");f.get('watch-url').value='@rribatam';f.get('watch-date').value='2099-10-06';f.get('watch-start').value='10:00';f.get('watch-end').value='09:00';
+ calls.length=0;await f.get('record').onclick();assert.equal(calls.length,0);assert.match(f.get('notice').textContent,/Jam akhir/);
 });
 test('failed cancellation preserves watch controls, and a stale list cannot overwrite post-cancel data',async()=>{
  const f=fixture();f.run("isAdmin=true;renderWatches({active_count:1,watches:[{id:'watch',channel:'@rri',start:100,end:200,status:'active',mode:'first'}]})");
@@ -835,16 +872,16 @@ test('minimal island markup omits duplicate metadata and moves live markers outs
  assert.match(css,/width:fit-content/);assert.match(css,/\[data-phase=processing\]/);assert.match(css,/\[data-phase=completed\]\{min-width:0;min-height:0;max-width:min\(100%,360px\)/);
  assert.match(css,/white-space:nowrap;text-overflow:ellipsis;overflow:hidden/);
 });
-test('Source selector fills the bounded form with four equally sized, quieter controls',()=>{
+test('Source selector fills the bounded form with five equally sized, quieter controls',()=>{
  const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8').split('/* One continuous Source selector')[1];
- assert.match(css,/#capture-panel \.tabs\{display:grid;grid-template-columns:repeat\(4,minmax\(0,1fr\)\);width:100%\}/);
+ assert.match(css,/#capture-panel \.tabs\{display:grid;grid-template-columns:repeat\(5,minmax\(0,1fr\)\);width:100%\}/);
  assert.match(css,/#capture-panel \.tab\{min-width:0;text-align:center;font-weight:400/);
  assert.match(css,/\.tab\.selected\{font-weight:500\}/);
  assert.match(css,/#capture-panel label\{font-weight:500/);
  const f=fixture();
- for(const mode of ['youtube','tiktok','instagram','oryx']){
+ for(const mode of ['youtube','tiktok','instagram','oryx','watch']){
   f.run(`setMode('${mode}')`);
-  for(const source of ['youtube','tiktok','instagram','oryx'])assert.equal(f.get('tab-'+source).attributes['aria-pressed'],String(source===mode));
+  for(const source of ['youtube','tiktok','instagram','oryx','watch'])assert.equal(f.get('tab-'+source).attributes['aria-pressed'],String(source===mode));
  }
 });
 test('active island fills History while compact states and single-line title hierarchy remain scoped',()=>{
