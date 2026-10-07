@@ -1,5 +1,6 @@
 """Shared Watch validation and persistence for web and Telegram interfaces."""
 import re
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
@@ -73,7 +74,7 @@ def create_watch(channel, day, start_time, end_time, mode='first', auto_transcri
         raise ValueError('Pemilik watch tidak valid.')
     watch = dict(id=uuid.uuid4().hex[:12], owner_type=owner_type, owner_id=str(owner_id),
                  channel=channel, start=start, end=end, mode=mode,
-                 auto_transcribe=auto_transcribe, status='active')
+                 auto_transcribe=auto_transcribe, status='active', created_at=time.time())
     if owner_type == 'telegram':
         watch.update(user_id=user_id, chat_id=chat_id)
     telegram_store.save_watch(watch)
@@ -82,3 +83,28 @@ def create_watch(channel, day, start_time, end_time, mode='first', auto_transcri
 
 def web_can_manage(watch, role):
     return role == 'admin' or (watch.get('owner_type') == 'web' and watch.get('owner_id') == role)
+
+
+def telegram_can_manage(watch, user_id, chat_id):
+    if watch.get('owner_type', 'telegram') == 'telegram':
+        return watch.get('user_id') == user_id and watch.get('chat_id') == chat_id
+    for role in ('user', 'admin'):
+        destination = telegram_store.web_destination(role)
+        if destination == dict(user_id=user_id, chat_id=chat_id) and web_can_manage(watch, role):
+            return True
+    return False
+
+
+def watch_state(watch, now=None):
+    """Shared display state from the canonical Watch and its last capture."""
+    now = time.time() if now is None else now
+    state = watch['status']
+    if state == 'active':
+        state = ('expired' if now >= watch['end'] else 'discovery_issue'
+                 if now >= watch['start'] and watch.get('discovery_error') else 'waiting')
+    last = watch.get('last_capture') or {}
+    row = storage.recording(last['job_id']) if last.get('job_id') else None
+    if (row and row.get('state') in {'recording', 'stopping', 'finalizing'}
+            and watch['status'] != 'cancelled'):
+        state = 'recording'
+    return state

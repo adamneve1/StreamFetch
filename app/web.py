@@ -291,16 +291,12 @@ def create_app(client=None):
         for watch in telegram_store.watches():
             if not watch_service.web_can_manage(watch, role):
                 continue
-            status = watch['status']
-            if status == 'active':
-                status = 'expired' if now >= watch['end'] else 'discovery_issue' if now >= watch['start'] and watch.get('discovery_error') else 'waiting'
+            status = watch_service.watch_state(watch, now)
             last = watch.get('last_capture')
             if last:
                 recording = storage.recording(last.get('job_id')) or {}
                 last = dict(last, title=(recording.get('source_metadata') or {}).get('title') or recording.get('note'),
                             state=recording.get('state'))
-                if recording.get('state') in {'recording', 'stopping', 'finalizing'} and watch['status'] != 'cancelled':
-                    status = 'recording'
             rows.append(dict(id=watch['id'], channel=watch['channel'], name=watch.get('channel_name'),
                              start=watch['start'], end=watch['end'], mode=watch['mode'],
                              auto_transcribe=watch['auto_transcribe'], status=status, last_capture=last,
@@ -505,6 +501,7 @@ def create_app(client=None):
         if result != 'accepted':
             return jsonify(error='Masih ada rekaman yang berjalan. Tunggu sampai selesai, ya.' if result == 'busy' else 'Perekamnya belum siap. Coba lagi sebentar atau hubungi admin.'), 409
         storage.save_capture_request(job)
+        telegram_store.subscribe_web(job['job_id'], session.get('role', 'user'))
         return jsonify(job_id=job['job_id']), 202
 
     @app.post('/api/recordings/<job_id>/retry')
@@ -542,6 +539,7 @@ def create_app(client=None):
             return jsonify(error=messages.get(result, messages['offline'])), 409
         storage.save_capture_request(job)
         storage.save_recording(job, 'queued', f'Percobaan {number}/{number} · Menunggu worker…')
+        telegram_store.subscribe_web(job['job_id'], session.get('role', 'user'))
         return jsonify(job_id=job['job_id'], retry_of=job_id, attempt_root_id=root,
                        attempt_number=number, attempt_total=number), 202
 

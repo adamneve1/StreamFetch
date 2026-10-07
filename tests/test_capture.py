@@ -278,15 +278,15 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
                 target.write_bytes(b'valid-media-placeholder')
                 with patch.object(worker, 'capture', AsyncMock(return_value='operator_stop')), \
                      patch.object(worker, 'inspect_youtube', AsyncMock(return_value={'title': 'test', 'is_live': True})), \
-                     patch.object(worker, 'complete_recording', return_value=target) as complete:
+                     patch.object(worker, 'complete_recording', return_value=target) as complete, \
+                     patch.object(worker, 'set_state', wraps=worker.set_state) as states:
                     await worker.run_download(job)
                 complete.assert_called_once_with(job)
                 self.assertEqual(self.redis.get('state:test-job'), 'ready')
                 self.assertIsNone(self.redis.get('capture:owner'))
-                messages = [c.args[2] for c in worker.edit.call_args_list]
-                self.assertLess(next(i for i, m in enumerate(messages) if 'Finalizing' in m),
-                                next(i for i, m in enumerate(messages) if 'Ready' in m))
-                worker.edit.reset_mock()
+                transitions = [call.args[2] for call in states.call_args_list]
+                self.assertLess(transitions.index('finalizing'), transitions.index('ready'))
+                worker.edit.assert_not_awaited()
 
     @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'FFmpeg required')
     async def test_stopped_ts_becomes_valid_named_mp4_without_transcode(self):
@@ -342,13 +342,15 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.1)
             self.fail('Capture did not produce media')
 
-        with patch.object(worker, 'capture_command', return_value=(command, path)):
+        with patch.object(worker, 'capture_command', return_value=(command, path)), \
+             patch.object(worker, 'set_state', wraps=worker.set_state) as states:
             await asyncio.wait_for(asyncio.gather(worker.run_download(job), operator_stop()), 20)
         self.assertEqual(self.redis.get('state:test-job'), 'ready')
         self.assertEqual(len(list(self.root.glob('*.mp4'))), 1)
-        messages = [c.args[2] for c in worker.edit.call_args_list]
-        self.assertTrue(any('Stopping' in m for m in messages))
-        self.assertTrue(any('Finalizing' in m for m in messages))
+        transitions = [call.args[2] for call in states.call_args_list]
+        self.assertIn('stopping', transitions)
+        self.assertIn('finalizing', transitions)
+        worker.edit.assert_not_awaited()
 
     async def test_rename_failure_never_reports_ready(self):
         job = self.job()
@@ -465,7 +467,10 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
                  patch.object(worker, 'capture', AsyncMock()) as capture:
                 await worker.run_download(job)
             capture.assert_not_called()
-            self.assertEqual(json.loads(self.redis.get('web:job:test-job'))['detail'], error.detail)
+            public = json.loads(self.redis.get('web:job:test-job'))
+            self.assertEqual(public['state'], 'failed')
+            self.assertEqual(public['detail'], diagnostic.decode())
+            self.assertTrue(public['error_message'])
 
     async def test_social_cancellation_and_telegram_finite_admission(self):
         job = self.job('instagram')

@@ -1402,8 +1402,8 @@ async def run_download(job):
     stage = 'starting'
     try:
         DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        if job.get('origin') != 'web':
-            status = await send(job['chat_id'], '⏳ Starting: menyiapkan capture...')
+        # The shared durable subscriptions publish lifecycle notices. Sending a
+        # second worker status message would duplicate events and edit progress.
         await set_state(job, status, 'starting')
         if not storage.disk_status(DOWNLOAD_DIR)['can_record']:
             await set_state(job, status, 'failed', 'Ruang disk downloads terlalu rendah atau tidak bisa diperiksa. Kosongkan ruang sebelum merekam.')

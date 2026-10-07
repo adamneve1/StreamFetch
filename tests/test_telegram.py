@@ -4,13 +4,14 @@ import os
 import tempfile
 import unittest
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import fakeredis
 
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', '123456:TEST_TOKEN')
-from app import bot, storage, telegram_controls as tc, telegram_store as store, transcription_queue, watch_service
+from app import bot, storage, telegram_controls as tc, telegram_store as store, transcription_queue, watch_service, web, worker
 
 
 class TelegramTests(unittest.IsolatedAsyncioTestCase):
@@ -18,6 +19,10 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         env = patch.dict(os.environ, DATA_DIR=self.tmp.name,
+                         DOWNLOAD_DIR=self.tmp.name, WEB_SECRET_KEY='test-secret',
+                         WEB_PASSWORD='test-password', WEB_ADMIN_PASSWORD='admin-password',
+                         WEB_USER_TELEGRAM_USER_ID='', WEB_USER_TELEGRAM_CHAT_ID='',
+                         WEB_ADMIN_TELEGRAM_USER_ID='', WEB_ADMIN_TELEGRAM_CHAT_ID='',
                          TELEGRAM_ALLOWED_USER_IDS='7,8', STREAMFETCH_PUBLIC_URL='https://stream.example')
         env.start()
         self.addCleanup(env.stop)
@@ -45,6 +50,274 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         storage.save_recording(dict(job_id=job_id, source='youtube', filename='dialog.mp4'), state)
         if transcript:
             storage.save_transcription_state(job_id, transcript, txt_filename='dialog.txt')
+
+    def web_watch(self, role='user', **fields):
+        with patch.object(watch_service, 'watch_window', return_value=(100, 200)):
+            watch = watch_service.create_watch('@web-channel', 'tomorrow', '09:00', '10:00',
+                                              owner_type='web', owner_id=role)
+        watch.update(fields)
+        store.save_watch(watch)
+        return watch
+
+    async def test_watchlist_empty_and_unassociated_web_watch_are_safe(self):
+        update = self.update()
+        await self.controls.watchlist(update, self.context)
+        self.assertEqual(update.message.reply_text.call_args.args[0], 'Belum ada Watch aktif.')
+        self.web_watch()
+        await self.controls.watchlist(update, self.context)
+        self.assertEqual(update.message.reply_text.call_args.args[0], 'Belum ada Watch aktif.')
+
+    async def test_watchlist_shared_origins_owner_fields_states_and_cancel(self):
+        telegram_watch = self.watch(mode='every', auto=True)
+        web_watch = self.web_watch()
+        admin_watch = self.web_watch('admin')
+        foreign = dict(telegram_watch, id='foreign', user_id=8, channel='https://www.youtube.com/@private')
+        store.save_watch(foreign)
+        update = self.update()
+        with patch.dict(os.environ, WEB_USER_TELEGRAM_USER_ID='7', WEB_USER_TELEGRAM_CHAT_ID='77'), \
+                patch.object(tc.time, 'time', return_value=90):
+            await self.controls.watchlist(update, self.context)
+            message = update.message.reply_text.call_args.args[0]
+            for value in ('@rribatam', '@web-channel', 'WIB', 'First', 'Every', 'Auto-transcribe: on', 'Waiting'):
+                self.assertIn(value, message)
+            for identifier in (telegram_watch['id'], web_watch['id'], admin_watch['id'], 'foreign', 'user_id', 'chat_id'):
+                self.assertNotIn(identifier, message)
+            self.assertEqual(len(update.message.reply_text.call_args.kwargs['reply_markup'].inline_keyboard), 2)
+            await self.controls.cancelwatch_callback(self.update(user=8, callback='watchcancel:' + web_watch['id']), self.context)
+            self.assertEqual(next(w for w in store.watches() if w['id'] == web_watch['id'])['status'], 'active')
+            other_chat = self.update(callback='watchcancel:' + web_watch['id'])
+            other_chat.effective_chat.id = 88
+            await self.controls.cancelwatch_callback(other_chat, self.context)
+            self.assertEqual(next(w for w in store.watches() if w['id'] == web_watch['id'])['status'], 'active')
+            await self.controls.cancelwatch_callback(self.update(callback='watchcancel:' + web_watch['id']), self.context)
+            self.context.args = [telegram_watch['id']]
+            await self.controls.cancelwatch(update, self.context)
+        watches = {w['id']: w for w in store.watches()}
+        self.assertEqual(watches[web_watch['id']]['status'], 'cancelled')
+        self.assertEqual(watches[telegram_watch['id']]['status'], 'cancelled')
+        self.assertEqual(watches['foreign']['status'], 'active')
+        self.assertEqual(self.redis.keys('stop:*'), [])
+
+    async def test_watchlist_derived_recording_discovery_issue_recent_expired_and_admin_scope(self):
+        recording = self.watch(identifier='recording-watch')
+        recording.update(status='finished', last_capture=dict(job_id='recording-job'))
+        store.save_watch(recording)
+        self.recording('recording-job', state='recording')
+        issue = self.watch(identifier='issue-watch')
+        store.discovery_state(issue['id'], 'probe failure', 110)
+        self.watch(identifier='expired-watch', end=120)
+        self.watch(identifier='historic-watch', start=-100000, end=-90000)
+        self.web_watch('user')
+        self.web_watch('admin')
+        with patch.dict(os.environ, WEB_ADMIN_TELEGRAM_USER_ID='7', WEB_ADMIN_TELEGRAM_CHAT_ID='77'), \
+                patch.object(tc.time, 'time', return_value=150):
+            update = self.update()
+            await self.controls.watchlist(update, self.context)
+        message = update.message.reply_text.call_args.args[0]
+        for state in ('Recording', 'Discovery issue', 'Expired', 'Waiting'):
+            self.assertIn(state, message)
+        self.assertEqual(message.count('@web-channel'), 2)
+        self.assertEqual(message.count('@rribatam'), 3)
+
+    async def test_watch_created_cancelled_and_expired_notifications_persist(self):
+        with patch.dict(os.environ, WEB_USER_TELEGRAM_USER_ID='7', WEB_USER_TELEGRAM_CHAT_ID='77'):
+            watch = self.web_watch()
+            await self.controls.tick(self.sender, 90)
+            await tc.Controls(self.redis).tick(self.sender, 90)
+            self.assertEqual(self.sender.send_message.await_count, 1)
+            self.assertIn('Watch tersimpan', self.sender.send_message.call_args.args[1])
+            self.assertNotIn(watch['id'], self.sender.send_message.call_args.args[1])
+            store.cancel_watch(watch['id'])
+            await tc.Controls(self.redis).tick(self.sender, 90)
+            await tc.Controls(self.redis).tick(self.sender, 90)
+            self.assertEqual(self.sender.send_message.await_count, 2)
+            self.assertIn('dibatalkan', self.sender.send_message.call_args.args[1])
+        self.watch(identifier='expiring')
+        self.sender.send_message.side_effect = RuntimeError('blocked')
+        await self.controls.tick(self.sender, 200)
+        self.assertEqual(next(w for w in store.watches() if w['id'] == 'expiring')['status'], 'expired')
+        self.sender.send_message.side_effect = None
+        await tc.Controls(self.redis).tick(self.sender, 210)
+        count = self.sender.send_message.await_count
+        await tc.Controls(self.redis).tick(self.sender, 220)
+        self.assertEqual(self.sender.send_message.await_count, count)
+        self.assertIn('berakhir', self.sender.send_message.call_args.args[1])
+
+    async def test_admin_cancellation_notifies_other_web_owner_destination(self):
+        with patch.dict(os.environ, WEB_USER_TELEGRAM_USER_ID='8', WEB_USER_TELEGRAM_CHAT_ID='88',
+                        WEB_ADMIN_TELEGRAM_USER_ID='7', WEB_ADMIN_TELEGRAM_CHAT_ID='77'):
+            watch = self.web_watch(created_notice=True)
+            await self.controls.cancelwatch_callback(self.update(callback='watchcancel:' + watch['id']), self.context)
+            await self.controls.notify_watches(self.sender)
+            self.assertEqual(self.sender.send_message.call_args.args[0], 88)
+            self.assertIn('dibatalkan', self.sender.send_message.call_args.args[1])
+            await tc.Controls(self.redis).notify_watches(self.sender)
+            self.assertEqual(self.sender.send_message.await_count, 1)
+
+    async def test_capture_progress_and_transcript_processing_are_quiet(self):
+        self.recording(state='starting')
+        store.subscribe('video-job', 77, 7, monitor_capture=True)
+        await self.controls.notify_jobs(self.sender)
+        self.sender.send_message.assert_not_awaited()
+        for _ in range(3):
+            self.recording(state='recording')
+            await tc.Controls(self.redis).notify_jobs(self.sender)
+        self.assertEqual(self.sender.send_message.await_count, 1)
+        self.recording(transcript='transcribing')
+        await self.controls.notify_jobs(self.sender)
+        self.assertEqual(self.sender.send_message.await_count, 2)
+        self.assertTrue(all('Transkripsi' not in call.args[1] for call in self.sender.send_message.call_args_list))
+
+    async def test_identical_discovery_errors_dedupe_across_recovery_and_restart(self):
+        self.watch(mode='every')
+        error = tc.subprocess.CalledProcessError(1, 'yt-dlp', stderr=b'403 https://host/?token=secret Cookie: secret')
+        with patch.object(tc, 'discover_live', side_effect=error):
+            for now in (110, 120, 130):
+                await tc.Controls(self.redis).tick(self.sender, now)
+        self.assertEqual(self.sender.send_message.await_count, 1)
+        self.assertNotIn('secret', self.sender.send_message.call_args.args[1])
+        with patch.object(tc, 'discover_live', return_value=[]):
+            await self.controls.tick(self.sender, 140)
+        with patch.object(tc, 'discover_live', side_effect=error):
+            await tc.Controls(self.redis).tick(self.sender, 150)
+        self.assertEqual(self.sender.send_message.await_count, 1)
+
+    async def test_mapped_web_watch_live_detection_and_capture_share_subscription(self):
+        with patch.dict(os.environ, WEB_USER_TELEGRAM_USER_ID='7', WEB_USER_TELEGRAM_CHAT_ID='77'):
+            watch = self.web_watch()
+            with patch.object(tc, 'discover_live', return_value=[self.live()]):
+                await self.controls.tick(None, 100)
+            await tc.Controls(self.redis).tick(self.sender, 110)
+            job = dict(store.tasks())['capture:abcdefghijk']['job']
+            storage.save_recording(dict(job, filename='web.mp4', started_at=105), 'ready')
+            await tc.Controls(self.redis).tick(self.sender, 120)
+            notices = [call.args[1] for call in self.sender.send_message.call_args_list]
+            for event in ('Watch tersimpan', 'Live terdeteksi', 'Capture dimulai', 'Capture selesai'):
+                self.assertEqual(sum(event in text for text in notices), 1)
+            self.assertTrue(all(call.args[0] == 77 for call in self.sender.send_message.call_args_list))
+            self.assertEqual(self.redis.llen('download_queue'), 1)
+            self.assertEqual(next(w for w in store.watches() if w['id'] == watch['id'])['status'], 'finished')
+            await tc.Controls(self.redis).tick(self.sender, 130)
+            self.assertEqual(self.sender.send_message.await_count, 4)
+
+    async def test_web_capture_and_web_transcription_results_notify_only_associated_owner(self):
+        with patch.dict(os.environ, WEB_USER_TELEGRAM_USER_ID='7', WEB_USER_TELEGRAM_CHAT_ID='77'):
+            self.redis.set('worker:heartbeat', 1)
+            client = web.create_app(self.redis).test_client()
+            csrf = client.post('/api/login', json={'password': 'test-password'}).json['csrf']
+            response = client.post('/api/record', json=dict(source='youtube', url=self.live()['url']),
+                                   headers={'X-CSRF-Token': csrf})
+            self.assertEqual(response.status_code, 202)
+            job = json.loads(self.redis.lindex('download_queue', 0))
+            storage.save_recording(dict(job, filename='web.mp4', started_at=100), 'ready')
+            await self.controls.notify_jobs(self.sender)
+            response = client.post('/api/recordings/' + job['job_id'] + '/transcript', json={},
+                                   headers={'X-CSRF-Token': csrf})
+            self.assertEqual(response.status_code, 202)
+            storage.save_transcription_state(job['job_id'], 'completed')
+            await tc.Controls(self.redis).notify_jobs(self.sender)
+            self.assertEqual(self.sender.send_message.await_count, 3)
+            self.assertIn('Transkripsi selesai', self.sender.send_message.call_args.args[1])
+            await tc.Controls(self.redis).notify_jobs(self.sender)
+            self.assertEqual(self.sender.send_message.await_count, 3)
+
+    async def test_successful_start_checkpoint_survives_terminal_send_failure(self):
+        storage.save_recording(dict(job_id='fast', source='youtube', filename='fast.mp4', started_at=100), 'ready')
+        store.subscribe('fast', 77, 7, monitor_capture=True, auto_transcribe=True)
+        self.sender.send_message.side_effect = [None, RuntimeError('blocked')]
+        await self.controls.notify_jobs(self.sender)
+        self.assertEqual(self.redis.llen('transcription_queue'), 1)
+        self.assertTrue(store.task('subscription:fast:77:7')['capture_started'])
+        self.sender.send_message.side_effect = None
+        await tc.Controls(self.redis).notify_jobs(self.sender)
+        self.assertEqual(sum('Capture dimulai' in call.args[1] for call in self.sender.send_message.call_args_list), 1)
+        self.assertTrue(store.task('subscription:fast:77:7')['capture_done'])
+
+    async def test_duplicate_subscribers_same_chat_receive_one_notice(self):
+        self.recording()
+        store.subscribe('video-job', 77, 7, monitor_capture=True)
+        store.subscribe('video-job', 77, 8, monitor_capture=True)
+        await self.controls.notify_jobs(self.sender)
+        await tc.Controls(self.redis).notify_jobs(self.sender)
+        self.assertEqual(self.sender.send_message.await_count, 1)
+
+    async def test_legacy_successful_checkpoints_do_not_replay_after_upgrade(self):
+        self.recording()
+        transcription_queue.enqueue(self.redis, 'video-job')
+        storage.save_transcription_state('video-job', 'completed')
+        store.subscribe('video-job', 77, 7, monitor_capture=True, monitor_transcript=True,
+                        capture_done=True, transcript_notice='completed')
+        for identifier, state in (('old-expired', 'expired'), ('old-cancelled', 'cancelled')):
+            watch = self.watch(identifier=identifier)
+            watch['status'] = state
+            store.save_watch(watch)
+        await tc.Controls(self.redis).notify_jobs(self.sender)
+        await tc.Controls(self.redis).notify_watches(self.sender)
+        self.sender.send_message.assert_not_awaited()
+        self.assertEqual(store.task('subscription:video-job:77:7')['transcript_request_notice'],
+                         storage.recording('video-job')['transcript']['request_id'])
+
+    async def test_transcript_terminal_notifications_dedupe_by_canonical_request(self):
+        self.recording(transcript='failed')
+        storage.save_transcription_state('video-job', 'failed', error='403 https://host/?token=secret Cookie: secret')
+        store.subscribe('video-job', 77, 7, monitor_transcript=True)
+        await self.controls.notify_jobs(self.sender)
+        await tc.Controls(self.redis).notify_jobs(self.sender)
+        self.assertEqual(self.sender.send_message.await_count, 1)
+        self.assertNotIn('secret', self.sender.send_message.call_args.args[1])
+        transcription_queue.enqueue(self.redis, 'video-job')
+        storage.save_transcription_state('video-job', 'transcribing')
+        await self.controls.notify_jobs(self.sender)
+        self.assertEqual(self.sender.send_message.await_count, 1)
+        storage.save_transcription_state('video-job', 'failed')
+        await tc.Controls(self.redis).notify_jobs(self.sender)
+        self.assertEqual(self.sender.send_message.await_count, 2)
+        transcription_queue.enqueue(self.redis, 'video-job')
+        storage.save_transcription_state('video-job', 'completed')
+        with patch.dict(os.environ, STREAMFETCH_PUBLIC_URL=''):
+            await self.controls.notify_jobs(self.sender)
+        self.assertEqual(self.sender.send_message.await_count, 3)
+        self.assertIsNone(self.sender.send_message.call_args.kwargs['reply_markup'])
+        await tc.Controls(self.redis).notify_jobs(self.sender)
+        self.assertEqual(self.sender.send_message.await_count, 3)
+
+    async def test_missing_or_revoked_destination_and_subscription_failure_do_not_affect_web_jobs(self):
+        for configuration in ({}, {'WEB_USER_TELEGRAM_USER_ID': '99', 'WEB_USER_TELEGRAM_CHAT_ID': '77'},
+                              {'WEB_USER_TELEGRAM_USER_ID': '7', 'WEB_USER_TELEGRAM_CHAT_ID': 'not-a-chat'}):
+            with patch.dict(os.environ, configuration):
+                store.subscribe_web('silent-job', 'user')
+        self.assertEqual(store.tasks(), [])
+        with patch.dict(os.environ, WEB_USER_TELEGRAM_USER_ID='7', WEB_USER_TELEGRAM_CHAT_ID='77'):
+            with patch.object(store, 'subscribe', side_effect=RuntimeError('unavailable')):
+                store.subscribe_web('silent-job', 'user')
+            store.subscribe_web('silent-job', 'user')
+        self.recording('silent-job')
+        await self.controls.notify_jobs(self.sender)
+        self.sender.send_message.assert_not_awaited()
+
+    async def test_failed_telegram_sends_do_not_change_capture_or_transcription_result(self):
+        self.recording(transcript='completed')
+        store.subscribe('video-job', 77, 7, monitor_capture=True, monitor_transcript=True)
+        self.sender.send_message.side_effect = RuntimeError('offline')
+        await self.controls.notify_jobs(self.sender)
+        self.assertEqual(storage.recording('video-job')['state'], 'ready')
+        self.assertEqual(storage.recording('video-job')['transcript']['status'], 'completed')
+        self.sender.send_message.side_effect = None
+        await tc.Controls(self.redis).notify_jobs(self.sender)
+        self.assertEqual(self.sender.send_message.await_count, 3)
+
+    async def test_worker_commits_capture_failure_without_sending_progress_message(self):
+        job = dict(job_id='worker-failure', source='youtube', chat_id=77, url=self.live()['url'])
+        store.subscribe(job['job_id'], 77, 7, monitor_capture=True)
+        with patch.object(worker, 'r', self.redis), patch.object(worker, 'DOWNLOAD_DIR', Path(self.tmp.name)), \
+                patch.object(worker, 'inspect_youtube', AsyncMock(side_effect=RuntimeError('https://host/?token=secret'))), \
+                patch.object(worker, 'send', AsyncMock()) as send:
+            await worker.run_download(job)
+        send.assert_not_awaited()
+        self.assertEqual(storage.recording(job['job_id'])['state'], 'failed')
+        await self.controls.notify_jobs(self.sender)
+        self.assertIn('Capture gagal', self.sender.send_message.call_args.args[1])
+        self.assertNotIn('secret', self.sender.send_message.call_args.args[1])
 
     def test_wib_today_tomorrow_date_and_boundaries(self):
         now = datetime(2026, 10, 4, 9, tzinfo=tc.WIB)
@@ -149,7 +422,9 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('secret', ''.join(logs.output))
         self.assertIn('403', store.watches()[0]['discovery_error'])
         self.assertEqual(self.redis.llen('download_queue'), 0)
-        self.assertEqual(self.sender.send_message.await_count, 0)
+        self.assertEqual(self.sender.send_message.await_count, 1)
+        self.assertIn('discovery issue', self.sender.send_message.call_args.args[1])
+        self.assertNotIn('secret', self.sender.send_message.call_args.args[1])
         with patch.object(tc, 'discover_live', return_value=[]):
             await self.controls.tick(self.sender, 120)
         self.assertIsNone(store.watches()[0]['discovery_error'])
@@ -340,7 +615,10 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(watch['mode'], 'first')
         self.assertFalse(watch['auto_transcribe'])
         await self.controls.watchlist(update, self.context)
-        self.assertIn(watch['id'], update.message.reply_text.call_args.args[0])
+        self.assertNotIn(watch['id'], update.message.reply_text.call_args.args[0])
+        self.assertIn('Waiting', update.message.reply_text.call_args.args[0])
+        self.assertEqual(update.message.reply_text.call_args.kwargs['reply_markup'].inline_keyboard[0][0].callback_data,
+                         'watchcancel:' + watch['id'])
         self.context.args = [watch['id']]
         await self.controls.cancelwatch(self.update(user=8), self.context)
         self.assertEqual(store.watches()[0]['status'], 'active')
@@ -371,7 +649,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.watches(), [])
         for command in ['@rribatam today 08:00-10:00', 'https://youtube.com/@rribatam tomorrow 08.00-10.00']:
             self.context.args = command.split()
-            with patch.object(tc, 'watch_window', return_value=(100, 200)):
+            with patch.object(watch_service, 'watch_window', return_value=(100, 200)):
                 await self.controls.watch(self.update(), self.context)
         self.assertNotIn('watch_draft', self.context.user_data)
         self.assertEqual(len(store.watches()), 2)
@@ -475,7 +753,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(good['capture_done'])
 
     def test_command_defaults_and_link_config_required_for_auto_transcribe(self):
-        with patch.object(tc, 'watch_window', return_value=(100, 200)):
+        with patch.object(watch_service, 'watch_window', return_value=(100, 200)):
             watch = self.controls.create_watch(['https://youtube.com/@rribatam', 'today', '09:00', '10:00'], 7, 77)
             self.assertEqual(watch['mode'], 'first')
             self.assertFalse(watch['auto_transcribe'])

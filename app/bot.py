@@ -205,6 +205,7 @@ def main():
     app.add_handler(CommandHandler('watch', controls.watch))
     app.add_handler(CommandHandler('watchlist', controls.watchlist))
     app.add_handler(CommandHandler('cancelwatch', controls.cancelwatch))
+    app.add_handler(CallbackQueryHandler(controls.cancelwatch_callback, pattern=r'^watchcancel:'))
     app.add_handler(CommandHandler('transcribe', controls.transcribe))
     app.add_handler(CallbackQueryHandler(controls.callback, pattern=r'^transcribe:'))
     app.add_handler(CallbackQueryHandler(controls.watch_callback, pattern=r'^watch:'))

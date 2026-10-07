@@ -132,6 +132,29 @@ misalnya `123456789,987654321`. Tanpa allowlist, semua command/callback ditolak.
 `STREAMFETCH_PUBLIC_URL` harus menunjuk workspace yang bisa dibuka pengguna,
 misalnya `https://streamfetch.example.com`; View Transcript tetap memakai login web.
 
+`/watchlist` membaca ledger Watch yang sama dengan web: channel, window WIB,
+First/Every, auto-transcribe, dan Waiting/Recording/Discovery issue/Expired.
+Watch expired ditampilkan selama 24 jam; Watch First yang selesai discovery
+tetap muncul selama capture berjalan. Tombol Batalkan memeriksa pemilik dan
+chat lagi; `/cancelwatch ID` tetap didukung untuk ID yang sudah diketahui.
+
+Untuk menghubungkan pemilik web ke tujuan Telegram, isi pasangan opsional
+`WEB_USER_TELEGRAM_USER_ID` / `WEB_USER_TELEGRAM_CHAT_ID` dan/atau
+`WEB_ADMIN_TELEGRAM_USER_ID` / `WEB_ADMIN_TELEGRAM_CHAT_ID`. User harus ada dalam
+`TELEGRAM_ALLOWED_USER_IDS`; chat dapat berupa ID pribadi atau grup. Tanpa
+asosiasi eksplisit, aktivitas web tidak mengirim pesan. Pemilik Telegram yang
+terhubung dapat melihat/membatalkan Watch web sesuai hak role web tersebut;
+Watch Telegram tetap dibatasi ke user dan chat pembuatnya.
+
+Bot mengirim perubahan penting: Watch dibuat, live terdeteksi, discovery issue,
+expiry/cancel, capture mulai/selesai/gagal, dan hasil transkripsi. Progress dan
+poll normal tidak mengirim pesan. Checkpoint pesan tersimpan di ledger SQLite
+`./data` yang sama; restart tidak mengulang pesan yang sudah berhasil dikirim.
+Error identik per Watch dideduplikasi dan credential/URL di diagnostic disanitasi.
+Auto-transcribe dan job tetap berjalan jika tujuan tidak ada atau Telegram gagal;
+pesan yang gagal dikirim dicoba kembali. Tombol Transcribe/View Transcript
+memakai aksi yang sudah tersedia (View membutuhkan `STREAMFETCH_PUBLIC_URL`).
+
 `/watch` memandu konfigurasi channel → Today/Tomorrow/Choose date → window dalam
 satu pesan → auto-transcribe Yes/No → Confirm. Channel menerima `@rribatam`,
 `youtube.com/@rribatam`, atau URL lengkap. Tombol Cancel atau `/cancelwatch`

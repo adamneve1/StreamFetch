@@ -1,5 +1,6 @@
 """Telegram watch discovery and notifications around the existing workers."""
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -142,6 +143,29 @@ def transcript_button(row):
     return None
 
 
+def safe_notice(value):
+    # Use the capture worker's existing credential/URL sanitizer.
+    try:
+        from .worker import safe_diagnostic
+    except ImportError:
+        from worker import safe_diagnostic
+    return safe_diagnostic(value)[:300]
+
+
+def watch_summary(watch):
+    return (watch['channel'][:120] + '\n'
+            + datetime.fromtimestamp(watch['start'], WIB).strftime('%d/%m %H:%M')
+            + '–' + datetime.fromtimestamp(watch['end'], WIB).strftime('%H:%M')
+            + ' WIB · ' + watch['mode'].title()
+            + ' · Auto-transcribe: ' + ('on' if watch['auto_transcribe'] else 'off'))
+
+
+def watch_destination(watch):
+    if watch.get('owner_type', 'telegram') == 'telegram':
+        return dict(chat_id=watch.get('chat_id'), user_id=watch.get('user_id'))
+    return telegram_store.web_destination(watch.get('owner_id'))
+
+
 class Controls:
     def __init__(self, client):
         self.client = client
@@ -170,7 +194,8 @@ class Controls:
         try:
             watch = self.create_watch(watch_arguments(context.args), update.effective_user.id, update.effective_chat.id)
             context.user_data.pop('watch_draft', None)
-            await update.effective_message.reply_text('Watch ' + watch['id'] + ' tersimpan · ' + watch['mode'] + ' · WIB.')
+            await update.effective_message.reply_text('Watch tersimpan · ' + watch_summary(watch))
+            telegram_store.update_watch(watch['id'], created_notice=True)
         except ValueError as exc:
             await update.effective_message.reply_text(str(exc))
 
@@ -231,7 +256,8 @@ class Controls:
                 watch = self.create_watch([draft['channel'], draft['day'], draft['start'], draft['end'], 'first', draft['auto']],
                                           update.effective_user.id, update.effective_chat.id)
                 context.user_data.pop('watch_draft', None)
-                await message.reply_text('Watch ' + watch['id'] + ' tersimpan · first live · WIB.')
+                await message.reply_text('Watch tersimpan · ' + watch_summary(watch))
+                telegram_store.update_watch(watch['id'], created_notice=True)
                 return
             else:
                 raise ValueError('Mulai ulang dengan /watch.')
@@ -259,13 +285,50 @@ class Controls:
 
     @authorized
     async def watchlist(self, update, context):
-        watches = [w for w in telegram_store.watches() if w['user_id'] == update.effective_user.id
-                   and w['chat_id'] == update.effective_chat.id and w['status'] == 'active']
-        lines = [w['id'] + ' · ' + datetime.fromtimestamp(w['start'], WIB).strftime('%d/%m %H:%M')
-                 + '–' + datetime.fromtimestamp(w['end'], WIB).strftime('%H:%M')
-                 + ' WIB · ' + w['mode'] + (' · transcribe' if w['auto_transcribe'] else '')
-                 + '\n' + w['channel'] for w in watches]
-        await update.effective_message.reply_text('\n\n'.join(lines) or 'Tidak ada watch aktif.')
+        now = time.time()
+        watches = []
+        for watch in telegram_store.watches():
+            if not watch_service.telegram_can_manage(watch, update.effective_user.id, update.effective_chat.id):
+                continue
+            state = watch_service.watch_state(watch, now)
+            if (state in {'waiting', 'recording', 'discovery_issue'}
+                    or state == 'expired' and watch['end'] >= now - 86400):
+                watches.append((watch, state))
+        watches.sort(key=lambda item: (item[1] == 'expired', -item[0]['start']))
+        labels = dict(waiting='Waiting', recording='Recording', discovery_issue='Discovery issue', expired='Expired')
+        lines, buttons = [], []
+        for number, (watch, state) in enumerate(watches, 1):
+            line = str(number) + '. ' + watch_summary(watch) + '\n' + labels[state]
+            if sum(len(item) + 2 for item in lines) + len(line) > 3500:
+                await update.effective_message.reply_text('\n\n'.join(lines),
+                            reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
+                lines, buttons = [], []
+            lines.append(line)
+            if watch['status'] == 'active' and now < watch['end']:
+                buttons.append([InlineKeyboardButton('Batalkan Watch ' + str(number),
+                                callback_data='watchcancel:' + watch['id'])])
+        await update.effective_message.reply_text('\n\n'.join(lines) or 'Belum ada Watch aktif.',
+                            reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
+
+    def cancel_owned_watch(self, watch_id, user_id, chat_id):
+        watch = next((w for w in telegram_store.watches() if w['id'] == watch_id), None)
+        if not watch or not watch_service.telegram_can_manage(watch, user_id, chat_id):
+            return None
+        if watch.get('owner_type', 'telegram') == 'telegram':
+            return telegram_store.cancel_watch(watch_id, user_id, chat_id)
+        return telegram_store.cancel_watch(watch_id, owner_type='web', owner_id=watch['owner_id'])
+
+    @authorized
+    async def cancelwatch_callback(self, update, context):
+        query = update.callback_query
+        await query.answer()
+        match = re.fullmatch(r'watchcancel:([A-Za-z0-9_-]{1,40})', query.data or '')
+        watch = self.cancel_owned_watch(match[1], update.effective_user.id,
+                                       update.effective_chat.id) if match else None
+        await query.message.reply_text('Discovery dibatalkan. Capture yang sudah dimulai tetap berjalan.'
+                                       if watch else 'Watch tidak ditemukan.')
+        if watch and (watch_destination(watch) or {}).get('chat_id') == update.effective_chat.id:
+            telegram_store.update_watch(watch['id'], cancelled_notice=True)
 
     @authorized
     async def cancelwatch(self, update, context):
@@ -275,8 +338,11 @@ class Controls:
                 return
             await update.effective_message.reply_text('/cancelwatch ID · lihat /watchlist')
             return
-        if telegram_store.cancel_watch(context.args[0], update.effective_user.id, update.effective_chat.id):
+        watch = self.cancel_owned_watch(context.args[0], update.effective_user.id, update.effective_chat.id)
+        if watch:
             await update.effective_message.reply_text('Discovery dibatalkan. Capture yang sudah dimulai tetap berjalan.')
+            if (watch_destination(watch) or {}).get('chat_id') == update.effective_chat.id:
+                telegram_store.update_watch(watch['id'], cancelled_notice=True)
             return
         await update.effective_message.reply_text('Watch tidak ditemukan.')
 
@@ -304,12 +370,13 @@ class Controls:
             if not row or row.get('state') != 'ready' or not str(row.get('filename') or '').lower().endswith('.mp4'):
                 raise ValueError('Rekaman tidak ditemukan atau belum siap.')
             telegram_store.subscribe(job_id, update.effective_chat.id, update.effective_user.id,
-                                     monitor_transcript=True, transcript_notice=None)
+                                     monitor_transcript=True)
             status, created = transcription_queue.enqueue(self.client, job_id)
             if status == 'completed':
                 await query.message.reply_text('Transkrip sudah tersedia.', reply_markup=self.view_button(job_id))
                 telegram_store.subscribe(job_id, update.effective_chat.id, update.effective_user.id,
-                                         transcript_notice='completed')
+                                         transcript_notice='completed',
+                                         transcript_request_notice=(row.get('transcript') or {}).get('request_id'))
             else:
                 await query.message.reply_text('Transkripsi masuk antrean.' if created else 'Transkripsi sedang diproses.')
         except ValueError as exc:
@@ -339,32 +406,75 @@ class Controls:
                 storage.save_recording(task['job'], 'queued', 'Live terdeteksi · capture masuk antrean.')
             if not row or row.get('state') == 'queued':
                 self.client.eval(CAPTURE_ADMIT, 0, task['job']['job_id'], json.dumps(task['job']))
-            if task.get('chat_id') is not None and task.get('user_id') is not None:
+            destination = (dict(chat_id=task['chat_id'], user_id=task['user_id'])
+                           if task.get('chat_id') is not None and task.get('user_id') is not None
+                           else telegram_store.web_destination(task.get('owner_id')))
+            if destination:
+                task.update(destination)
                 telegram_store.subscribe(task['job']['job_id'], task['chat_id'], task['user_id'],
-                                         monitor_capture=True, auto_transcribe=task['auto_transcribe'])
+                                         owner_type=task.get('owner_type', 'telegram'),
+                                         owner_id=task.get('owner_id'),
+                                         monitor_capture=True, monitor_transcript=True,
+                                         auto_transcribe=task['auto_transcribe'])
             task['dispatch'] = 'sent'
-            telegram_store.save_task(key, task)
-        if bot is not None and task.get('chat_id') is not None and not task.get('detected_notice'):
+            telegram_store.update_task(key, dispatch='sent', **(destination or {}))
+        if (bot is not None and task.get('chat_id') is not None and allowed(task.get('user_id'))
+                and (task.get('owner_type') != 'web' or telegram_store.web_destination(task.get('owner_id'))
+                     == dict(chat_id=task['chat_id'], user_id=task.get('user_id')))
+                and not task.get('detected_notice')):
             await bot.send_message(task['chat_id'], 'Live terdeteksi · capture masuk antrean.\n' + task['job']['url'])
-            task['detected_notice'] = True
-            telegram_store.save_task(key, task)
+            telegram_store.update_task(key, detected_notice=True)
 
     async def advance_web_transcripts(self):
-        """Auto-transcribe web captures without creating Telegram subscriptions."""
+        """Advance canonical auto-transcribe independently of optional message sends."""
         for key, task in telegram_store.tasks():
-            if (not key.startswith('capture:') or task.get('owner_type') != 'web'
+            if (not key.startswith(('capture:', 'subscription:'))
                     or not task.get('auto_transcribe') or task.get('transcript_requested')):
                 continue
-            row = storage.recording(task['job']['job_id'])
+            job_id = task.get('job_id') or task['job']['job_id']
+            row = storage.recording(job_id)
             if not row or row.get('state') != 'ready':
                 continue
-            transcription_queue.enqueue(self.client, row['job_id'])
-            task['transcript_requested'] = True
-            telegram_store.save_task(key, task)
+            try:
+                transcription_queue.enqueue(self.client, row['job_id'])
+                telegram_store.update_task(key, transcript_requested=True, monitor_transcript=True)
+            except Exception:
+                log.warning('Watch auto-transcribe unavailable job=%s', job_id)
+
+    async def notify_watches(self, bot):
+        for watch in telegram_store.watches():
+            destination = watch_destination(watch)
+            if not destination or destination.get('chat_id') is None or not allowed(destination.get('user_id')):
+                continue
+            try:
+                if watch.get('created_at') and not watch.get('created_notice'):
+                    await bot.send_message(destination['chat_id'], 'Watch tersimpan · ' + watch_summary(watch))
+                    telegram_store.update_watch(watch['id'], created_notice=True)
+                if watch['status'] in {'expired', 'cancelled'} and not watch.get(watch['status'] + '_notice'):
+                    # Historical terminal watches predate notification checkpoints.
+                    if not any(watch.get(name) for name in ('created_notice', 'created_at', 'expired_at', 'cancelled_at')):
+                        continue
+                    label = 'berakhir' if watch['status'] == 'expired' else 'dibatalkan'
+                    await bot.send_message(destination['chat_id'], 'Watch ' + label + ' · '
+                                           + watch['channel'][:120] + '\nCapture aktif tetap berjalan.')
+                    telegram_store.update_watch(watch['id'], **{watch['status'] + '_notice': True})
+                error = watch.get('discovery_error')
+                if watch['status'] == 'active' and error:
+                    error = safe_notice(error)
+                    digest = hashlib.sha256(error.encode()).hexdigest()
+                    notices = watch.get('discovery_notices', [])
+                    if digest not in notices:
+                        await bot.send_message(destination['chat_id'], 'Watch discovery issue · '
+                                               + watch['channel'][:120] + '\n' + error)
+                        telegram_store.update_watch(watch['id'], discovery_notices=notices + [digest])
+            except Exception:
+                log.warning('Watch notice unavailable watch=%s', watch['id'])
 
     async def tick(self, bot, now=None):
         now = time.time() if now is None else now
         clock_started = time.monotonic()
+        if bot is not None:
+            await self.notify_watches(bot)
         await self.dispatch(bot)
         for watch in telegram_store.watches():
             telegram_owned = watch.get('owner_type', 'telegram') == 'telegram'
@@ -374,14 +484,7 @@ class Controls:
                     telegram_owned and (bot is None or not allowed(watch.get('user_id')))):
                 continue
             if now >= watch['end']:
-                if bot is not None and watch.get('chat_id') is not None:
-                    try:
-                        await bot.send_message(watch['chat_id'], 'Watch ' + watch['id'] + ' berakhir. Capture aktif tetap berjalan.')
-                    except Exception:
-                        log.warning('telegram watch=%s expiry notice unavailable', watch['id'])
-                        continue
-                watch['status'] = 'expired'
-                telegram_store.save_watch(watch)
+                telegram_store.update_watch(watch['id'], status='expired', expired_at=now)
                 continue
             if now < watch['start']:
                 continue
@@ -409,6 +512,7 @@ class Controls:
                            origin='telegram_watch' if telegram_owned else 'web_watch',
                            is_live=True, compression='original')
                 task = dict(job=job, owner_type='telegram' if telegram_owned else 'web',
+                            owner_id=watch.get('owner_id'),
                             auto_transcribe=watch['auto_transcribe'], dispatch='pending')
                 if telegram_owned:
                     task.update(chat_id=watch['chat_id'], user_id=watch['user_id'])
@@ -417,12 +521,19 @@ class Controls:
         await self.dispatch(bot)
         await self.advance_web_transcripts()
         if bot is not None:
+            await self.notify_watches(bot)
             await self.notify_jobs(bot)
 
     async def notify_jobs(self, bot):
+        await self.advance_web_transcripts()
         for key, task in telegram_store.tasks():
-            if key.startswith('subscription:') and allowed(task['user_id']):
+            if key.startswith('subscription:') and allowed(task.get('user_id')) and task.get('chat_id') is not None:
+                if (task.get('owner_type') == 'web' and telegram_store.web_destination(task.get('owner_id'))
+                        != dict(chat_id=task['chat_id'], user_id=task.get('user_id'))):
+                    continue
                 try:
+                    # Prior subscription in this chat may have checkpointed the send.
+                    task = telegram_store.task(key)
                     await self.notify_task(bot, key, task)
                 except Exception:
                     log.warning('telegram job notice unavailable job=%s', task['job_id'])
@@ -432,37 +543,46 @@ class Controls:
         if not row:
             return
         state = row.get('state')
+        label = safe_notice(row.get('filename') or (row.get('source_metadata') or {}).get('title')
+                            or row.get('source_name') or row.get('source') or 'rekaman')
         if task.get('monitor_capture'):
-            if state in {'starting', 'recording', 'waiting', 'finalizing'} and not task.get('capture_started'):
-                await bot.send_message(task['chat_id'], 'Capture dimulai · ' + (row.get('filename') or row['job_id'][:8]))
+            if ((state == 'recording' or row.get('started_at'))
+                    and not task.get('capture_started') and not task.get('capture_done')):
+                await bot.send_message(task['chat_id'], 'Capture dimulai · ' + label)
                 task['capture_started'] = True
+                telegram_store.checkpoint_subscription(key, capture_started=True)
             if state in {'ready', 'failed', 'interrupted'} and not task.get('capture_done'):
                 await bot.send_message(task['chat_id'], ('Capture selesai · ' if state == 'ready' else 'Capture gagal · ')
-                                       + (row.get('filename') or row.get('detail') or row['job_id'][:8])[:500]
-                                       + ('\n' + row['processing_detail'] if state == 'ready' and row.get('processing_detail') else ''),
+                                       + label + ('\n' + safe_notice(row.get('error_message') or row.get('detail'))
+                                                 if state != 'ready' and (row.get('error_message') or row.get('detail')) else '')
+                                       + ('\n' + safe_notice(row['processing_detail']) if state == 'ready' and row.get('processing_detail') else ''),
                                        reply_markup=transcript_button(row) if state == 'ready' else None)
                 task['capture_done'] = True
-            if state == 'ready' and task.get('auto_transcribe') and not task.get('transcript_requested'):
-                reader_url(row['job_id'])
-                task['monitor_transcript'] = True
-                telegram_store.save_task(key, task)
-                queue_status, created = transcription_queue.enqueue(self.client, row['job_id'])
-                task['transcript_requested'] = True
-                if queue_status != 'completed':
-                    await bot.send_message(task['chat_id'], 'Auto-transcribe masuk antrean.' if created else 'Transkripsi sedang diproses.')
+                telegram_store.checkpoint_subscription(key, capture_done=True)
         transcript = (storage.recording(row['job_id']) or {}).get('transcript') or {}
         status = transcript.get('status')
-        if task.get('monitor_transcript') and status and status != task.get('transcript_notice'):
-            if status == 'transcribing':
-                await bot.send_message(task['chat_id'], 'Transkripsi sedang dibuat.')
-            elif status == 'completed':
-                await bot.send_message(task['chat_id'], 'Transkripsi selesai.', reply_markup=self.view_button(row['job_id']))
+        request_id = transcript.get('request_id')
+        if (status in {'completed', 'failed', 'cancelled'} and status == task.get('transcript_notice')
+                and 'transcript_request_notice' not in task):
+            # Upgrade successful checkpoints written by the previous bot.
+            telegram_store.checkpoint_subscription(key, transcript_request_notice=request_id)
+            task['transcript_request_notice'] = request_id
+        if ((task.get('monitor_transcript') or task.get('monitor_capture'))
+                and status in {'completed', 'failed', 'cancelled'}
+                and (status != task.get('transcript_notice') or request_id != task.get('transcript_request_notice'))):
+            if status == 'completed':
+                try:
+                    button = self.view_button(row['job_id'])
+                except ValueError:
+                    button = None
+                await bot.send_message(task['chat_id'], 'Transkripsi selesai.', reply_markup=button)
             elif status == 'failed':
-                await bot.send_message(task['chat_id'], 'Transkripsi gagal. Coba /transcribe untuk retry.')
+                await bot.send_message(task['chat_id'], 'Transkripsi gagal. Coba /transcribe untuk retry.'
+                                       + ('\n' + safe_notice(transcript['error']) if transcript.get('error') else ''))
             elif status == 'cancelled':
                 await bot.send_message(task['chat_id'], 'Transkripsi dibatalkan. Gunakan /transcribe untuk mulai lagi.')
-            task['transcript_notice'] = status
-        telegram_store.save_task(key, task)
+            telegram_store.checkpoint_subscription(key, transcript_notice=status,
+                                                  transcript_request_notice=request_id)
 
     async def loop(self, application):
         interval = max(10, int(os.getenv('TELEGRAM_WATCH_POLL_SECONDS', '30')))
