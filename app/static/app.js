@@ -5,6 +5,7 @@ let focusedJobId=null, submittedJob=null, focusPending=false;
 let historyTotal=0;
 const routeView=()=>window.location.pathname==='/clipper'?'clipper':'control';
 let clipMetadata=null,clipMetadataRevision=0,clipMetadataTimer=null,clipDurationLock=null,clipSubmitting=false;
+let clipPlayer=null,clipPlayerReady=false,clipPlayerGeneration=0,clipPlayerClock=null,clipPendingSeek=null,clipYoutubeAPIPromise=null,clipPreviewVideoId='',clipRelevantBoundary='start';
 const expandedHistoryDetails=new Set();
 const retryingJobs=new Set();
 let watchRefreshId=0,watchLoading=false,watchCreating=false,watchFormClosing=false;
@@ -51,7 +52,7 @@ function resetToasts(){
 }
 function finishDialog(value){
  const request=dialogRequest;if(!request)return;
- dialogRequest=null;request.resolve(value);
+ dialogRequest=null;cleanupDialogMedia();request.resolve(value);
  const dialog=$('app-dialog'),panel=$('app-dialog-form');
  const complete=()=>{
   if(dialogRequest)return;
@@ -61,23 +62,36 @@ function finishDialog(value){
  };
  if(motion?.dialogClose)motion.dialogClose(dialog,panel,complete);else complete();
 }
-function streamDialog({title,message='',value,confirmLabel='Lanjutkan',destructive=false,trigger}={}){
+function cleanupDialogMedia(){
+ for(const id of ['history-video-preview','history-audio-preview']){
+  const media=$(id);try{media.pause();}catch{}media.removeAttribute('src');try{media.load();}catch{}media.hidden=true;media.onerror=null;
+ }
+ $('app-dialog-media').hidden=true;$('history-preview-status').hidden=true;$('history-preview-status').textContent='';
+}
+function streamDialog({title,message='',value,confirmLabel='Lanjutkan',destructive=false,trigger,media}={}){
  closePalette(false);
  if(dialogRequest)finishDialog(dialogRequest.cancelValue);
  const dialog=$('app-dialog'),input=$('app-dialog-input'),hasInput=value!==undefined;
+ cleanupDialogMedia();
  $('app-dialog-title').textContent=title;$('app-dialog-message').textContent=message;
  $('app-dialog-message').hidden=!message;$('app-dialog-label').hidden=!hasInput;input.hidden=!hasInput;
  input.value=hasInput?value:'';$('app-dialog-confirm').textContent=confirmLabel;
  $('app-dialog-confirm').className=destructive?'dialog-danger':'primary';
- dialog.dataset.tone=destructive?'destructive':'default';
- const promise=new Promise(resolve=>{dialogRequest={resolve,trigger,cancelValue:hasInput?null:false,hasInput};});
+ $('app-dialog-confirm').hidden=!!media;$('app-dialog-cancel').textContent=media?'Tutup':'Batal';
+ dialog.dataset.tone=destructive?'destructive':'default';dialog.dataset.mode=media?'media':'default';
+ if(media){
+  const element=$(media.kind==='audio'?'history-audio-preview':'history-video-preview'),status=$('history-preview-status');
+  $('app-dialog-media').hidden=false;element.hidden=false;element.src=media.url;
+  element.onerror=()=>{status.textContent='Preview tidak dapat diputar. File tetap bisa diunduh.';status.hidden=false;};
+ }
+ const promise=new Promise(resolve=>{dialogRequest={resolve,trigger,cancelValue:hasInput?null:false,hasInput,media:!!media};});
  if(!dialog.open)dialog.showModal();document.body.classList.toggle('dialog-open',true);
  motion?.dialogOpen?.(dialog,$('app-dialog-form'));
  if(hasInput){input.focus({preventScroll:true});const dot=value.lastIndexOf('.');input.setSelectionRange(0,dot>0?dot:value.length);}
  else $('app-dialog-cancel').focus({preventScroll:true});
  return promise;
 }
-$('app-dialog-form').onsubmit=event=>{event.preventDefault();if(!dialogRequest)return;finishDialog(dialogRequest.hasInput?$('app-dialog-input').value:true);};
+$('app-dialog-form').onsubmit=event=>{event.preventDefault();if(!dialogRequest)return;finishDialog(dialogRequest.media?false:dialogRequest.hasInput?$('app-dialog-input').value:true);};
 $('app-dialog-cancel').onclick=()=>finishDialog(dialogRequest?.cancelValue);
 $('app-dialog').addEventListener('cancel',event=>{event.preventDefault();finishDialog(dialogRequest?.cancelValue);});
 function showSection(section){
@@ -88,6 +102,8 @@ function showSection(section){
  for(const [id,current] of [['nav-control',!admin&&!clip],['nav-clipper',clip],['nav-admin',admin]]){
   if(current)$(id).setAttribute('aria-current','page');else $(id).removeAttribute('aria-current');
  }
+ if(!clip)destroyClipPlayer();
+ else if(clipMetadata?.video_id&&!clipPlayer&&clipPreviewVideoId!==clipMetadata.video_id)initClipPlayer(clipMetadata.video_id,clipMetadata.url_start||0);
  closeActionMenu();
  if(admin)loadWatches();
 }
@@ -423,6 +439,7 @@ function renderHistory(rows){
   const action=document.createElement('td');action.className='row-actions';
   if(active?.job_id===row.job_id&&!['stopping','ready','failed'].includes(row.state)){const stop=document.createElement('button');stop.type='button';stop.className='capture-stop quiet';stop.title='Hentikan proses';stop.setAttribute('aria-label',stop.title);stop.append(stopIcon());stop.onclick=()=>$('stop').onclick();action.append(stop);}
   if(row.filename&&row.state==='ready'){
+   const preview=document.createElement('button');preview.type='button';preview.className='media-preview-direct';preview.setAttribute('aria-label','Preview '+row.filename);preview.title='Preview';preview.append(previewIcon());preview.onclick=()=>previewHistoryMedia(row,preview);action.append(preview);
    const download=document.createElement('a');download.href='/api/files/'+encodeURIComponent(row.filename);download.className='download-direct';
    download.setAttribute('aria-label','Unduh '+row.filename);download.title='Unduh';download.append(downloadIcon());action.append(download);
   }
@@ -486,6 +503,84 @@ async function refresh(){
   closeActionMenu();renderHistory(rows);renderOperationalStatus();
  }catch(error){online=false;controls();notice(error.message);}
 }
+function setClipPlayerControls(enabled){for(const id of ['clip-set-start','clip-set-end','clip-jump-start','clip-jump-end'])$(id).disabled=!enabled;}
+function destroyClipPlayer(hide=true){
+ clipPlayerGeneration++;clearInterval(clipPlayerClock);clipPlayerClock=null;clipPendingSeek=null;clipPlayerReady=false;
+ try{clipPlayer?.destroy?.();}catch{}
+ clipPlayer=null;clipPreviewVideoId='';setClipPlayerControls(false);
+ if(hide)$('clip-preview').hidden=true;
+}
+function clipPlayerUnavailable(message,generation=clipPlayerGeneration){
+ if(generation!==clipPlayerGeneration)return;
+ clearInterval(clipPlayerClock);clipPlayerClock=null;clipPlayerReady=false;clipPendingSeek=null;
+ try{clipPlayer?.destroy?.();}catch{}
+ clipPlayer=null;$('clip-player-frame').hidden=true;setClipPlayerControls(false);
+ $('clip-current-time').textContent='—';$('clip-player-status').hidden=false;
+ $('clip-player-status').textContent=message||'Preview tidak tersedia untuk video ini. Timestamp manual tetap bisa dipakai.';
+}
+function loadClipYoutubeAPI(){
+ if(window.YT?.Player)return Promise.resolve(window.YT);
+ if(clipYoutubeAPIPromise)return clipYoutubeAPIPromise;
+ clipYoutubeAPIPromise=new Promise((resolve,reject)=>{
+  const previous=window.onYouTubeIframeAPIReady;
+  window.onYouTubeIframeAPIReady=()=>{try{previous?.();}finally{window.YT?.Player?resolve(window.YT):reject(Error('YouTube Player API tidak tersedia.'));}};
+  let script=document.getElementById('youtube-iframe-api');
+  if(!script){script=document.createElement('script');script.id='youtube-iframe-api';script.src='https://www.youtube.com/iframe_api';document.head.append(script);}
+  script.addEventListener('error',()=>reject(Error('YouTube Player API gagal dimuat.')),{once:true});
+ });
+ return clipYoutubeAPIPromise;
+}
+function clipPlayerTime(){
+ if(!clipPlayerReady||!clipPlayer)return null;
+ try{const seconds=Number(clipPlayer.getCurrentTime());return Number.isFinite(seconds)&&seconds>=0?Math.min(seconds,clipMetadata?.duration??seconds):null;}
+ catch{return null;}
+}
+function updateClipPlayerTime(){const seconds=clipPlayerTime();if(seconds!==null)$('clip-current-time').textContent=formatClipTimestamp(Math.floor(seconds));return seconds;}
+function seekClipPreview(seconds){
+ seconds=Number(seconds);if(!Number.isFinite(seconds)||seconds<0)return false;
+ seconds=Math.min(seconds,clipMetadata?.duration??seconds);
+ if(!clipPlayerReady||!clipPlayer){clipPendingSeek=seconds;return false;}
+ try{clipPlayer.seekTo(seconds,true);$('clip-current-time').textContent=formatClipTimestamp(Math.floor(seconds));return true;}
+ catch{clipPlayerUnavailable();return false;}
+}
+async function initClipPlayer(videoId,initialSeconds=0){
+ destroyClipPlayer(false);const generation=clipPlayerGeneration;
+ $('clip-preview').hidden=false;$('clip-player-frame').hidden=false;$('clip-player-status').hidden=false;
+ $('clip-player-status').textContent='Memuat preview YouTube…';$('clip-current-time').textContent='00:00';
+ if(!/^[A-Za-z0-9_-]{11}$/.test(videoId||'')){clipPlayerUnavailable('Preview tidak tersedia untuk video ini. Timestamp manual tetap bisa dipakai.',generation);return;}
+ clipPreviewVideoId=videoId;
+ try{
+  await loadClipYoutubeAPI();if(generation!==clipPlayerGeneration)return;
+  const mount=document.createElement('div');mount.id='clip-youtube-player';$('clip-player-frame').replaceChildren(mount);
+  const config={videoId,host:'https://www.youtube-nocookie.com',playerVars:{playsinline:1,enablejsapi:1,origin:window.location.origin,start:Math.max(0,Math.floor(initialSeconds||0))},events:{
+   onReady:event=>{
+    if(generation!==clipPlayerGeneration){event.target?.destroy?.();return;}
+    clipPlayer=event.target||clipPlayer;clipPlayerReady=true;setClipPlayerControls(true);$('clip-player-status').hidden=true;
+    const seek=clipPendingSeek??Math.max(0,Number(initialSeconds)||0);clipPendingSeek=null;if(seek)seekClipPreview(seek);
+    updateClipPlayerTime();clearInterval(clipPlayerClock);clipPlayerClock=setInterval(updateClipPlayerTime,500);
+   },
+   onError:()=>clipPlayerUnavailable('Video ini tidak mengizinkan preview tersemat. Timestamp manual tetap bisa dipakai.',generation),
+  }};
+  clipPlayer=new window.YT.Player(mount,config);
+ }catch{if(generation===clipPlayerGeneration)clipPlayerUnavailable('Preview YouTube gagal dimuat. Timestamp manual tetap bisa dipakai.',generation);}
+}
+function setClipBoundary(which){
+ clipRelevantBoundary=which;
+ const seconds=clipPlayerTime();if(seconds===null)return false;
+ const value=Math.floor(seconds),id=which==='start'?'clip-start':'clip-end';$(id).value=formatClipTimestamp(value);
+ clipInputChanged(which);return true;
+}
+function jumpToClipBoundary(which){
+ clipRelevantBoundary=which;
+ const id=which==='start'?'clip-start':'clip-end';let seconds;try{seconds=parseClipTimestamp($(id).value);}catch{return false;}
+ return seekClipPreview(seconds);
+}
+function clipBoundaryShortcut(event){
+ const tag=event.target?.tagName?.toUpperCase();
+ if(event.defaultPrevented||event.repeat||event.isComposing||event.metaKey||event.ctrlKey||event.altKey||event.shiftKey||$('clipper-room').hidden||!clipPlayerReady||['INPUT','TEXTAREA','SELECT','BUTTON','A'].includes(tag)||event.target?.isContentEditable)return;
+ const key=event.key?.toLowerCase();if(key!=='i'&&key!=='o')return;
+ event.preventDefault();setClipBoundary(key==='i'?'start':'end');
+}
 function youtubeClipUrlValid(value){try{const url=new URL(value);return ['youtube.com','www.youtube.com','m.youtube.com','youtu.be'].includes(url.hostname)&&['http:','https:'].includes(url.protocol);}catch{return false;}}
 function setClipDurationLock(seconds){
  clipDurationLock=seconds;
@@ -513,7 +608,7 @@ function updateClipControls(){
  return range;
 }
 function resetClipMetadata(message='Tempel link untuk membaca judul dan durasi tanpa mengunduh media.'){
- clipMetadata=null;clipMetadataRevision++;clearTimeout(clipMetadataTimer);setClipDurationLock(null);
+ clipMetadata=null;clipMetadataRevision++;clearTimeout(clipMetadataTimer);setClipDurationLock(null);destroyClipPlayer();
  $('clip-metadata').hidden=true;$('clip-helpers').hidden=true;$('clip-thumbnail').hidden=true;$('clip-thumbnail').src='';
  $('clip-title').textContent='';$('clip-total-duration').textContent='';$('clip-metadata-status').textContent=message;
  $('clip-error').textContent='';$('clip-end').value='';$('clip-calculated-duration').textContent='—';$('create-clip').disabled=true;
@@ -530,9 +625,10 @@ async function loadClipMetadata(){
   for(const value of [15,30,60,90])$('clip-duration-'+value).disabled=value>Math.floor(data.duration);
   $('clip-thumbnail').hidden=!data.thumbnail;if(data.thumbnail)$('clip-thumbnail').src=data.thumbnail;
   $('clip-start').value=formatClipTimestamp(data.url_start||0);$('clip-end').value='';setClipDurationLock(null);
-  const reveal=()=>{$('clip-metadata').hidden=false;$('clip-helpers').hidden=false;};
-  if(motion?.clipperReveal)motion.clipperReveal($('clipper-panel'),reveal,[$('clip-metadata'),$('clip-helpers')]);else reveal();
+  const reveal=()=>{$('clip-metadata').hidden=false;$('clip-preview').hidden=false;$('clip-helpers').hidden=false;};
+  if(motion?.clipperReveal)motion.clipperReveal($('clipper-panel'),reveal,[$('clip-metadata'),$('clip-preview'),$('clip-helpers')]);else reveal();
   $('clip-metadata-status').textContent=data.url_start?'Timestamp URL dipakai sebagai Start · '+data.url_start_label:'Metadata siap. Pilih durasi atau isi End.';
+  initClipPlayer(data.video_id,data.url_start||0);
   updateClipControls();
  }catch(error){if(revision===clipMetadataRevision)resetClipMetadata(error.message);}
 }
@@ -549,12 +645,12 @@ function clipInputChanged(which){
 }
 function normalizeClipInput(id){try{$(id).value=formatClipTimestamp(parseClipTimestamp($(id).value));}catch{}updateClipControls();}
 function nudgeClip(which,delta){
- if(!clipMetadata)return;const input=$(which==='start'?'clip-start':'clip-end');let value;try{value=parseClipTimestamp(input.value);}catch{value=0;}
+ if(!clipMetadata)return;clipRelevantBoundary=which;const input=$(which==='start'?'clip-start':'clip-end');let value;try{value=parseClipTimestamp(input.value);}catch{value=0;}
  if(which==='end'&&clipDurationLock!==null)setClipDurationLock(null);
  const maximum=which==='start'&&clipDurationLock!==null?Math.max(0,Math.floor(clipMetadata.duration)-clipDurationLock):Math.floor(clipMetadata.duration);
  value=Math.max(0,Math.min(maximum,value+delta));input.value=formatClipTimestamp(value);
  if(which==='start'&&clipDurationLock!==null)$('clip-end').value=formatClipTimestamp(value+clipDurationLock);
- updateClipControls();input.focus({preventScroll:true});
+ updateClipControls();seekClipPreview(value);input.focus({preventScroll:true});
 }
 function updateClipFormat(){const audio=$('clip-format').value==='mp3';$('clip-quality').disabled=audio;$('clip-compression').disabled=audio;if(audio){$('clip-quality').value='best';$('clip-compression').value='original';}$('clip-compression-hint').textContent=audio?'Kompresi video tidak berlaku untuk audio MP3.':'Pertahankan kualitas sumber jika kompatibel.';}
 async function enter(auth){const view=routeView();isAdmin=!!auth?.is_admin;motion?.loginSuccess?.($('workspace'));$('login').hidden=true;$('workspace').hidden=false;showSection(view);positionSourceTab();$('role-badge').textContent=isAdmin?'Admin':'Pengguna';$('admin-panel').hidden=!isAdmin;$('settings-admin').hidden=!isAdmin;$('settings-nav-admin').hidden=!isAdmin;$('watches-panel').hidden=false;$('delete-selected').hidden=!isAdmin;updateFormatControls();updateClipFormat();await loadSources();await refresh();motion?.returnReveal?.($('workspace'),$('page-title'),[view==='clipper'?$('clipper-panel'):$('capture-panel'),$('history-panel')]);}
@@ -636,6 +732,10 @@ $('record').onclick=async()=>{if(pending)return;pending=true;$('record').textCon
 $('clip-url').oninput=scheduleClipMetadata;
 $('clip-start').oninput=()=>clipInputChanged('start');$('clip-end').oninput=()=>clipInputChanged('end');
 $('clip-start').onblur=()=>normalizeClipInput('clip-start');$('clip-end').onblur=()=>normalizeClipInput('clip-end');
+$('clip-start').onfocus=()=>{clipRelevantBoundary='start';};$('clip-end').onfocus=()=>{clipRelevantBoundary='end';};
+$('clip-set-start').onclick=()=>setClipBoundary('start');$('clip-set-end').onclick=()=>setClipBoundary('end');
+$('clip-jump-start').onclick=()=>jumpToClipBoundary('start');$('clip-jump-end').onclick=()=>jumpToClipBoundary('end');
+document.addEventListener('keydown',clipBoundaryShortcut);
 for(const value of [15,30,60,90])$('clip-duration-'+value).onclick=()=>chooseClipDuration(value);
 $('clip-duration-custom').onclick=()=>chooseClipDuration(null);
 for(const [id,which,delta] of [['clip-start-minus-5','start',-5],['clip-start-minus-1','start',-1],['clip-start-plus-1','start',1],['clip-start-plus-5','start',5],['clip-end-minus-5','end',-5],['clip-end-minus-1','end',-1],['clip-end-plus-1','end',1],['clip-end-plus-5','end',5]])$(id).onclick=()=>nudgeClip(which,delta);
@@ -690,6 +790,13 @@ function closeActionMenu(focus=false){if(!openActionMenu)return;const {panel,tri
 function menuButton(label,handler,danger=false){const button=document.createElement('button');button.type='button';button.textContent=label;button.setAttribute('role','menuitem');if(danger)button.className='danger';button.onclick=()=>{const trigger=openActionMenu?.trigger||button;closeActionMenu();handler(trigger);};return button;}
 function toggleActionMenu(trigger,row){if(openActionMenu?.trigger===trigger){closeActionMenu();return;}closeActionMenu();const panel=document.createElement('div');panel.className='action-menu-panel';panel.setAttribute('role','menu');panel.setAttribute('aria-label','Aksi '+(row.filename||'riwayat'));if(row.filename&&row.state==='ready')panel.append(menuButton('Ubah nama',dialogTrigger=>renameJob(row,dialogTrigger)));if(isAdmin)panel.append(menuButton('Hapus',dialogTrigger=>deleteJobs([row.job_id],dialogTrigger),true));document.body.append(panel);trigger.setAttribute('aria-expanded','true');openActionMenu={panel,trigger};const rect=trigger.getBoundingClientRect(),gap=6,margin=8,width=panel.offsetWidth,height=panel.offsetHeight;const left=Math.max(margin,Math.min(rect.right-width,window.innerWidth-width-margin));let top=rect.bottom+gap;if(top+height>window.innerHeight-margin)top=rect.top-height-gap;panel.style.left=left+'px';panel.style.top=Math.max(margin,top)+'px';panel.querySelector('button')?.focus();}
 function downloadIcon(){const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-hidden','true');svg.setAttribute('fill','none');svg.setAttribute('stroke','currentColor');svg.setAttribute('stroke-width','1.8');svg.setAttribute('stroke-linecap','round');svg.setAttribute('stroke-linejoin','round');for(const d of ['M12 3v12','M7 10l5 5 5-5','M5 21h14']){const path=document.createElementNS(ns,'path');path.setAttribute('d',d);svg.append(path);}return svg;}
+function previewIcon(){const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg'),path=document.createElementNS(ns,'path');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-hidden','true');svg.setAttribute('fill','none');svg.setAttribute('stroke','currentColor');svg.setAttribute('stroke-width','1.8');svg.setAttribute('stroke-linejoin','round');path.setAttribute('d','M8 5.5v13l10-6.5z');svg.append(path);return svg;}
+function historyMediaKind(row){const extension=(row.filename||'').split('.').pop().toLowerCase();return ['mp3','m4a','aac','wav','ogg','opus','flac'].includes(extension)||row.output_format==='mp3'?'audio':'video';}
+function previewHistoryMedia(row,trigger){
+ if(!row?.filename||row.state!=='ready')return false;
+ streamDialog({title:row.filename,message:'Preview hasil media',trigger,media:{kind:historyMediaKind(row),url:'/api/files/'+encodeURIComponent(row.filename)+'?inline=1'}});
+ return true;
+}
 document.addEventListener('pointerdown',event=>{if(openActionMenu&&!openActionMenu.panel.contains(event.target)&&event.target!==openActionMenu.trigger)closeActionMenu();});
 document.addEventListener('keydown',event=>{if(event.key==='Escape')closeActionMenu(true);});
 window.addEventListener('resize',()=>{closeActionMenu();positionSourceTab();});window.addEventListener('scroll',()=>closeActionMenu(),true);
@@ -765,4 +872,4 @@ $('command-search').onkeydown=event=>{
  if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();selectPalette(paletteIndex+(event.key==='ArrowDown'?1:-1));}
  if(event.key==='Enter'){event.preventDefault();executePalette();}
 };
-window.addEventListener('pagehide',()=>{closePalette(false);resetToasts();});
+window.addEventListener('pagehide',()=>{destroyClipPlayer();closePalette(false);resetToasts();});

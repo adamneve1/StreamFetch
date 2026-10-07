@@ -201,8 +201,14 @@ def create_app(client=None):
         response.headers['Cache-Control'] = 'no-store'
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['X-Frame-Options'] = 'DENY'
-        response.headers['Content-Security-Policy'] = ("default-src 'self'; script-src 'self'; style-src 'self'; "
-                                                       "img-src 'self' data: https://i.ytimg.com; frame-ancestors 'none'")
+        response.headers['Content-Security-Policy'] = (
+            "default-src 'self'; script-src 'self'; style-src 'self'; "
+            "img-src 'self' data: https://i.ytimg.com; frame-ancestors 'none'")
+        if request.endpoint in {'index', 'clipper_page'}:
+            response.headers['Content-Security-Policy'] = (
+                "default-src 'self'; script-src 'self' https://www.youtube.com; style-src 'self'; "
+                "img-src 'self' data: https://i.ytimg.com; frame-src https://www.youtube-nocookie.com; "
+                "frame-ancestors 'none'")
         if request.endpoint == 'view_transcript':
             response.headers['Content-Security-Policy'] = (
                 "default-src 'self'; script-src 'self' https://www.youtube.com; "
@@ -493,6 +499,7 @@ def create_app(client=None):
             snapshot = dict(url=url, duration=duration, title=str(info.get('title') or 'Video YouTube')[:500])
             r.set('clip:metadata:' + token, json.dumps(snapshot), ex=900)
             return jsonify(token=token, title=snapshot['title'], thumbnail=thumbnail,
+                           video_id=clipper.youtube_video_id(info.get('id')),
                            duration=duration, duration_label=clipper.format_timestamp(round(duration)),
                            url_start=clipper.youtube_url_start(url),
                            url_start_label=clipper.format_timestamp(clipper.youtube_url_start(url)))

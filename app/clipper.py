@@ -43,6 +43,12 @@ def format_timestamp(seconds):
     return f'{hours:02d}:{minutes:02d}:{seconds:02d}' if hours else f'{minutes:02d}:{seconds:02d}'
 
 
+def youtube_video_id(value):
+    """Return only an extractor-validated YouTube video identifier."""
+    value = str(value or '')
+    return value if re.fullmatch(r'[A-Za-z0-9_-]{11}', value) else ''
+
+
 def youtube_url_start(url):
     """Return a supported YouTube URL timestamp, defaulting to zero."""
     parsed = urlsplit(url)

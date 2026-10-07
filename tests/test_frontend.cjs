@@ -27,7 +27,7 @@ class Element {
     this.children = []; this.append(...nodes);
   }
   setAttribute(name, value) { this.attributes[name] = String(value); }
-  removeAttribute(name) { delete this.attributes[name]; if (name === 'value') this.value = ''; }
+  removeAttribute(name) { delete this.attributes[name]; if (name === 'value') this.value = ''; if(name==='src')delete this.src; }
   addEventListener(name, callback) { this.listeners[name] = callback; }
   focus() { this.focused = true; this.focusCount++; if(this.ownerDocument)this.ownerDocument.activeElement=this; }
   contains(node) { return node===this||this.children.some(child=>child.contains(node)); }
@@ -36,6 +36,8 @@ class Element {
   close() { this.open = false; }
   setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
   scrollIntoView() { this.scrolled = true; }
+  pause() { this.pauseCount = (this.pauseCount || 0) + 1; this.paused = true; }
+  load() { this.loadCount = (this.loadCount || 0) + 1; }
   querySelectorAll(selector) {
     const [base, pseudo] = selector.split(':');
     const matches = node => (base.startsWith('.') ? node.className.split(' ').includes(base.slice(1)) : node.tagName === base)
@@ -52,6 +54,7 @@ function fixture(motion, href = 'https://streamfetch.example/') {
   const location = { origin: parsedLocation.origin, pathname: parsedLocation.pathname, search: parsedLocation.search, hash: parsedLocation.hash,
     replace(value) { this.replaced = value; } };
   const body = new Element('body'); body.root = true;
+  const head = new Element('head'); head.root = true;
   const ids = new Map([...html.matchAll(/id="([^"]+)"/g)].map(match => [match[1], new Element()]));
   body.append(...ids.values());
   ids.get('empty').append(new Element('strong'), new Element('p'));
@@ -59,21 +62,22 @@ function fixture(motion, href = 'https://streamfetch.example/') {
   ids.get('media-format').value = 'mp4'; ids.get('storage-target').value = 'local';
   ids.get('clip-start').value = '00:00'; ids.get('clip-format').value = 'mp4';
   ids.get('clip-quality').value = 'best'; ids.get('clip-compression').value = 'original'; ids.get('clip-storage').value = 'local';
-  const listeners={},timers=new Map();let timerId=0;
-  const document={ body,activeElement:body,getElementById:id=>ids.get(id),
+  const listeners={},windowListeners={},timers=new Map(),intervals=new Map();let timerId=0,intervalId=0;
+  const findId=(node,id)=>node.id===id?node:node.children.map(child=>findId(child,id)).find(Boolean);
+  const document={ body,head,activeElement:body,getElementById:id=>ids.get(id)||findId(head,id)||findId(body,id),
     createElement:tag=>{const element=new Element(tag);element.ownerDocument=document;return element;},
     createElementNS:(_,tag)=>document.createElement(tag),
     addEventListener(type,callback){(listeners[type]||=[]).push(callback);} };
   for(const element of ids.values())element.ownerDocument=document;
   const context = vm.createContext({
     document,
-    window: { addEventListener() {}, StreamFetchMotion:motion, location }, URL, URLSearchParams, Intl,
-    setInterval() {}, setTimeout(callback,delay){timers.set(++timerId,{callback,delay});return timerId;},clearTimeout(id){timers.delete(id);},
+    window: { addEventListener(type,callback){(windowListeners[type]||=[]).push(callback);}, StreamFetchMotion:motion, location }, URL, URLSearchParams, Intl,
+    setInterval(callback,delay){intervals.set(++intervalId,{callback,delay});return intervalId;},clearInterval(id){intervals.delete(id);},setTimeout(callback,delay){timers.set(++timerId,{callback,delay});return timerId;},clearTimeout(id){timers.delete(id);},
     // Keep auto-login pending; each test drives the state itself.
     fetch: () => new Promise(() => {}),
   });
   vm.runInContext(fs.readFileSync(path.join(root, 'app/static/app.js'), 'utf8'), context);
-  return { context,document,listeners,timers,fireTimer(id){const timer=timers.get(id);timers.delete(id);timer?.callback();},get: id => ids.get(id), run: code => vm.runInContext(code, context) };
+  return { context,document,listeners,windowListeners,timers,intervals,fireTimer(id){const timer=timers.get(id);timers.delete(id);timer?.callback();},get: id => ids.get(id), run: code => vm.runInContext(code, context) };
 }
 
 test('one transcript CTA follows all lifecycle states without provider details',()=>{
@@ -145,7 +149,7 @@ test('History reports processing failure as a usable Original rather than a capt
  f.run("renderHistory([{job_id:'preserved',source:'youtube',state:'ready',filename:'original.mp4',compression:'original',note:'Dialog',processing_detail:'Rekaman berhasil · kompresi gagal · Original tersedia.'}])");
  const row=f.get('results').children[0];
  assert.equal(row.children[1].children[1].textContent,'Rekaman berhasil · kompresi gagal · Original tersedia.');
- assert.equal(row.children[5].children[0].href,'/api/files/original.mp4');
+ assert.equal(row.children[5].querySelector('.download-direct').href,'/api/files/original.mp4');
 });
 
 test('island uses semantic colors and concise feedback while History retains diagnostics', () => {
@@ -270,6 +274,41 @@ test('legacy presets are not invented and MP3 retains its own label and download
   assert.equal(f.get('results').querySelectorAll('.transcript-generate').length, 1);
 });
 
+test('History previews every ready canonical video or audio in the shared dialog only',()=>{
+  const f=fixture();
+  const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
+  assert.match(html,/<video id="history-video-preview" controls preload="metadata"/);assert.match(html,/<audio id="history-audio-preview" controls preload="metadata"/);
+  f.context.rows=[
+    {job_id:'source',source:'youtube',state:'ready',filename:'Source video.mp4',transcript:{status:'completed'}},
+    {job_id:'clip',source:'youtube',is_clip:true,state:'ready',filename:'Clip audio.mp3',output_format:'mp3'},
+    {job_id:'watch',source:'youtube',state:'ready',filename:'Watch.webm'},
+    {job_id:'telegram',source:'oryx',state:'ready',filename:'Telegram.mp4'},
+    {job_id:'failed',source:'youtube',state:'failed',filename:'partial.mp4'},
+    {job_id:'partial',source:'youtube',state:'finalizing',filename:'partial-final.mp4'},
+  ];
+  f.run('renderHistory(rows)');
+  const previews=f.get('results').querySelectorAll('.media-preview-direct');
+  assert.equal(previews.length,4);assert.equal(f.get('results').querySelectorAll('.download-direct').length,4);
+  assert.ok(f.get('results').querySelector('.transcript-cta'));
+  previews[0].onclick();
+  const dialog=f.get('app-dialog'),video=f.get('history-video-preview'),audio=f.get('history-audio-preview');
+  assert.equal(dialog.open,true);assert.equal(dialog.dataset.mode,'media');assert.equal(video.hidden,false);
+  assert.equal(video.src,'/api/files/Source%20video.mp4?inline=1');assert.equal(f.get('app-dialog-confirm').hidden,true);assert.equal(f.get('app-dialog-cancel').textContent,'Tutup');
+  video.onerror();assert.match(f.get('history-preview-status').textContent,/tetap bisa diunduh/);
+  const pauses=video.pauseCount;previews[1].onclick();
+  assert.ok(video.pauseCount>pauses);assert.equal(video.src,undefined);assert.equal(audio.hidden,false);assert.equal(audio.src,'/api/files/Clip%20audio.mp3?inline=1');
+  const audioPauses=audio.pauseCount;f.get('app-dialog-cancel').onclick();
+  assert.equal(dialog.open,false);assert.ok(audio.pauseCount>audioPauses);assert.equal(audio.src,undefined);assert.equal(f.get('app-dialog-media').hidden,true);
+});
+
+test('History media dialog cleanup restores normal rename dialog controls',async()=>{
+  const f=fixture();f.context.row={job_id:'ready',state:'ready',filename:'Ready.mp4'};f.run('historyRows=[row];renderHistory(historyRows)');
+  f.get('results').querySelector('.media-preview-direct').onclick();f.get('app-dialog-cancel').onclick();
+  const request=f.run('streamDialog({title:"Ubah nama",value:"Ready.mp4"})');
+  assert.equal(f.get('app-dialog-confirm').hidden,false);assert.equal(f.get('app-dialog-cancel').textContent,'Batal');assert.equal(f.get('app-dialog-media').hidden,true);
+  f.get('app-dialog-cancel').onclick();await request;
+});
+
 test('polling retains the terminal result even when history filters hide the completed job', async () => {
   const f = fixture();
   const job = { job_id: 'download', source: 'youtube', is_live: false, state: 'recording', compression: 'balanced' };
@@ -392,6 +431,53 @@ test('Clipper quick durations lock End to Start and nudges respect video boundar
   f.run("$('clip-start').value='02:00';clipInputChanged('start')");assert.equal(f.get('clip-end').value,'03:00');
   f.run("nudgeClip('start',50)");assert.equal(f.get('clip-start').value,'02:20');assert.equal(f.get('clip-end').value,'03:20');
   f.run("nudgeClip('end',5)");assert.equal(f.get('clip-end').value,'03:20');assert.equal(f.get('clip-duration-custom').attributes['aria-pressed'],'true');
+});
+test('Clipper initializes one youtube-nocookie player, seeks URL t, and replaces it cleanly',async()=>{
+  const f=fixture(undefined,'https://streamfetch.example/clipper');
+  f.run(`window.testPlayers=[];window.YT={Player:function(mount,config){this.mount=mount;this.config=config;this.currentTime=0;this.seeks=[];this.getCurrentTime=()=>this.currentTime;this.seekTo=value=>{this.currentTime=value;this.seeks.push(value);};this.destroy=()=>{this.destroyed=true;};window.testPlayers.push(this);}}`);
+  await f.run("clipMetadata={duration:1200,video_id:'abcdefghijk',url_start:755};initClipPlayer('abcdefghijk',755)");
+  const first=f.context.window.testPlayers[0];
+  assert.equal(first.config.videoId,'abcdefghijk');assert.equal(first.config.host,'https://www.youtube-nocookie.com');assert.equal(first.config.playerVars.start,755);
+  first.config.events.onReady({target:first});
+  assert.equal(first.seeks.length,1);assert.equal(first.seeks[0],755);assert.equal(f.get('clip-current-time').textContent,'12:35');
+  await f.run("clipMetadata={duration:300,video_id:'lmnopqrstuv',url_start:0};initClipPlayer('lmnopqrstuv',0)");
+  assert.equal(first.destroyed,true);assert.equal(f.context.window.testPlayers.length,2);
+  const second=f.context.window.testPlayers[1];assert.equal(second.config.videoId,'lmnopqrstuv');
+  f.get('clip-url').value='https://youtu.be/zzzzzzzzzzz';f.get('clip-url').oninput();
+  assert.equal(second.destroyed,true);assert.equal(f.get('clip-preview').hidden,true);
+});
+test('Clipper loads one IFrame API script and only creates the latest requested player',async()=>{
+  const f=fixture(undefined,'https://streamfetch.example/clipper');
+  f.run("clipMetadata={duration:300};firstInit=initClipPlayer('abcdefghijk',10);secondInit=initClipPlayer('lmnopqrstuv',20)");
+  assert.equal(f.document.head.children.length,1);assert.equal(f.document.head.children[0].src,'https://www.youtube.com/iframe_api');
+  f.run(`window.testPlayers=[];window.YT={Player:function(mount,config){this.config=config;this.destroy=()=>{};window.testPlayers.push(this);}};window.onYouTubeIframeAPIReady()`);
+  await f.run('Promise.all([firstInit,secondInit])');
+  assert.equal(f.context.window.testPlayers.length,1);assert.equal(f.context.window.testPlayers[0].config.videoId,'lmnopqrstuv');
+});
+test('Clipper player sets and jumps boundaries, keeps duration lock, and honors I/O shortcuts outside controls',async()=>{
+  const f=fixture(undefined,'https://streamfetch.example/clipper');
+  f.run(`window.testPlayers=[];window.YT={Player:function(mount,config){this.config=config;this.currentTime=100.9;this.seeks=[];this.getCurrentTime=()=>this.currentTime;this.seekTo=value=>{this.currentTime=value;this.seeks.push(value);};this.destroy=()=>{};window.testPlayers.push(this);}}`);
+  await f.run("clipMetadata={duration:300,video_id:'abcdefghijk'};online=true;disk={can_record:true};initClipPlayer('abcdefghijk',0)");
+  const player=f.context.window.testPlayers[0];player.config.events.onReady({target:player});
+  player.currentTime=101.9;f.run('updateClipPlayerTime()');assert.equal(f.get('clip-current-time').textContent,'01:41');assert.equal(f.get('clip-start').value,'00:00');
+  player.currentTime=100.9;f.run('chooseClipDuration(30)');f.get('clip-set-start').onclick();
+  assert.equal(f.get('clip-start').value,'01:40');assert.equal(f.get('clip-end').value,'02:10');
+  player.currentTime=160.7;f.get('clip-set-end').onclick();assert.equal(f.get('clip-end').value,'02:40');
+  f.get('clip-start').value='00:15';f.get('clip-jump-start').onclick();assert.equal(player.seeks.at(-1),15);
+  f.get('clip-end').value='00:45';f.get('clip-jump-end').onclick();assert.equal(player.seeks.at(-1),45);
+  const shortcut=(key,target=f.document.body)=>({key,target,preventDefault(){this.defaultPrevented=true;}});
+  player.currentTime=75.9;const setStart=shortcut('i');f.context.shortcut=setStart;f.run('clipBoundaryShortcut(shortcut)');assert.equal(setStart.defaultPrevented,true);assert.equal(f.get('clip-start').value,'01:15');
+  player.currentTime=90.2;const setEnd=shortcut('o');f.context.shortcut=setEnd;f.run('clipBoundaryShortcut(shortcut)');assert.equal(f.get('clip-end').value,'01:30');
+  f.get('clip-start').tagName='input';player.currentTime=120;const ignored=shortcut('i',f.get('clip-start'));f.context.shortcut=ignored;f.run('clipBoundaryShortcut(shortcut)');assert.equal(ignored.defaultPrevented,undefined);assert.equal(f.get('clip-start').value,'01:15');
+  f.run("nudgeClip('start',5)");assert.equal(player.seeks.at(-1),80);
+});
+test('Clipper embed failure leaves validated manual clipping available',async()=>{
+  const f=fixture(undefined,'https://streamfetch.example/clipper');
+  f.run(`window.testPlayers=[];window.YT={Player:function(mount,config){this.config=config;this.destroy=()=>{this.destroyed=true;};window.testPlayers.push(this);}}`);
+  await f.run("clipMetadata={duration:120,video_id:'abcdefghijk'};online=true;disk={can_record:true};$('clip-start').value='10';$('clip-end').value='20';updateClipControls();initClipPlayer('abcdefghijk',0)");
+  const player=f.context.window.testPlayers[0];player.config.events.onError({data:101});
+  assert.equal(f.get('clip-player-frame').hidden,true);assert.match(f.get('clip-player-status').textContent,/manual/i);
+  assert.equal(f.get('create-clip').disabled,false);assert.equal(f.get('clip-start').value,'10');assert.equal(f.get('clip-end').value,'20');
 });
 test('Clipper validates zero, reversed and out-of-range clips and offers an accessible swap',()=>{
   const f=fixture();f.run("clipMetadata={token:'meta',duration:100};online=true;disk={can_record:true}");

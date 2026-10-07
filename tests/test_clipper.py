@@ -52,17 +52,25 @@ class ClipperWebTests(unittest.TestCase):
         page = anonymous.get('/clipper')
         self.assertEqual(page.status_code, 200)
         self.assertIn('id="clipper-panel"', page.get_data(as_text=True))
+        self.assertIn('script-src \'self\' https://www.youtube.com', page.headers['Content-Security-Policy'])
+        self.assertIn('frame-src https://www.youtube-nocookie.com', page.headers['Content-Security-Policy'])
         denied = anonymous.post('/api/clipper/metadata', json={'url': self.URL})
         self.assertEqual(denied.status_code, 401)
 
     def test_lightweight_metadata_returns_title_thumbnail_duration_and_url_start(self):
         data = self.metadata()
         self.assertEqual(data['title'], 'Dialog Batam')
+        self.assertEqual(data['video_id'], 'abcdefghijk')
         self.assertEqual(data['duration'], 1200)
         self.assertEqual(data['duration_label'], '20:00')
         self.assertEqual(data['url_start'], 755)
         self.assertEqual(data['url_start_label'], '12:35')
         self.assertTrue(data['token'])
+
+    def test_metadata_exposes_only_validated_youtube_video_ids(self):
+        self.assertEqual(clipper.youtube_video_id('abcdefghijk'), 'abcdefghijk')
+        for value in ('short', 'abcdefghijk<script>', None):
+            self.assertEqual(clipper.youtube_video_id(value), '')
 
     def test_video_and_mp3_jobs_use_canonical_queue_and_persist_clip_metadata(self):
         for output_format in ('mp4', 'mp3'):
