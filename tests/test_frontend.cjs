@@ -49,7 +49,7 @@ function fixture(motion, href = 'https://streamfetch.example/') {
   const root = path.resolve(__dirname, '..');
   const html = fs.readFileSync(path.join(root, 'app/static/index.html'), 'utf8');
   const parsedLocation = new URL(href);
-  const location = { origin: parsedLocation.origin, search: parsedLocation.search, hash: parsedLocation.hash,
+  const location = { origin: parsedLocation.origin, pathname: parsedLocation.pathname, search: parsedLocation.search, hash: parsedLocation.hash,
     replace(value) { this.replaced = value; } };
   const body = new Element('body'); body.root = true;
   const ids = new Map([...html.matchAll(/id="([^"]+)"/g)].map(match => [match[1], new Element()]));
@@ -57,6 +57,8 @@ function fixture(motion, href = 'https://streamfetch.example/') {
   ids.get('empty').append(new Element('strong'), new Element('p'));
   ids.get('quality').value = 'best'; ids.get('compression').value = 'balanced';
   ids.get('media-format').value = 'mp4'; ids.get('storage-target').value = 'local';
+  ids.get('clip-start').value = '00:00'; ids.get('clip-format').value = 'mp4';
+  ids.get('clip-quality').value = 'best'; ids.get('clip-compression').value = 'original'; ids.get('clip-storage').value = 'local';
   const listeners={},timers=new Map();let timerId=0;
   const document={ body,activeElement:body,getElementById:id=>ids.get(id),
     createElement:tag=>{const element=new Element(tag);element.ownerDocument=document;return element;},
@@ -358,14 +360,63 @@ test('Settings navigation separates advanced controls and returning preserves th
   await f.run('enter({is_admin:true})');assert.equal(f.get('admin-panel').hidden,false);
   f.run('showLogin()');assert.equal(f.get('control-room').hidden,false);assert.equal(f.get('capture-content').hidden,false);
 });
-test('workspace markup places History immediately after Source and configuration only in Admin',()=>{
+test('workspace markup keeps Source and Clipper separate while sharing History before Admin',()=>{
   const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
-  assert.match(html,/<\/div><\/section>\s*<section id="history-panel"/);
-  const control=html.slice(html.indexOf('<section id="control-room"'),html.indexOf('<section id="admin-view"'));
+  assert.match(html,/<section id="clipper-room"[\s\S]*<section id="history-panel"[\s\S]*<section id="admin-view"/);
+  const workspace=html.slice(html.indexOf('<section id="control-room"'),html.indexOf('<section id="admin-view"'));
+  const control=html.slice(html.indexOf('<section id="control-room"'),html.indexOf('<section id="clipper-room"'));
+  const clipper=html.slice(html.indexOf('<section id="clipper-room"'),html.indexOf('<section id="history-panel"'));
   const admin=html.slice(html.indexOf('<section id="admin-view"'));
-  for(const id of ['capture-panel','quality','media-format','compression','storage-target','history-panel','status-monitor','stop','marker-controls'])assert.ok(control.includes('id="'+id+'"'),id);
-  for(const id of ['password-form','source-form','disk-meter']){assert.ok(admin.includes('id="'+id+'"'));assert.ok(!control.includes('id="'+id+'"'));}
-  assert.ok(admin.includes('TRANSCRIPTION_PROVIDER'));assert.ok(!control.includes('TRANSCRIPTION_PROVIDER'));
+  for(const id of ['capture-panel','quality','media-format','compression','storage-target'])assert.ok(control.includes('id="'+id+'"'),id);
+  for(const id of ['clipper-panel','clip-url','clip-start','clip-end','create-clip'])assert.ok(clipper.includes('id="'+id+'"'),id);
+  assert.ok(!control.includes('id="clip-url"'));assert.ok(!clipper.includes('id="youtube-url"'));
+  for(const id of ['history-panel','status-monitor','stop','marker-controls'])assert.ok(workspace.includes('id="'+id+'"'),id);
+  for(const id of ['password-form','source-form','disk-meter']){assert.ok(admin.includes('id="'+id+'"'));assert.ok(!workspace.includes('id="'+id+'"'));}
+  assert.ok(admin.includes('TRANSCRIPTION_PROVIDER'));assert.ok(!workspace.includes('TRANSCRIPTION_PROVIDER'));
+});
+test('Clipper timestamp helpers normalize supported forms and reject invalid values',()=>{
+  const f=fixture();
+  for(const value of [90,'90','1:30','01:30','00:01:30','1m30s']){
+    f.context.value=value;assert.equal(f.run('parseClipTimestamp(value)'),90);
+  }
+  assert.equal(f.run('formatClipTimestamp(755)'),'12:35');
+  for(const value of ['', '-1', '1:70', 'bad']){
+    f.context.value=value;assert.throws(()=>f.run('parseClipTimestamp(value)'));
+  }
+});
+test('Clipper quick durations lock End to Start and nudges respect video boundaries',()=>{
+  const f=fixture();
+  f.run("clipMetadata={token:'meta',duration:200};online=true;disk={can_record:true};$('clip-start').value='01:30';$('clip-end').value='';chooseClipDuration(60)");
+  assert.equal(f.get('clip-start').value,'01:30');assert.equal(f.get('clip-end').value,'02:30');
+  assert.equal(f.get('clip-calculated-duration').textContent,'01:00');assert.equal(f.get('clip-duration-60').attributes['aria-pressed'],'true');
+  f.run("$('clip-start').value='02:00';clipInputChanged('start')");assert.equal(f.get('clip-end').value,'03:00');
+  f.run("nudgeClip('start',50)");assert.equal(f.get('clip-start').value,'02:20');assert.equal(f.get('clip-end').value,'03:20');
+  f.run("nudgeClip('end',5)");assert.equal(f.get('clip-end').value,'03:20');assert.equal(f.get('clip-duration-custom').attributes['aria-pressed'],'true');
+});
+test('Clipper validates zero, reversed and out-of-range clips and offers an accessible swap',()=>{
+  const f=fixture();f.run("clipMetadata={token:'meta',duration:100};online=true;disk={can_record:true}");
+  for(const [start,end,message] of [['10','10','nol'],['20','10','setelah'],['10','101','melewati']]){
+    f.get('clip-start').value=start;f.get('clip-end').value=end;f.run('updateClipControls()');
+    assert.match(f.get('clip-error').textContent,new RegExp(message,'i'));assert.equal(f.get('create-clip').disabled,true);
+  }
+  assert.equal(f.get('clip-swap').hidden,true);
+  f.get('clip-start').value='20';f.get('clip-end').value='10';f.run('updateClipControls()');assert.equal(f.get('clip-swap').hidden,false);
+  f.get('clip-swap').onclick();assert.equal(f.get('clip-start').value,'10');assert.equal(f.get('clip-end').value,'20');assert.equal(f.get('create-clip').disabled,false);
+});
+test('Clipper metadata lookup reveals helpers, applies URL t and submits canonical seconds',async()=>{
+  const f=fixture(),requests=[];f.context.requests=requests;
+  f.run("csrf='token';online=true;disk={can_record:true};api=async(path,data)=>{requests.push({path,data});if(path==='clipper/metadata')return {token:'meta',title:'Dialog Batam',thumbnail:'',duration:1200,duration_label:'20:00',url_start:755,url_start_label:'12:35'};if(path==='clipper')return {job_id:'clip-job'};return {}};refresh=async()=>{}");
+  f.get('clip-url').value='https://youtu.be/abcdefghijk?t=755';await f.run('loadClipMetadata()');
+  assert.equal(f.get('clip-title').textContent,'Dialog Batam');assert.equal(f.get('clip-start').value,'12:35');assert.equal(f.get('clip-helpers').hidden,false);
+  f.run('chooseClipDuration(90)');await f.get('clip-form').onsubmit({preventDefault(){}});
+  assert.equal(requests[0].path,'clipper/metadata');assert.equal(requests[1].path,'clipper');
+  assert.deepEqual(JSON.parse(JSON.stringify(requests[1].data)),{source:'youtube',url:'https://youtu.be/abcdefghijk?t=755',metadata_token:'meta',start:755,end:845,clip_start:755,clip_end:845,clip_duration:90,is_clip:true,format:'mp4',quality:'best',compression:'original',storage:'local',note:''});
+});
+test('Clipper route selects its own navigation while History labels clips clearly',async()=>{
+  const f=fixture(undefined,'https://streamfetch.example/clipper');f.run("api=async path=>path==='sources'?{sources:[]}:path==='status'?{disk:{available:true,free:1,total:2,minimum:0,can_record:true},active:null,online:true,queued:0,archive_enabled:false}:{recordings:[],total:0}");
+  await f.run('enter({is_admin:false})');assert.equal(f.get('clipper-room').hidden,false);assert.equal(f.get('control-room').hidden,true);assert.equal(f.get('nav-clipper').attributes['aria-current'],'page');
+  f.run("renderHistory([{job_id:'clip',source:'youtube',source_name:'YouTube',is_clip:true,clip_start:755,clip_end:845,clip_duration:90,state:'ready',filename:'clip.mp4'}])");
+  assert.equal(f.get('results').children[0].children[2].textContent,'YouTube · 12:35–14:05 · 01:30');
 });
 
 test('StreamFetch branding retains the existing mark and removes old user-facing names',()=>{
@@ -1127,7 +1178,7 @@ test('unclassified failed capture hides raw diagnostics from its primary message
 });
 function keyEvent(key,target,mods={}){return {key,target,...mods,preventDefault(){this.defaultPrevented=true;}};}
 function paletteFixture(motion){const f=fixture(motion);f.run("csrf='test';$('workspace').hidden=false;$('workspace').dataset.destination='workspace';api=async()=>({watches:[],active_count:0})");return f;}
-test('command palette shortcuts ignore typing, repeats and modal dialogs while Cmd/Ctrl+K opens five commands',()=>{
+test('command palette shortcuts ignore typing, repeats and modal dialogs while Cmd/Ctrl+K opens six commands',()=>{
  const f=paletteFixture();
  for(const target of [new Element('input'),new Element('textarea'),new Element('select'),{isContentEditable:true},{tagName:'SPAN',closest:()=>({})}]){
   const event=keyEvent('k',target,{ctrlKey:true});f.context.event=event;f.run('paletteShortcut(event)');assert.equal(event.defaultPrevented,undefined);assert.equal(f.get('command-palette').open,false);
@@ -1135,7 +1186,7 @@ test('command palette shortcuts ignore typing, repeats and modal dialogs while C
  const repeat=keyEvent('k',f.document.body,{metaKey:true,repeat:true});f.context.event=repeat;f.run('paletteShortcut(event)');assert.equal(f.get('command-palette').open,false);
  f.get('app-dialog').open=true;f.get('command-open').onclick();assert.equal(f.get('command-palette').open,false);f.get('app-dialog').open=false;
  const event=keyEvent('K',f.document.body,{metaKey:true});f.context.event=event;f.run('paletteShortcut(event)');assert.equal(event.defaultPrevented,true);
- assert.equal(f.get('command-palette').open,true);assert.equal(f.get('command-list').children.length,5);assert.equal(f.document.activeElement,f.get('command-search'));
+ assert.equal(f.get('command-palette').open,true);assert.equal(f.get('command-list').children.length,6);assert.equal(f.document.activeElement,f.get('command-search'));
  assert.equal(f.get('command-list').children[0].attributes['aria-selected'],'true');assert.equal(f.get('command-search').attributes['aria-activedescendant'],'command-workspace');
 });
 test('command palette arrows wrap, Enter runs the existing action, and Escape restores trigger focus',()=>{

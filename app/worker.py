@@ -18,9 +18,10 @@ import redis
 # pyrefly: ignore [missing-import]
 from telegram import Bot
 try:
-    from . import archive, quality, storage, telegram_controls
+    from . import archive, clipper, quality, storage, telegram_controls
 except ImportError:
     import archive
+    import clipper
     import quality
     import storage
     import telegram_controls
@@ -585,7 +586,7 @@ async def heartbeat(job=None):
 
 async def set_state(job, status, state, detail=''):
     r.set(f"state:{job['job_id']}", state, ex=86400)
-    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'quality', 'output_format', 'compression', 'is_live', 'live_status', 'was_live', 'download_attempt', 'download_attempts', 'download_exit_code', 'progress_percent', 'progress_phase', 'eta_seconds', 'started_at', 'elapsed', 'size', 'filename', 'original_filename', 'processing_status', 'processing_error', 'processing_detail', 'attempt_root_id', 'retry_of', 'attempt_number', 'attempt_total', 'error_code', 'error_title', 'error_message') if key in job}
+    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'quality', 'output_format', 'compression', 'is_live', 'is_clip', 'clip_start', 'clip_end', 'clip_duration', 'live_status', 'was_live', 'download_attempt', 'download_attempts', 'download_exit_code', 'progress_percent', 'progress_phase', 'eta_seconds', 'started_at', 'elapsed', 'size', 'filename', 'original_filename', 'processing_status', 'processing_error', 'processing_detail', 'attempt_root_id', 'retry_of', 'attempt_number', 'attempt_total', 'error_code', 'error_title', 'error_message') if key in job}
     public.update(state=state, detail=detail)
     r.set('web:job:' + job['job_id'], json.dumps(public), ex=86400)
     if os.getenv('DATA_DIR'):
@@ -908,6 +909,11 @@ def capture_command(job):
         '--fragment-retries', '10', '--file-access-retries', '3',
         '--retry-sleep', 'fragment:exp=1:20', '--continue',
     ]
+    if job.get('is_clip'):
+        clip_start, clip_end = clipper.validate_range(
+            job.get('clip_start'), job.get('clip_end'), job.get('source_duration'))
+        command += ['--download-sections', f'*{clip_start}-{clip_end}',
+                    '--force-keyframes-at-cuts']
     if job['source'] in {'youtube', 'tiktok', 'instagram'} and job.get('is_live') is False:
         # Report the current format separately: video and audio can each reach
         # 100%, so this is track progress, not overall download completion.
@@ -1434,6 +1440,14 @@ async def run_download(job):
                 formats = info.get('formats') or [info]
                 job['silent_video'] = bool(formats) and all(fmt.get('acodec') == 'none' for fmt in formats)
             update_youtube_metadata(job, info)
+            if job.get('is_clip'):
+                if job.get('is_live'):
+                    raise SourceInspectionError('unsupported_live', 'Clipper v1 belum mendukung video yang sedang live.')
+                clip_start, clip_end = clipper.validate_range(
+                    job.get('clip_start'), job.get('clip_end'), info.get('duration'))
+                job.update(clip_start=clip_start, clip_end=clip_end,
+                           clip_duration=clip_end - clip_start,
+                           source_duration=info.get('duration'))
             if tiktok_live and info.get('is_live') is not True:
                 await set_state(job, status, 'failed', 'Akun TikTok belum live atau siaran tidak dapat diakses. Coba lagi saat akun sedang live.')
                 return

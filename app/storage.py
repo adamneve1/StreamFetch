@@ -142,7 +142,7 @@ def _recording_data(value):
 
 def save_recording(job, state, detail=''):
     # Never store playback URLs/credentials in catalogue or browser status.
-    data = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'storage', 'quality', 'output_format', 'compression', 'is_live', 'live_status', 'was_live', 'download_attempt', 'download_attempts', 'download_exit_code', 'requested_at', 'started_at', 'elapsed', 'size', 'filename', 'stop_reason', 'original_filename', 'original_size', 'requested_compression', 'processing_status', 'processing_error', 'processing_detail', 'progress_percent', 'progress_phase', 'eta_seconds', 'silent_video', 'attempt_root_id', 'retry_of', 'attempt_number', 'attempt_total', 'error_code', 'error_title', 'error_message') if key in job}
+    data = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'storage', 'quality', 'output_format', 'compression', 'is_live', 'is_clip', 'clip_start', 'clip_end', 'clip_duration', 'live_status', 'was_live', 'download_attempt', 'download_attempts', 'download_exit_code', 'requested_at', 'started_at', 'elapsed', 'size', 'filename', 'stop_reason', 'original_filename', 'original_size', 'requested_compression', 'processing_status', 'processing_error', 'processing_detail', 'progress_percent', 'progress_phase', 'eta_seconds', 'silent_video', 'attempt_root_id', 'retry_of', 'attempt_number', 'attempt_total', 'error_code', 'error_title', 'error_message') if key in job}
     data.update(state=state, detail=detail)
     if isinstance(job.get('source_metadata'), dict):
         data['source_metadata'] = {key: job['source_metadata'][key]
@@ -163,7 +163,9 @@ def save_recording(job, state, detail=''):
 def save_capture_request(job):
     """Persist retry inputs privately; URLs never join the public catalogue payload."""
     allowed = ('source', 'source_name', 'note', 'storage', 'archive', 'quality',
-               'output_format', 'compression', 'is_live', 'url', 'stream_url')
+               'output_format', 'compression', 'is_live', 'url', 'stream_url',
+               'is_clip', 'clip_start', 'clip_end', 'clip_duration',
+               'source_duration', 'title')
     data = {key: job[key] for key in allowed if key in job}
     with connection() as db:
         db.execute('INSERT INTO capture_requests VALUES (?, ?, ?) '

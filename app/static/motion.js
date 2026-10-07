@@ -159,6 +159,9 @@
   choreograph('history-filter',element,done=>gsap.timeline({onComplete:done})
    .fromTo(element,{opacity:.8},{opacity:1,duration:tokens.micro,ease:tokens.ease},0));
  }
+ function clipperReveal(panel,change,parts=[]){
+  morph('clipper-reveal',panel,[panel,...parts.filter(Boolean)],change,{duration:tokens.navigation});
+ }
  function loginParts(root){
   let ring=root?.querySelector?.('.login-ring')||env.document.getElementById('login-ring');
   const glyph=root?.querySelector?.('.login-glyph')||env.document.getElementById('login-glyph');
@@ -474,5 +477,5 @@
  env.addEventListener?.('pagehide',reset);
  trailMedia?.addEventListener?.('change',syncLoginTrail);
  env.addEventListener?.('pageshow',event=>{if(event.persisted){reset();loginTrailShell=env.document.getElementById('login');syncLoginTrail();}});
- return {tokens,source,sourceMode,sourcePress,island,progress,reset,reduced,dialogOpen,dialogClose,toast,historyFilter,loginReveal,loginError,loginSuccess,loginInteract,pageReveal,contextChange,followLink,returnReveal};
+ return {tokens,source,sourceMode,sourcePress,island,progress,reset,reduced,dialogOpen,dialogClose,toast,historyFilter,clipperReveal,loginReveal,loginError,loginSuccess,loginInteract,pageReveal,contextChange,followLink,returnReveal};
 });

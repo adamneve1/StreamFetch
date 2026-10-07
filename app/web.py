@@ -1,6 +1,7 @@
 """Authenticated control panel. Capture work always belongs to the existing worker."""
 import hmac
 import json
+import math
 import os
 import secrets
 import subprocess
@@ -8,6 +9,7 @@ import time
 import uuid
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import redis
 from flask import Flask, jsonify, redirect, request, session, send_from_directory, url_for
@@ -15,8 +17,9 @@ from flask.sessions import SecureCookieSessionInterface
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 try:
-    from . import quality, storage, telegram_store, transcript_reader, transcription_queue, watch_service
+    from . import clipper, quality, storage, telegram_store, transcript_reader, transcription_queue, watch_service
 except ImportError:
+    import clipper
     import quality
     import storage
     import telegram_store
@@ -198,7 +201,8 @@ def create_app(client=None):
         response.headers['Cache-Control'] = 'no-store'
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['X-Frame-Options'] = 'DENY'
-        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'"
+        response.headers['Content-Security-Policy'] = ("default-src 'self'; script-src 'self'; style-src 'self'; "
+                                                       "img-src 'self' data: https://i.ytimg.com; frame-ancestors 'none'")
         if request.endpoint == 'view_transcript':
             response.headers['Content-Security-Policy'] = (
                 "default-src 'self'; script-src 'self' https://www.youtube.com; "
@@ -229,6 +233,10 @@ def create_app(client=None):
 
     @app.get('/')
     def index():
+        return app.send_static_file('index.html')
+
+    @app.get('/clipper')
+    def clipper_page():
         return app.send_static_file('index.html')
 
     @app.post('/api/login')
@@ -455,6 +463,86 @@ def create_app(client=None):
         finally:
             r.eval("if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0", 1, 'web:estimate', token)
 
+    @app.post('/api/clipper/metadata')
+    def clipper_metadata():
+        data = request.get_json() or {}
+        url = storage.validate_url(str(data.get('url', '')).strip(), youtube=True)
+        lock = uuid.uuid4().hex
+        if not r.set('web:clipper:metadata', lock, nx=True, ex=35):
+            return jsonify(error='Metadata video lain sedang diperiksa. Tunggu sebentar, ya.'), 409
+        try:
+            result = subprocess.run([
+                'yt-dlp', '--dump-single-json', '--skip-download', '--no-playlist',
+                '--no-warnings', url,
+            ], capture_output=True, timeout=25)
+            if result.returncode:
+                return jsonify(error='Metadata video belum bisa dibaca. Periksa link dan akses videonya.'), 422
+            info = json.loads(result.stdout)
+            if info.get('is_live') is True or info.get('live_status') == 'is_live':
+                return jsonify(error='Clipper v1 belum mendukung video yang sedang live.'), 422
+            try:
+                duration = float(info.get('duration'))
+            except (TypeError, ValueError):
+                duration = 0
+            if not math.isfinite(duration) or duration <= 0:
+                return jsonify(error='Durasi video belum tersedia, jadi rentang clip belum bisa divalidasi.'), 422
+            thumbnail = str(info.get('thumbnail') or '')
+            if urlsplit(thumbnail).hostname != 'i.ytimg.com':
+                thumbnail = ''
+            token = secrets.token_urlsafe(24)
+            snapshot = dict(url=url, duration=duration, title=str(info.get('title') or 'Video YouTube')[:500])
+            r.set('clip:metadata:' + token, json.dumps(snapshot), ex=900)
+            return jsonify(token=token, title=snapshot['title'], thumbnail=thumbnail,
+                           duration=duration, duration_label=clipper.format_timestamp(round(duration)),
+                           url_start=clipper.youtube_url_start(url),
+                           url_start_label=clipper.format_timestamp(clipper.youtube_url_start(url)))
+        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            return jsonify(error='Metadata video belum bisa dibaca. Coba lagi sebentar, ya.'), 422
+        finally:
+            r.eval("if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0", 1, 'web:clipper:metadata', lock)
+
+    @app.post('/api/clipper')
+    def create_clip():
+        data = request.get_json() or {}
+        url = storage.validate_url(str(data.get('url', '')).strip(), youtube=True)
+        token = str(data.get('metadata_token', ''))
+        try:
+            metadata = json.loads(r.get('clip:metadata:' + token) or '')
+        except (TypeError, json.JSONDecodeError):
+            metadata = None
+        if not metadata or metadata.get('url') != url:
+            raise ValueError('Periksa metadata video lagi sebelum membuat clip.')
+        clip_start, clip_end = clipper.validate_range(data.get('start'), data.get('end'), metadata.get('duration'))
+        output_format = quality.validate_format(data.get('format', 'mp4'))
+        selected_quality = quality.validate(data.get('quality', 'best'))
+        compression = quality.validate_preset(data.get('compression', 'original'))
+        if output_format == 'mp3':
+            selected_quality = 'best'
+            compression = 'original'
+        storage_target = data.get('storage', 'local')
+        if storage_target not in {'local', 'archive'}:
+            raise ValueError('Pilih lokasi penyimpanan yang tersedia.')
+        archive_enabled = os.getenv('ARCHIVE_ENABLED', 'false').lower() in {'1', 'true', 'yes', 'on'}
+        if storage_target == 'archive' and not archive_enabled:
+            raise ValueError('Penyimpanan arsip belum diaktifkan oleh admin.')
+        job = dict(
+            job_id=uuid.uuid4().hex, source='youtube', source_name='YouTube', origin='web', chat_id='web',
+            requested_at=time.time(), note=str(data.get('note', '')).strip()[:500], url=url,
+            storage=storage_target, archive=storage_target == 'archive', quality=selected_quality,
+            output_format=output_format, compression=compression, is_live=False, is_clip=True,
+            clip_start=clip_start, clip_end=clip_end, clip_duration=clip_end - clip_start,
+            source_duration=metadata['duration'], title=metadata.get('title', ''),
+        )
+        job.update(attempt_root_id=job['job_id'], attempt_number=1, attempt_total=1)
+        if not storage.disk_status()['can_record']:
+            return jsonify(error='Ruang penyimpanannya hampir habis. Kosongkan dulu sebelum membuat clip.'), 507
+        result = r.eval(ADMIT, 0, job['job_id'], json.dumps(job))
+        if result != 'accepted':
+            return jsonify(error='Masih ada rekaman yang berjalan. Tunggu sampai selesai, ya.' if result == 'busy' else 'Perekamnya belum siap. Coba lagi sebentar atau hubungi admin.'), 409
+        storage.save_capture_request(job)
+        telegram_store.subscribe_web(job['job_id'], session.get('role', 'user'))
+        return jsonify(job_id=job['job_id']), 202
+
     @app.post('/api/record')
     def record():
         data = request.get_json() or {}
@@ -524,7 +612,8 @@ def create_app(client=None):
         number = previous['attempt_number'] + 1
         job = {key: original[key] for key in ('source', 'source_name', 'note', 'storage', 'archive',
                                                'quality', 'output_format', 'compression', 'is_live',
-                                               'url', 'stream_url') if key in original}
+                                               'url', 'stream_url', 'is_clip', 'clip_start', 'clip_end',
+                                               'clip_duration', 'source_duration', 'title') if key in original}
         job.update(job_id=uuid.uuid4().hex, origin='web', chat_id='web', requested_at=time.time(),
                    attempt_root_id=root, retry_of=job_id, attempt_number=number, attempt_total=number)
         if previous.get('filename'):
