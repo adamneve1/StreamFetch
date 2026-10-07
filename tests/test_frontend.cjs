@@ -29,7 +29,9 @@ class Element {
   setAttribute(name, value) { this.attributes[name] = String(value); }
   removeAttribute(name) { delete this.attributes[name]; if (name === 'value') this.value = ''; }
   addEventListener(name, callback) { this.listeners[name] = callback; }
-  focus() { this.focused = true; this.focusCount++; }
+  focus() { this.focused = true; this.focusCount++; if(this.ownerDocument)this.ownerDocument.activeElement=this; }
+  contains(node) { return node===this||this.children.some(child=>child.contains(node)); }
+  remove() { if(this.parentNode){this.parentNode.children=this.parentNode.children.filter(child=>child!==this);this.parentNode=null;} }
   showModal() { this.open = true; }
   close() { this.open = false; }
   setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
@@ -55,16 +57,21 @@ function fixture(motion, href = 'https://streamfetch.example/') {
   ids.get('empty').append(new Element('strong'), new Element('p'));
   ids.get('quality').value = 'best'; ids.get('compression').value = 'balanced';
   ids.get('media-format').value = 'mp4'; ids.get('storage-target').value = 'local';
+  const listeners={},timers=new Map();let timerId=0;
+  const document={ body,activeElement:body,getElementById:id=>ids.get(id),
+    createElement:tag=>{const element=new Element(tag);element.ownerDocument=document;return element;},
+    createElementNS:(_,tag)=>document.createElement(tag),
+    addEventListener(type,callback){(listeners[type]||=[]).push(callback);} };
+  for(const element of ids.values())element.ownerDocument=document;
   const context = vm.createContext({
-    document: { body, getElementById: id => ids.get(id), createElement: tag => new Element(tag),
-      createElementNS: (_, tag) => new Element(tag), addEventListener() {} },
+    document,
     window: { addEventListener() {}, StreamFetchMotion:motion, location }, URL, URLSearchParams, Intl,
-    setInterval() {}, setTimeout() {}, clearTimeout() {},
+    setInterval() {}, setTimeout(callback,delay){timers.set(++timerId,{callback,delay});return timerId;},clearTimeout(id){timers.delete(id);},
     // Keep auto-login pending; each test drives the state itself.
     fetch: () => new Promise(() => {}),
   });
   vm.runInContext(fs.readFileSync(path.join(root, 'app/static/app.js'), 'utf8'), context);
-  return { context, get: id => ids.get(id), run: code => vm.runInContext(code, context) };
+  return { context,document,listeners,timers,fireTimer(id){const timer=timers.get(id);timers.delete(id);timer?.callback();},get: id => ids.get(id), run: code => vm.runInContext(code, context) };
 }
 
 test('one transcript CTA follows all lifecycle states without provider details',()=>{
@@ -230,7 +237,7 @@ test('rename dialog selects the editable title, supports cancel, and preserves r
   const renamed=f.run('renameJob(row,$("delete-selected"))');f.get('app-dialog-input').value='  Dialog Baru.mp4  ';
   f.get('app-dialog-form').onsubmit({preventDefault(){}});await renamed;
   assert.equal(JSON.stringify(requests),JSON.stringify([{path:'recordings/rename-me/rename',data:{filename:'Dialog Baru.mp4'}}]));
-  assert.match(f.get('notice').textContent,/nama file sudah diganti/i);
+  assert.match(f.get('toast-status').textContent,/nama file sudah diganti/i);
 });
 
 test('delete dialog identifies the target, defaults focus to cancel, and confirms destructively',async()=>{
@@ -245,7 +252,7 @@ test('delete dialog identifies the target, defaults focus to cancel, and confirm
   const confirmed=f.run('deleteJobs(["delete-me"],$("delete-selected"))');
   f.get('app-dialog-form').onsubmit({preventDefault(){}});await confirmed;
   assert.equal(JSON.stringify(requests),JSON.stringify([{path:'recordings/delete',data:{job_ids:['delete-me']}}]));
-  assert.equal(f.get('notice').textContent,'1 item berhasil dihapus.');assert.equal(f.get('app-dialog').open,false);assert.ok(trigger.focusCount>0);
+  assert.equal(f.get('toast-status').textContent,'1 item berhasil dihapus.');assert.equal(f.get('app-dialog').open,false);assert.ok(trigger.focusCount>0);
 });
 
 test('legacy presets are not invented and MP3 retains its own label and download action', () => {
@@ -283,7 +290,7 @@ test('polling retains the terminal result even when history filters hide the com
   assert.equal(f.get('stop').disabled, true);
   assert.equal(f.get('download-progress').hidden, true);
   assert.equal(f.get('results').children.length, 0);
-  assert.equal(f.run('historyRows.length'), 0);
+  assert.equal(f.run('historyRows.length'), 1); // The Island observes the complete client dataset.
 });
 
 function captureAPI(f,fail=false){
@@ -412,7 +419,7 @@ test('compact jobs retain every state, title, full diagnostics, metadata and sec
   for(const state of ['starting','recording','waiting','stopping','finalizing','ready','failed','interrupted']){
     f.context.rows=[{job_id:'job',state,source:'tiktok',source_name:'TikTok Live',note:'Dialog Batam',detail:'Detail lengkap',filename:state==='ready'?'dialog.mp4':undefined}];
     f.run('renderHistory(rows);active=rows[0];renderOperationalStatus()');
-    assert.equal(f.get('results').querySelector('.recording-heading').querySelector('.status-badge').textContent,f.run('jobStateName(rows[0])'));
+    assert.equal(f.get('results').querySelector('.recording-heading').querySelector('.status-badge').textContent,state==='failed'?'Capture gagal':f.run('jobStateName(rows[0])'));
     assert.equal(f.get('status-job-title').textContent,'Dialog Batam');
     assert.equal(f.get('status-detail').textContent,['failed','interrupted'].includes(state)?'Capture gagal.':'');
     assert.equal(f.get('results').querySelector('.recording-detail-body').children[0].textContent,'Detail lengkap');
@@ -459,7 +466,7 @@ test('mobile shell and island use dedicated composition, touch targets, and loca
   assert.match(shell,/\.app-header\{grid-template-columns:minmax\(0,1fr\) auto auto/);
   assert.match(shell,/width:44px;min-height:44px/);assert.match(shell,/env\(safe-area-inset-left\)/);
   assert.match(shell,/grid-template-areas:'state action' 'content content' 'metadata metadata' 'markers markers'/);
-  assert.match(shell,/grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
+  assert.match(shell,/grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/);
   assert.match(shell,/\.workspace-page \.table-scroll\{overflow-x:auto;overscroll-behavior-x:contain\}/);
   assert.match(shell,/overflow-wrap:anywhere/);assert.doesNotMatch(shell,/backdrop-filter:blur|overflow-x:hidden/);
 });
@@ -703,7 +710,7 @@ test('Settings Watches show shared schedules, compact WIB metadata, terminal sta
  assert.equal(f.get('watch-list').querySelectorAll('button').length,2);
  assert.equal(rows[0].querySelector('button').attributes['aria-label'],'Batalkan watch <script>RRI Batam</script>');
  assert.equal(f.run('watchWindow({})'),'—');
- f.run('renderWatches({watches:[],active_count:0})');assert.equal(f.get('watch-feedback').textContent,'Belum ada watch.');
+ f.run('renderWatches({watches:[],active_count:0})');assert.match(f.get('watch-feedback').textContent,/Belum ada Watch.*Tambah Watch/);
 });
 test('Watches load for authenticated roles and handle list errors locally',async()=>{
  const f=fixture(),calls=[];
@@ -724,6 +731,7 @@ test('Watches visibility follows authenticated roles and cancellation reuses the
  const button=f.get('watch-list').querySelector('button');const pending=button.onclick();assert.equal(button.disabled,true);await pending;
  assert.deepEqual(calls,[['/api/watches/watch/cancel','POST'],['/api/watches','GET']]);
  assert.equal(f.get('watch-count').textContent,'0 aktif');assert.equal(f.get('watch-list').querySelector('button'),null);
+ assert.match(f.get('toast-status').textContent,/Watch dibatalkan.*Capture.*berlanjut/);
 });
 test('Settings Watch form uses the existing endpoint, refreshes Waiting state, and keeps validation inline',async()=>{
  const motion=motionSpy(),f=fixture(motion),calls=[];
@@ -737,6 +745,7 @@ test('Settings Watch form uses the existing endpoint, refreshes Waiting state, a
  assert.deepEqual(calls[0],['/api/watches','POST',{channel:'@rribatam',date:'2099-10-06',start_time:'08:00',end_time:'10:00',mode:'every',auto_transcribe:true}]);
  assert.deepEqual(calls[1].slice(0,2),['/api/watches','GET']);assert.equal(f.get('watch-count').textContent,'1 aktif');assert.match(f.get('watch-list').textContent,/Waiting/);
  assert.equal(f.get('watch-create-panel').hidden,true);assert.equal(f.get('watch-create').attributes['aria-expanded'],'false');assert.equal(f.get('watch-url').value,'');
+ assert.match(f.get('toast-status').textContent,/Watch dibuat.*Menunggu live/);
  assert.equal(motion.calls.filter(call=>call[0]==='dialogOpen').length,1);assert.equal(motion.calls.filter(call=>call[0]==='dialogClose').length,1);
  f.get('watch-create').onclick();f.get('watch-url').value='@rribatam';f.get('watch-start').value='10:00';f.get('watch-end').value='09:00';
  calls.length=0;await f.get('watch-form').onsubmit({preventDefault(){}});assert.equal(calls.length,0);assert.match(f.get('watch-error').textContent,/Jam akhir/);assert.equal(f.get('watch-create-panel').hidden,false);assert.equal(f.get('notice').textContent,'');
@@ -756,7 +765,7 @@ test('Watch endpoint validation remains inside the open Settings form',async()=>
 test('failed cancellation preserves watch controls, and a stale list cannot overwrite post-cancel data',async()=>{
  const f=fixture();f.run("isAdmin=true;renderWatches({active_count:1,watches:[{id:'watch',channel:'@rri',start:100,end:200,status:'active',mode:'first'}]})");
  f.context.fetch=async()=>({ok:false,status:500,headers:{get:()=> 'application/json'},json:async()=>({error:'Try again'})});
- const button=f.get('watch-list').querySelector('button');await button.onclick();assert.equal(button.disabled,false);assert.equal(f.get('watch-feedback').textContent,'Try again');
+ const button=f.get('watch-list').querySelector('button');await button.onclick();assert.equal(button.disabled,false);assert.equal(f.get('toast-error-live').textContent,'Try again');
  let resolveOld;f.context.fetch=()=>new Promise(resolve=>{resolveOld=resolve;});const old=f.run('loadWatches()');
  f.context.fetch=async()=>({ok:true,status:200,headers:{get:()=> 'application/json'},json:async()=>({watches:[],active_count:0})});
  await f.run('loadWatches(true)');
@@ -798,6 +807,25 @@ test('login entrance and errors use scoped motion while keeping authentication i
  assert.equal(f.get('workspace').hidden,false);assert.equal(f.get('login').hidden,true);
  assert.equal(motion.calls.some(c=>c[0]==='loginSuccess'),true);
  f.run('showLogin()');assert.equal(motion.calls.filter(c=>c[0]==='loginReveal').length,reveals+1);
+});
+test('login cursor lifecycle stops before workspace visibility and resets before showing login again',async()=>{
+ const motion=motionSpy(),f=fixture(motion),events=[];captureAPI(f);
+ motion.loginSuccess=()=>{events.push('success');assert.equal(f.get('login').hidden,false);assert.equal(f.get('workspace').hidden,true);};
+ motion.reset=()=>events.push('reset');
+ motion.loginReveal=()=>{events.push('reveal');assert.equal(f.get('login').hidden,false);assert.equal(f.get('workspace').hidden,true);};
+ f.get('workspace').hidden=true;await f.run("completeLogin({csrf:'token',is_admin:false})");
+ assert.equal(f.get('login').hidden,true);assert.deepEqual(events,['success']);
+ f.run('showLogin()');assert.deepEqual(events,['success','reset','reveal']);
+ f.run('showLogin()');assert.deepEqual(events,['success','reset','reveal']);
+});
+test('login cursor styling is decorative, tiny, clipped and disabled on mobile/coarse/reduced motion',()=>{
+ const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8');
+ assert.match(css,/\.workspace-page \.login-shell\{position:relative;isolation:isolate\}/);
+ assert.match(css,/\.login-cursor-trail\{position:fixed;inset:0;z-index:-1;overflow:clip;pointer-events:none;user-select:none\}/);
+ assert.match(css,/\.login-cursor-trail span\{[^}]*width:3px;height:3px;[^}]*background:var\(--green\);opacity:0;pointer-events:none/);
+ assert.match(css,/\.login-cursor-trail span:nth-child\(2n\)\{width:6px;height:2px;background:var\(--muted\)\}/);
+ assert.match(css,/@media\(prefers-reduced-motion:reduce\),\(pointer:coarse\),\(hover:none\),\(max-width:680px\)\{\.workspace-page \.login-cursor-trail\{display:none\}\}/);
+ assert.doesNotMatch(css,/cursor\s*:\s*none/);
 });
 test('rejected submission never runs the accepted morph or discards input',async()=>{
  const motion=motionSpy(),f=fixture(motion);captureAPI(f,true);
@@ -871,15 +899,17 @@ test('failed capture shows concise classified copy, raw detail, attempt number, 
  assert.match(rendered.querySelector('.detail-metadata').textContent,/Percobaan 1\/1/);
  assert.match(f.get('status-detail').textContent,/Gagal mengambil media/);
  const first=retry.onclick();retry.onclick();assert.equal(requests.length,1);assert.equal(retry.disabled,true);
+ f.run('renderHistory(historyRows)');const pendingRetry=f.get('results').querySelector('.retry-capture');
+ assert.equal(pendingRetry.disabled,true);assert.equal(pendingRetry.textContent,'Mengirim…');pendingRetry.onclick();assert.equal(requests.length,1);
  f.context.retryGate.resolve({job_id:'retry-2',retry_of:'failed',attempt_root_id:'failed',attempt_number:2,attempt_total:2});await first;
  assert.equal(f.get('results').children[0].dataset.jobId,'retry-2');assert.equal(f.get('status-monitor').dataset.phase,'starting');
- assert.equal(requests[0][0],'recordings/failed/retry');assert.match(f.get('notice').textContent,/Percobaan 2\/2/);
+ assert.equal(requests[0][0],'recordings/failed/retry');assert.match(f.get('toast-status').textContent,/Percobaan 2\/2/);
 });
-test('failed Retry request restores the action and reports inline feedback',async()=>{
+test('failed Retry request restores the action and reports a non-blocking error toast',async()=>{
  const f=fixture();f.context.row={job_id:'failed',state:'failed',source:'instagram',can_retry:true,detail:'diagnostic'};
  f.run("api=async()=>{throw Error('Masih ada capture yang berjalan.')};historyRows=[row];renderHistory(historyRows)");
  const retry=f.get('results').querySelector('.retry-capture');await retry.onclick();
- assert.equal(retry.disabled,false);assert.match(f.get('notice').textContent,/Masih ada capture/);
+ assert.equal(retry.disabled,false);assert.match(f.get('toast-error-live').textContent,/Masih ada capture/);
 });
 test('minimal island markup omits duplicate metadata and moves live markers outside the signal',()=>{
  const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
@@ -954,4 +984,135 @@ test('rapid repeated submission cannot duplicate admission and a changed source 
  assert.equal(count,1);f.run("setMode('instagram')");reject(Error('Offline'));await first;
  assert.equal(f.get('record').textContent,'Mulai');assert.equal(f.get('capture-content').hidden,false);
  assert.equal(motion.calls.some(c=>c[0]==='source'&&c[1]),false);
+});
+
+test('toasts announce success politely and errors assertively, dismiss on time, and preserve page notices',()=>{
+ const f=fixture();f.run("notice('Persistent feedback');toast('Watch dibuat.')");
+ assert.equal(f.get('toast-region').children.length,1);assert.equal(f.get('toast-status').textContent,'Watch dibuat.');
+ const timer=f.run('activeToast.timer');assert.equal(f.timers.get(timer).delay,4500);
+ assert.equal(f.document.activeElement,f.document.body);f.fireTimer(timer);assert.equal(f.get('toast-region').children.length,0);
+ f.run("toast('Permintaan gagal.','error')");assert.equal(f.get('toast-error-live').textContent,'Permintaan gagal.');
+ assert.equal(f.timers.get(f.run('activeToast.timer')).delay,10000);
+ const close=f.get('toast-region').querySelector('button');assert.equal(close.attributes['aria-label'],'Tutup notifikasi');close.onclick();
+ assert.equal(f.get('toast-region').children.length,0);assert.equal(f.get('notice').textContent,'Persistent feedback');
+ const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
+ assert.match(html,/id="toast-status"[^>]*role="status"[^>]*aria-live="polite"[^>]*aria-atomic="true"/);
+ assert.match(html,/id="toast-error-live"[^>]*role="alert"[^>]*aria-live="assertive"/);
+});
+test('rapid toast events queue without overlap, deduplicate repeats, and ignore obsolete exit callbacks',()=>{
+ const exits=[],f=fixture({toast(node,visible,done){if(!visible)exits.push(done);return ()=>{};}});
+ f.run("toast('First');toast('Second');toast('Second');toast('Third','error')");
+ assert.equal(f.get('toast-region').children.length,1);assert.equal(f.run('toastQueue.length'),2);
+ f.run('dismissToast();dismissToast()');assert.equal(exits.length,1);exits[0]();
+ assert.equal(f.get('toast-region').children.length,1);assert.equal(f.get('toast-status').textContent,'Second');
+ exits[0]();assert.equal(f.get('toast-status').textContent,'Second');
+ f.run('dismissToast()');exits[1]();assert.equal(f.get('toast-error-live').textContent,'Third');
+ f.run('resetToasts()');assert.equal(f.get('toast-region').children.length,0);assert.equal(f.run('toastQueue.length'),0);
+});
+test('toast timers pause during hover or keyboard focus and logout clears queued feedback',()=>{
+ const f=fixture();f.run("toast('Hover or focus');toast('Queued')");const card=f.get('toast-region').children[0];
+ const initial=f.run('activeToast.timer');card.listeners.mouseenter();assert.equal(f.timers.has(initial),false);
+ card.listeners.mouseleave();assert.equal(f.timers.has(f.run('activeToast.timer')),true);
+ const timer=f.run('activeToast.timer');card.listeners.focusin();assert.equal(f.timers.has(timer),false);
+ card.listeners.focusout({relatedTarget:card.querySelector('button')});assert.equal(f.timers.has(f.run('activeToast.timer')),false);
+ card.listeners.focusout({relatedTarget:null});assert.equal(f.timers.has(f.run('activeToast.timer')),true);
+ f.run('showLogin()');assert.equal(f.get('toast-region').children.length,0);assert.equal(f.run('toastQueue.length'),0);
+});
+const polishRows=[
+ {job_id:'one',filename:'PAGI.mp4',note:'Dialog Batam',source:'youtube',source_name:'RRI Batam',state:'ready',source_metadata:{title:'Berita Nusantara'},download_count:7},
+ {job_id:'two',title:'Evening stream',source:'tiktok',state:'failed',detail:'ERROR: internal diagnostic'},
+ {job_id:'three',filename:'Diskusi.mp4',source:'instagram',state:'ready',transcript:{status:'transcribing'}},
+ {job_id:'four',filename:'Queued.mp4',source:'youtube',state:'ready',transcript:{status:'queued'}},
+ {job_id:'five',title:'Live now',source:'oryx',state:'recording'}
+];
+test('History searches filename, title, metadata and source immediately without a request',()=>{
+ const f=fixture();f.context.rows=polishRows;f.run('renderHistory(rows)');
+ f.context.fetch=()=>assert.fail('Client-side filters must not request the backend');
+ for(const [query,expected] of [['  pagi  ',['one']],['evening',['two']],['nusantara',['one']],['RRI',['one']],['INSTAGRAM',['three']]]){
+  f.get('filter-q').value=query;f.get('filter-q').oninput();assert.deepEqual(f.get('results').children.map(row=>row.dataset.jobId),expected);
+ }
+ assert.equal(f.run('historyRows.length'),5);f.get('filter-reset').onclick();assert.equal(f.get('results').children.length,5);assert.equal(f.get('filter-reset').disabled,true);
+});
+test('History status/source filters combine and Transcribing includes queued work while admin fields stay scoped',()=>{
+ const f=fixture();f.context.rows=polishRows;f.run('isAdmin=true;renderHistory(rows)');
+ assert.equal(f.get('results').querySelector('.download-stat').textContent,'7× download');
+ f.get('filter-state').value='transcribing';f.get('filter-state').onchange();assert.deepEqual(f.get('results').children.map(row=>row.dataset.jobId),['three','four']);
+ f.get('filter-source').value='youtube';f.get('filter-source').onchange();assert.deepEqual(f.get('results').children.map(row=>row.dataset.jobId),['four']);
+ f.get('filter-state').value='failed';f.get('filter-source').value='';f.get('filter-state').onchange();assert.equal(f.get('results').children[0].dataset.jobId,'two');
+ f.get('filter-reset').onclick();f.run('isAdmin=false;renderHistory(historyRows)');assert.equal(f.get('results').querySelector('.download-stat'),null);
+ f.get('filter-state').value='recording';f.get('filter-state').onchange();assert.equal(f.get('results').children[0].dataset.jobId,'five');
+});
+test('empty filtered History explains how to recover and remains distinct from no recordings',()=>{
+ const f=fixture();f.context.rows=polishRows;f.run('renderHistory(rows)');f.get('filter-q').value='missing';f.get('filter-q').oninput();
+ assert.equal(f.get('empty').hidden,false);assert.match(f.get('empty').textContent,/Tidak ada rekaman yang cocok.*bersihkan filter/);
+ assert.equal(f.get('result-count').textContent,'0 / 5 hasil');assert.equal(f.get('filter-reset').disabled,false);
+ f.get('filter-reset').onclick();assert.equal(f.get('empty').hidden,true);
+ f.run('renderHistory([])');assert.match(f.get('empty').textContent,/Belum ada rekaman.*Source/);
+});
+test('History preserves the existing date filter locally and only visible selections are acted on',()=>{
+ const f=fixture();f.context.rows=[{job_id:'first',state:'ready',filename:'a.mp4',requested_at:new Date(2026,9,7,8).getTime()/1000},{job_id:'second',state:'ready',filename:'b.mp4',requested_at:new Date(2026,9,8,8).getTime()/1000}];f.run('renderHistory(rows)');
+ f.get('results').querySelector('.history-select').checked=true;f.get('filter-date').value='2026-10-08';f.get('filter-date').onchange();
+ assert.equal(f.get('results').children.length,1);assert.equal(f.get('results').children[0].dataset.jobId,'second');assert.equal(f.run('selectedJobs().length'),0);
+});
+test('History distinguishes the loaded client dataset from the existing server total',()=>{
+ const f=fixture();f.context.rows=polishRows;f.run('historyTotal=250;renderHistory(rows)');
+ assert.equal(f.get('result-count').textContent,'5 / 250 hasil');assert.match(f.get('result-count').title,/5 rekaman yang dimuat/);
+ f.get('filter-source').value='youtube';f.get('filter-source').onchange();assert.equal(f.get('result-count').textContent,'2 / 5 hasil');
+});
+test('unclassified failed capture hides raw diagnostics from its primary message and cannot invent Retry',()=>{
+ const f=fixture();f.run("renderHistory([{job_id:'old-failure',state:'failed',source:'youtube',detail:'HTTP 403: stack trace <script>bad</script>'}])");
+ const row=f.get('results').children[0];assert.equal(row.querySelector('.status-badge').textContent,'Capture gagal');
+ assert.match(row.querySelector('.capture-failure-message').textContent,/YouTube gagal memberikan media/);assert.doesNotMatch(row.querySelector('.capture-failure-message').textContent,/HTTP|stack trace/);
+ assert.equal(row.querySelector('.retry-capture'),null);assert.equal(row.querySelector('.recording-details').querySelector('summary').textContent,'Detail teknis');
+ assert.match(row.querySelector('.recording-detail-body').textContent,/HTTP 403/);assert.equal(row.querySelector('script'),null);
+});
+function keyEvent(key,target,mods={}){return {key,target,...mods,preventDefault(){this.defaultPrevented=true;}};}
+function paletteFixture(motion){const f=fixture(motion);f.run("csrf='test';$('workspace').hidden=false;$('workspace').dataset.destination='workspace';api=async()=>({watches:[],active_count:0})");return f;}
+test('command palette shortcuts ignore typing, repeats and modal dialogs while Cmd/Ctrl+K opens five commands',()=>{
+ const f=paletteFixture();
+ for(const target of [new Element('input'),new Element('textarea'),new Element('select'),{isContentEditable:true},{tagName:'SPAN',closest:()=>({})}]){
+  const event=keyEvent('k',target,{ctrlKey:true});f.context.event=event;f.run('paletteShortcut(event)');assert.equal(event.defaultPrevented,undefined);assert.equal(f.get('command-palette').open,false);
+ }
+ const repeat=keyEvent('k',f.document.body,{metaKey:true,repeat:true});f.context.event=repeat;f.run('paletteShortcut(event)');assert.equal(f.get('command-palette').open,false);
+ f.get('app-dialog').open=true;f.get('command-open').onclick();assert.equal(f.get('command-palette').open,false);f.get('app-dialog').open=false;
+ const event=keyEvent('K',f.document.body,{metaKey:true});f.context.event=event;f.run('paletteShortcut(event)');assert.equal(event.defaultPrevented,true);
+ assert.equal(f.get('command-palette').open,true);assert.equal(f.get('command-list').children.length,5);assert.equal(f.document.activeElement,f.get('command-search'));
+ assert.equal(f.get('command-list').children[0].attributes['aria-selected'],'true');assert.equal(f.get('command-search').attributes['aria-activedescendant'],'command-workspace');
+});
+test('command palette arrows wrap, Enter runs the existing action, and Escape restores trigger focus',()=>{
+ const f=paletteFixture();f.get('command-open').focus();f.get('command-open').onclick();
+ f.get('command-search').onkeydown(keyEvent('ArrowUp'));assert.equal(f.get('command-search').attributes['aria-activedescendant'],'command-history');
+ f.get('command-search').onkeydown(keyEvent('Enter'));assert.equal(f.get('command-palette').open,false);assert.equal(f.document.activeElement,f.get('filter-q'));
+ assert.equal(f.get('workspace').dataset.destination,'workspace');
+ f.get('command-open').focus();f.get('command-open').onclick();f.get('command-search').onkeydown(keyEvent('ArrowDown'));
+ f.get('command-palette').listeners.cancel(keyEvent('Escape'));assert.equal(f.get('command-palette').open,false);assert.equal(f.document.activeElement,f.get('command-open'));
+});
+test('command palette searches only commands, handles no matches, opens the one Watch form and preserves a draft',()=>{
+ const f=paletteFixture();f.get('watch-create').onclick();f.get('watch-url').value='@draft';f.get('command-open').onclick();
+ f.get('command-search').value='impossible';f.get('command-search').oninput();assert.equal(f.get('command-empty').hidden,false);
+ assert.equal(f.get('command-search').attributes['aria-activedescendant'],undefined);f.get('command-search').onkeydown(keyEvent('Enter'));assert.equal(f.get('command-palette').open,true);
+ f.get('command-search').value='watch';f.get('command-search').oninput();assert.equal(f.get('command-list').children.length,1);
+ f.get('command-search').onkeydown(keyEvent('Enter'));assert.equal(f.get('watch-url').value,'@draft');assert.equal(f.get('workspace').dataset.destination,'settings');assert.equal(f.document.activeElement,f.get('watch-url'));
+});
+test('palette Workspace, Settings and New capture commands invoke existing navigation and Source focus',()=>{
+ const f=paletteFixture();
+ const execute=query=>{f.get('command-open').onclick();f.get('command-search').value=query;f.get('command-search').oninput();f.get('command-search').onkeydown(keyEvent('Enter'));};
+ execute('Go to Settings');assert.equal(f.get('workspace').dataset.destination,'settings');
+ execute('Go to Workspace');assert.equal(f.get('workspace').dataset.destination,'workspace');
+ f.run("mode='youtube';collapseSource(true)");f.get('youtube-url').value='draft';execute('New capture');
+ assert.equal(f.get('capture-content').hidden,false);assert.equal(f.document.activeElement,f.get('youtube-url'));assert.equal(f.get('youtube-url').value,'draft');
+ execute('Add Watch');assert.equal(f.get('watch-create-panel').hidden,false);assert.equal(f.document.activeElement,f.get('watch-url'));
+});
+test('palette close/reopen interruption rejects stale actions and logout forcibly closes an in-flight modal',()=>{
+ const closes=[],f=paletteFixture({dialogOpen(){},dialogClose(dialog,panel,done){closes.push(done);},reset(){},source(panel,collapsed,change){change();}});
+ f.get('command-open').onclick();f.get('command-search').onkeydown(keyEvent('ArrowUp'));f.get('command-search').onkeydown(keyEvent('Enter'));
+ f.get('command-open').onclick();closes[0]();assert.equal(f.get('command-palette').open,true);assert.notEqual(f.document.activeElement,f.get('filter-q'));
+ f.get('command-close').onclick();f.run('showLogin()');assert.equal(f.get('command-palette').open,false);closes[1]();assert.notEqual(f.document.activeElement,f.get('filter-q'));
+});
+test('Settings section shortcuts reuse navigation, preserve inputs, and only expose existing admin sections to admins',async()=>{
+ const f=fixture();captureAPI(f);await f.run('enter({is_admin:false})');
+ assert.equal(f.get('settings-admin').hidden,true);assert.equal(f.get('settings-nav-admin').hidden,true);assert.equal(f.get('watches-panel').hidden,false);
+ f.get('source-name').value='Draft';f.get('settings-nav-sources').onclick();assert.equal(f.get('workspace').dataset.destination,'settings');assert.equal(f.document.activeElement,f.get('settings-sources'));assert.equal(f.get('source-name').value,'Draft');
+ f.get('settings-nav-storage').onclick();assert.equal(f.document.activeElement,f.get('settings-storage'));f.get('settings-nav-admin').onclick();assert.equal(f.document.activeElement,f.get('settings-storage'));
+ await f.run('enter({is_admin:true})');assert.equal(f.get('settings-admin').hidden,false);assert.equal(f.get('settings-nav-admin').hidden,false);f.get('settings-nav-admin').onclick();assert.equal(f.document.activeElement,f.get('settings-admin'));
 });

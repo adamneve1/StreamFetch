@@ -5,8 +5,12 @@
 })(typeof window==='undefined'?{}:window, function(env) {
  const {gsap,Flip,MorphSVGPlugin}=env, media=env.matchMedia?.('(prefers-reduced-motion: reduce)');
  const available=!!(gsap&&Flip), regions=new Map(), progressTweens=new Map();
+ const toastKeys=new WeakMap();let toastId=0;
+ const dialogKeys=new WeakMap();let dialogId=0;
  let islandKey='',dismissedKey='',dismissTimer;
  let authState='idle',pendingNavigation,loginMarkMotion;
+ const trailMedia=env.matchMedia?.('(pointer: fine) and (hover: hover) and (min-width: 681px) and (prefers-reduced-motion: no-preference)');
+ let loginTrailShell=null,loginTrail;
  const tokens=Object.freeze({micro:.16,navigation:.32,reveal:.8,geometry:.38,source:.44,accepted:.48,sourceMobile:.36,acceptedMobile:.4,ease:'power3.out',settle:'power2.inOut'});
  const loginShapes=Object.freeze({
   normal:'M32 25a7 7 0 1 1 0 14 7 7 0 1 1 0-14Z',
@@ -18,6 +22,61 @@
  if(gsap&&Flip)gsap.registerPlugin(Flip);
  if(gsap&&MorphSVGPlugin)gsap.registerPlugin(MorphSVGPlugin);
  const reduced=()=>!!media?.matches;
+ function parkLoginTrail(trail){
+  trail.layer.hidden=true;delete trail.layer.dataset.exiting;
+  if(trail.layer.parentNode!==trail.shell)trail.shell.append(trail.layer);
+ }
+ function stopLoginTrail(fade=false){
+  const trail=loginTrail;if(!trail)return;
+  trail.shell.removeEventListener('pointermove',trail.move);
+  trail.shell.removeEventListener('pointerleave',trail.leave);
+  trail.active=false;trail.lastTime=-Infinity;trail.lastX=null;
+  const generation=++trail.generation;
+  trail.clearTween?.kill();trail.clearTween=null;gsap.killTweensOf(trail.particles);
+  if(fade&&!reduced()&&!trail.layer.hidden){
+   // Like the logo exit snapshot, let existing particles finish after login hides.
+   // No listener survives this move, so the workspace can never spawn a trail.
+   trail.layer.dataset.exiting='true';env.document.body.append(trail.layer);
+   trail.clearTween=gsap.to(trail.particles,{opacity:0,scale:.4,duration:.12,ease:tokens.ease,onComplete:()=>{
+    if(trail.generation!==generation)return;
+    trail.clearTween=null;parkLoginTrail(trail);
+   }});
+  }else{gsap.set(trail.particles,{opacity:0});parkLoginTrail(trail);}
+ }
+ function syncLoginTrail(){
+  const shell=loginTrailShell;
+  if(!shell||shell.hidden||!gsap||!trailMedia?.matches||reduced()){stopLoginTrail();return;}
+  if(!loginTrail){
+   const layer=env.document.createElement('div');layer.className='login-cursor-trail';layer.setAttribute('aria-hidden','true');layer.inert=true;layer.hidden=true;
+   const particles=Array.from({length:6},()=>{const particle=env.document.createElement('span');layer.append(particle);return particle;});
+   const trail=loginTrail={shell,layer,particles,active:false,next:0,lastTime:-Infinity,lastX:null,lastY:0,generation:0};
+   trail.leave=()=>{trail.lastX=null;};
+   trail.move=event=>{
+    if(!trail.active)return;
+    if(shell.hidden){stopLoginTrail();return;}
+    if(event.pointerType==='touch'||event.isPrimary===false||event.target?.closest?.('.login-card,input,textarea,select,button,a,label,[role="button"],[contenteditable]:not([contenteditable="false"])'))return;
+    const x=event.clientX,y=event.clientY,time=event.timeStamp??Date.now();
+    if(!Number.isFinite(x)||!Number.isFinite(y)||time-trail.lastTime<90)return;
+    const dx=trail.lastX===null?0:x-trail.lastX,dy=trail.lastX===null?0:y-trail.lastY;
+    if(trail.lastX!==null&&Math.hypot(dx,dy)<12)return;
+    const index=trail.next++%particles.length,particle=particles[index];
+    trail.lastTime=time;trail.lastX=x;trail.lastY=y;
+    // Viewport coordinates and a fixed pool: no geometry reads or nodes per move.
+    gsap.killTweensOf(particle);
+    gsap.fromTo(particle,{x:x-2,y:y-2,opacity:.28,scale:index%2?.8:1.05},{
+     x:x-2-Math.max(-10,Math.min(10,dx*.12)),y:y+6-Math.max(-6,Math.min(6,dy*.1)),opacity:0,scale:.35,duration:.42,ease:'power2.out',
+    });
+   };
+   shell.append(layer);
+  }
+  const trail=loginTrail;if(trail.active)return;
+  ++trail.generation;trail.clearTween?.kill();trail.clearTween=null;gsap.killTweensOf(trail.particles);
+  gsap.set(trail.particles,{opacity:0});
+  delete trail.layer.dataset.exiting;if(trail.layer.parentNode!==trail.shell)trail.shell.append(trail.layer);
+  trail.layer.hidden=false;trail.active=true;trail.lastTime=-Infinity;trail.lastX=null;
+  trail.shell.addEventListener('pointermove',trail.move,{passive:true});
+  trail.shell.addEventListener('pointerleave',trail.leave,{passive:true});
+ }
  function choreograph(name,element,animate,ghost){
   settle(name);
   if(!gsap||reduced())return;
@@ -25,21 +84,39 @@
   const cleanup=()=>{if(regions.get(name)!==region)return false;settle(name);return true;};
   try{region.context=gsap.context(()=>animate(cleanup));}catch{cleanup();}
  }
+ function dialogKey(dialog){if(!dialogKeys.has(dialog))dialogKeys.set(dialog,'dialog-'+(++dialogId));return dialogKeys.get(dialog);}
  function dialogOpen(dialog,panel){
-  settle('dialog');
+  const name=dialogKey(dialog);settle(name);
   if(!gsap||reduced())return;
-  choreograph('dialog',dialog,done=>gsap.timeline({onComplete:done,defaults:{ease:tokens.ease}})
+  choreograph(name,dialog,done=>gsap.timeline({onComplete:done,defaults:{ease:tokens.ease}})
    .fromTo(dialog,{'--dialog-backdrop-opacity':0},{'--dialog-backdrop-opacity':.28,duration:tokens.micro},0)
    .fromTo(panel,{opacity:0,y:8,scale:.985},{opacity:1,y:0,scale:1,duration:tokens.micro*1.25},0));
  }
  function dialogClose(dialog,panel,onComplete){
-  settle('dialog');
+  const name=dialogKey(dialog);settle(name);
   if(!gsap||reduced()){onComplete?.();return;}
-  const region={element:dialog,onSettled:onComplete};regions.set('dialog',region);
-  const cleanup=()=>{if(regions.get('dialog')!==region)return false;settle('dialog');onComplete?.();return true;};
+  const region={element:dialog,onSettled:onComplete};regions.set(name,region);
+  const cleanup=()=>{if(regions.get(name)!==region)return false;settle(name);onComplete?.();return true;};
   try{region.context=gsap.context(()=>gsap.timeline({onComplete:cleanup,defaults:{ease:tokens.settle}})
    .to(dialog,{'--dialog-backdrop-opacity':0,duration:tokens.micro*1.25},0)
    .to(panel,{opacity:0,y:5,scale:.99,duration:tokens.micro*1.25},0));}catch{cleanup();}
+ }
+ function toast(element,visible,onComplete){
+  if(!toastKeys.has(element))toastKeys.set(element,'toast-'+(++toastId));
+  const name=toastKeys.get(element);settle(name);
+  if(!gsap||reduced()){onComplete?.();return ()=>{};}
+  const region={element,onSettled:onComplete};regions.set(name,region);
+  const complete=()=>{if(regions.get(name)===region){settle(name);onComplete?.();}};
+  try{region.context=gsap.context(()=>{
+   const timeline=gsap.timeline({onComplete:complete,defaults:{ease:tokens.ease}});
+   if(visible)timeline.fromTo(element,{opacity:0,y:5},{opacity:1,y:0,duration:tokens.micro},0);
+   else timeline.to(element,{opacity:0,y:3,duration:tokens.micro},0);
+  });}catch{complete();}
+  return ()=>settle(name);
+ }
+ function historyFilter(element){
+  choreograph('history-filter',element,done=>gsap.timeline({onComplete:done})
+   .fromTo(element,{opacity:.8},{opacity:1,duration:tokens.micro,ease:tokens.ease},0));
  }
  function loginParts(root){
   let ring=root?.querySelector?.('.login-ring')||env.document.getElementById('login-ring');
@@ -77,6 +154,7 @@
   else timeline.to(parts.ring,{strokeDasharray:'114 0',strokeDashoffset:0,rotation:0,transformOrigin:'50% 50%',duration:tokens.navigation},0);
  }
  function loginReveal(shell){
+  loginTrailShell=shell;syncLoginTrail();
   stopLoginMark('normal');
   choreograph('login',shell,done=>{
    const form=env.document.getElementById('login-form');
@@ -117,6 +195,7 @@
   });
  }
  function loginSuccess(workspace){
+  loginTrailShell=null;stopLoginTrail(true);
   authState='idle';settle('login');settle('login-error');settle('login-input');
   const form=env.document.getElementById('login-form');
   if(!gsap||reduced()){stopLoginMark();applyLoginMark('success');return;}
@@ -335,6 +414,7 @@
   state.tween=gsap.to(element,{value,duration:tokens.micro,ease:tokens.ease,overwrite:true});
  }
  function reset(){
+  loginTrailShell=null;stopLoginTrail();
   authState='idle';pendingNavigation?.cancel();pendingNavigation=null;stopLoginMark('normal');
   env.clearTimeout(dismissTimer);islandKey='';dismissedKey='';
   for(const name of [...regions.keys()])settle(name);
@@ -342,6 +422,7 @@
   progressTweens.clear();
  }
  media?.addEventListener?.('change',()=>{
+  syncLoginTrail();
   if(!reduced())return;
   if(loginMarkMotion)applyLoginMark(loginMarkMotion.state);stopLoginMark();
   pendingNavigation?.finish();
@@ -350,6 +431,7 @@
  });
  env.addEventListener?.('resize',()=>{pendingNavigation?.finish();for(const name of [...regions.keys()])settle(name,true);});
  env.addEventListener?.('pagehide',reset);
- env.addEventListener?.('pageshow',event=>{if(event.persisted)reset();});
- return {tokens,source,sourceMode,sourcePress,island,progress,reset,reduced,dialogOpen,dialogClose,loginReveal,loginError,loginSuccess,loginInteract,pageReveal,contextChange,followLink,returnReveal};
+ trailMedia?.addEventListener?.('change',syncLoginTrail);
+ env.addEventListener?.('pageshow',event=>{if(event.persisted){reset();loginTrailShell=env.document.getElementById('login');syncLoginTrail();}});
+ return {tokens,source,sourceMode,sourcePress,island,progress,reset,reduced,dialogOpen,dialogClose,toast,historyFilter,loginReveal,loginError,loginSuccess,loginInteract,pageReveal,contextChange,followLink,returnReveal};
 });

@@ -2,11 +2,14 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const createMotion=require('../app/static/motion.js');
 
-function fixture(reduced=false,available=true){
- const flips=[],states=[],tweens=[],contexts=[],timelines=[],conversions=[],timers=new Map(),listeners={};let timerId=0,current;
- const element=()=>({dataset:{},style:{},children:[],hidden:false,value:0,
+function fixture(reduced=false,available=true,trailOptions){
+ const flips=[],states=[],tweens=[],contexts=[],timelines=[],conversions=[],timers=new Map(),listeners={},created=[],sets=[],killedTargets=[];let timerId=0,current;
+ const element=()=>({dataset:{},style:{},children:[],hidden:false,value:0,events:new Map(),eventAdds:[],
+  addEventListener(type,fn,options){if(!this.events.has(type))this.events.set(type,new Set());this.events.get(type).add(fn);this.eventAdds.push({type,options});},
+  removeEventListener(type,fn){this.events.get(type)?.delete(fn);},
+  fire(type,event){for(const fn of [...this.events.get(type)||[]])fn(event);},
   setAttribute(name,value){this[name]=value;},removeAttribute(name){delete this[name];},
-  append(node){this.children.push(node);},remove(){this.removed=true;},
+  append(node){if(node.parentNode)node.parentNode.children=node.parentNode.children.filter(child=>child!==node);node.parentNode=this;this.children.push(node);},remove(){this.removed=true;},
   querySelectorAll(selector){return selector==='input'?this.inputs||[]:[];},querySelector(selector){return this.queries?.[selector]||this.action;},
   cloneNode(){const clone=element(),cloneGlyph=element(),cloneRing=element();clone.action=element();clone.inputs=[element()];clone.inputs[0].value='not-to-be-retained';clone.queries={'.login-glyph':cloneGlyph,'.login-ring':cloneRing,'.login-logo':element(),'.login-surface':element(),'.login-brand span':element()};return clone;},
   getBoundingClientRect(){return {width:640,left:20,top:30};},offsetLeft:12,offsetTop:12});
@@ -21,7 +24,9 @@ function fixture(reduced=false,available=true){
   const t={target,vars,killed:false,kill(){this.killed=true;}};tweens.push(t);current?.animations.push(t);return t;
  };
  const media={matches:reduced,addEventListener(type,fn){listeners.media=fn;}};
+ const trailMedia={matches:!!trailOptions&&!reduced&&trailOptions.fine!==false&&trailOptions.hover!==false&&trailOptions.mobile!==true,addEventListener(type,fn){listeners.trailMedia=fn;}};
  const gsap={registerPlugin(){},to:tween,fromTo(target,from,vars){const t=tween(target,vars);t.from=from;return t;},
+  set(target,vars){sets.push({target,vars});},killTweensOf(target){killedTargets.push(target);const targets=Array.isArray(target)?target:[target];for(const t of tweens)if((Array.isArray(t.target)?t.target:[t.target]).some(node=>targets.includes(node)))t.kill();},
   timeline(vars){const timeline={vars,animations:[],killed:false,kill(){this.killed=true;for(const t of this.animations)t.kill();},to(target,vars,position){const t=tween(target,vars);t.position=position;this.animations.push(t);return this;},fromTo(target,from,vars,position){const t=tween(target,vars);t.from=from;t.position=position;this.animations.push(t);return this;}};timelines.push(timeline);return timeline;},
   context(fn){const c={animations:[],reverted:false,revert(){this.reverted=true;for(const t of this.animations)t.kill();}};
    contexts.push(c);current=c;fn();current=null;return c;}};
@@ -29,8 +34,8 @@ function fixture(reduced=false,available=true){
   from(state,vars){const t=tween(state.targets,vars);flips.push({state,vars,t});return t;}};
  const MorphSVGPlugin={convertToPath(target){target.tagName='path';conversions.push(target);return [target];}};
  const navigations=[],stored=new Map();
- const env={document:{getElementById:id=>ids[id],body},location:{assign:url=>navigations.push(url)},sessionStorage:{setItem:(key,value)=>stored.set(key,value),getItem:key=>stored.get(key),removeItem:key=>stored.delete(key)},
-  gsap:available?gsap:null,Flip:available?Flip:null,MorphSVGPlugin:available?MorphSVGPlugin:null,matchMedia:()=>media,
+ const env={document:{getElementById:id=>ids[id],body,createElement(tag){const node=element();node.tagName=tag;created.push(node);return node;}},location:{assign:url=>navigations.push(url)},sessionStorage:{setItem:(key,value)=>stored.set(key,value),getItem:key=>stored.get(key),removeItem:key=>stored.delete(key)},
+  gsap:available?gsap:null,Flip:available?Flip:null,MorphSVGPlugin:available?MorphSVGPlugin:null,matchMedia:query=>query.includes('pointer: fine')?trailMedia:media,
   setTimeout(fn){timers.set(++timerId,fn);return timerId;},clearTimeout(id){timers.delete(id);},
   addEventListener(type,fn){listeners[type]=fn;}};
  const motion=createMotion(env);
@@ -39,8 +44,99 @@ function fixture(reduced=false,available=true){
  },{accepted,job});
  const status=(key,phase)=>motion.island(island,key,phase,()=>{island.hidden=false;island.detail=phase;});
  const tick=()=>{const callbacks=[...timers.values()];timers.clear();callbacks.forEach(fn=>fn());};
- return {motion,source,status,tick,flips,states,tweens,contexts,timelines,conversions,timers,listeners,media,panel,content,compact,island,bar,job,Flip,shell,form,brand,label,password,button,credit,error,workspace,mark,ring,glyph,wordmark,surface,body,dialog,dialogPanel,navigations,stored};
+ return {motion,source,status,tick,flips,states,tweens,contexts,timelines,conversions,timers,listeners,media,trailMedia,created,sets,killedTargets,panel,content,compact,island,bar,job,Flip,shell,form,brand,label,password,button,credit,error,workspace,mark,ring,glyph,wordmark,surface,body,dialog,dialogPanel,navigations,stored};
 }
+const trailMove=(f,time=0,x=20,target={closest:()=>null},pointerType='mouse')=>f.shell.fire('pointermove',{timeStamp:time,clientX:x,clientY:40,target,pointerType,isPrimary:true});
+const particleTweens=f=>f.tweens.filter(t=>f.created.includes(t.target)&&t.target.tagName==='span');
+test('login cursor trail activates only on a visible login with a fine hover pointer',()=>{
+ const f=fixture(false,true,{});
+ assert.equal(f.created.length,0);assert.equal(f.shell.events.size,0);
+ f.shell.hidden=true;f.motion.loginReveal(f.shell);assert.equal(f.created.length,0);
+ f.shell.hidden=false;f.motion.loginReveal(f.shell);
+ assert.equal(f.created.length,7);assert.equal(f.shell.children.length,1);
+ const layer=f.shell.children[0];assert.equal(layer.children.length,6);assert.equal(layer['aria-hidden'],'true');assert.equal(layer.inert,true);
+ assert.equal(f.shell.events.get('pointermove').size,1);assert.equal(f.shell.eventAdds[0].options.passive,true);
+ trailMove(f);assert.equal(particleTweens(f).length,1);
+ assert.equal(f.body.children.length,0);assert.equal(f.workspace.events.size,0);
+ f.shell.hidden=true;trailMove(f,100,60);assert.equal(particleTweens(f).length,1);assert.equal(layer.hidden,true);
+ assert.equal(f.shell.events.get('pointermove').size,0);
+});
+test('login cursor trail allocates no particles or pointer listeners for coarse, touch, mobile, reduced motion or missing GSAP',()=>{
+ for(const f of [fixture(false,true,{fine:false}),fixture(false,true,{hover:false}),fixture(false,true,{mobile:true}),fixture(true,true,{}),fixture(false,false,{})]){
+  f.motion.loginReveal(f.shell);assert.equal(f.created.length,0);assert.equal(f.shell.events.size,0);
+ }
+});
+test('login cursor trail reuses six particles, throttles moves and animates transforms and opacity only',()=>{
+ const f=fixture(false,true,{});f.motion.loginReveal(f.shell);
+ for(const node of [f.shell,f.form,...f.created])node.getBoundingClientRect=()=>{throw Error('No geometry reads during pointermove');};
+ trailMove(f);trailMove(f,10,40);trailMove(f,100,21);assert.equal(particleTweens(f).length,1);
+ for(let i=1;i<=12;i++)trailMove(f,i*100,i*40);
+ const tweens=particleTweens(f);assert.equal(tweens.length,13);assert.equal(f.created.length,7);
+ assert.equal(new Set(tweens.map(t=>t.target)).size,6);assert.equal(tweens[0].killed,true);
+ assert.equal(f.killedTargets.filter(t=>t===tweens[0].target).length,3);
+ for(const tween of tweens){
+  assert.equal(tween.vars.duration,.42);assert.equal(tween.vars.opacity,0);assert.ok(tween.from.opacity<=.3);
+  assert.deepEqual(Object.keys(tween.from).sort(),['opacity','scale','x','y']);
+  assert.deepEqual(Object.keys(tween.vars).sort(),['duration','ease','opacity','scale','x','y']);
+ }
+});
+test('login cursor trail suppresses the form and interactive controls and ignores touch events',()=>{
+ const f=fixture(false,true,{});f.motion.loginReveal(f.shell);
+ for(const selector of ['.login-card','input','button','a','select','[contenteditable]']){
+  trailMove(f,100,40,{closest(query){assert.ok(query.includes(selector));return {};}});
+ }
+ trailMove(f,100,40,undefined,'touch');assert.equal(particleTweens(f).length,0);
+ trailMove(f,100,40);assert.equal(particleTweens(f).length,1);
+});
+test('successful login immediately removes cursor listeners and fades existing particles before the exit completes',()=>{
+ const f=fixture(false,true,{});f.motion.loginReveal(f.shell);trailMove(f);
+ const particle=particleTweens(f)[0],layer=f.shell.children[0];f.motion.loginSuccess(f.workspace);
+ assert.equal(layer.parentNode,f.body);assert.equal(layer.dataset.exiting,'true');
+ assert.equal(particle.killed,true);assert.equal(f.shell.events.get('pointermove').size,0);assert.equal(f.shell.events.get('pointerleave').size,0);
+ const clear=f.tweens.find(t=>Array.isArray(t.target)&&t.target[0]===layer.children[0]);assert.equal(clear.vars.duration,.12);
+ trailMove(f,100,60);assert.equal(particleTweens(f).length,1);
+ clear.vars.onComplete();assert.equal(layer.hidden,true);assert.equal(layer.parentNode,f.shell);assert.equal(layer.dataset.exiting,undefined);
+ f.listeners.trailMedia();assert.equal(f.shell.events.get('pointermove').size,0);
+});
+test('rapid login/error/logout reinitialization reuses the pool and rejects stale fade callbacks',()=>{
+ const f=fixture(false,true,{});f.motion.loginReveal(f.shell);trailMove(f);const layer=f.shell.children[0];
+ f.motion.loginError(f.error);assert.equal(f.shell.events.get('pointermove').size,1);
+ f.motion.loginSuccess(f.workspace);const clear=f.tweens.find(t=>Array.isArray(t.target)&&t.target[0]===layer.children[0]);
+ f.motion.reset();assert.equal(clear.killed,true);assert.equal(layer.hidden,true);
+ f.motion.loginReveal(f.shell);f.motion.loginReveal(f.shell);
+ clear.vars.onComplete();assert.equal(layer.hidden,false);assert.equal(f.created.length,7);
+ assert.equal(f.shell.events.get('pointermove').size,1);assert.equal(f.shell.eventAdds.filter(e=>e.type==='pointermove').length,2);
+ trailMove(f);assert.equal(particleTweens(f).length,2);
+ f.motion.reset();assert.equal(f.shell.events.get('pointermove').size,0);assert.equal(particleTweens(f).at(-1).killed,true);
+ assert.equal(f.sets.at(-1).vars.opacity,0);
+});
+test('login cursor trail responds to motion/device preference changes without reviving after login',()=>{
+ const f=fixture(false,true,{});f.motion.loginReveal(f.shell);trailMove(f);
+ f.media.matches=true;f.listeners.media();assert.equal(f.shell.children[0].hidden,true);assert.equal(f.shell.events.get('pointermove').size,0);
+ assert.equal(particleTweens(f)[0].killed,true);
+ f.media.matches=false;f.listeners.media();assert.equal(f.shell.events.get('pointermove').size,1);
+ f.trailMedia.matches=false;f.listeners.trailMedia();assert.equal(f.shell.events.get('pointermove').size,0);
+ f.trailMedia.matches=true;f.listeners.trailMedia();assert.equal(f.shell.events.get('pointermove').size,1);
+ f.motion.loginSuccess(f.workspace);f.listeners.trailMedia();assert.equal(f.shell.events.get('pointermove').size,0);
+});
+test('pagehide clears the login cursor trail and bfcache restores it only when login is visible',()=>{
+ const f=fixture(false,true,{});f.motion.loginReveal(f.shell);trailMove(f);
+ f.listeners.pagehide();assert.equal(f.shell.events.get('pointermove').size,0);assert.equal(f.shell.children[0].hidden,true);
+ f.listeners.pageshow({persisted:true});assert.equal(f.shell.events.get('pointermove').size,1);assert.equal(f.created.length,7);
+ f.shell.hidden=true;f.listeners.pagehide();f.listeners.pageshow({persisted:true});assert.equal(f.shell.events.get('pointermove').size,0);
+});
+test('cursor particles remain independent of the existing MorphSVG login choreography',()=>{
+ const f=fixture(false,true,{});f.motion.loginReveal(f.shell);assert.equal(f.tweens.length,7);assert.deepEqual(f.conversions,[f.ring]);
+ const entrance=f.timelines[0];trailMove(f);const particle=particleTweens(f)[0];
+ f.motion.loginInteract('submit');assert.equal(particle.killed,false);const loading=f.timelines.find(t=>t.animations.some(a=>a.vars.repeat===-1));
+ assert.ok(f.tweens.some(t=>t.target===f.glyph&&t.vars.morphSVG?.shape.includes('V28a7')));
+ assert.ok(f.tweens.some(t=>t.target===f.ring&&t.vars.repeat===-1));
+ f.motion.loginError(f.error);assert.equal(loading.killed,true);assert.equal(particle.killed,false);
+ f.timelines.at(-2).vars.onComplete();assert.match(f.glyph.d,/M32 25a7/);
+ entrance.vars.onComplete();assert.equal(f.shell.children[0].hidden,false);
+ f.motion.loginSuccess(f.workspace);assert.equal(particle.killed,true);
+ assert.ok(f.tweens.some(t=>t.vars.morphSVG?.shape.includes('17-18')));
+});
 test('Source admission snapshots before mutation, morphs surface, and keeps snapshot inert',()=>{
  const f=fixture();f.source(true,true);
  assert.equal(f.states[0].collapsed,'false');assert.equal(f.panel.dataset.collapsed,'true');
@@ -284,4 +380,35 @@ test('changing reduced motion mid-expansion settles geometry before deferred foc
  const f=fixture();f.source(true);let focused=0;f.motion.source(f.panel,false,()=>{f.panel.dataset.collapsed='false';},{onSettled:()=>focused++});
  f.media.matches=true;f.listeners.media();assert.equal(f.panel.dataset.motion,undefined);assert.equal(focused,1);
  f.flips.at(-1).vars.onComplete();assert.equal(focused,1);
+});
+test('toast motion owns each surface and interrupted enter/exit callbacks cannot affect successors',()=>{
+ const f=fixture();let dismissed=0;
+ const cancel=f.motion.toast(f.dialogPanel,true),entry=f.timelines.at(-1);
+ assert.equal(entry.animations[0].from.y,5);assert.equal(entry.animations[0].vars.duration,.16);
+ cancel();assert.equal(entry.animations[0].killed,true);
+ f.motion.toast(f.dialogPanel,false,()=>dismissed++);const exit=f.timelines.at(-1);
+ f.motion.toast(f.dialogPanel,true);exit.vars.onComplete();assert.equal(dismissed,0);
+ f.motion.toast(f.job,false,()=>dismissed++);f.timelines.at(-1).vars.onComplete();assert.equal(dismissed,1);
+ assert.equal(f.timelines.at(-2).animations[0].killed,false);
+});
+test('reduced motion preserves toast completion and immediate filters without animations',()=>{
+ const f=fixture(true);let dismissed=0;
+ f.motion.toast(f.job,true);f.motion.toast(f.job,false,()=>dismissed++);f.motion.historyFilter(f.panel);
+ assert.equal(dismissed,1);assert.equal(f.timelines.length,0);
+ const changed=fixture();changed.motion.toast(changed.job,false,()=>dismissed++);
+ changed.media.matches=true;changed.listeners.media();assert.equal(dismissed,2);
+ changed.timelines.at(-1).vars.onComplete();assert.equal(dismissed,2);
+});
+test('rapid History filters settle their own styles and leave the Dynamic Island untouched',()=>{
+ const f=fixture();f.status('job','downloading');const islandContext=f.contexts.at(-1);
+ f.motion.historyFilter(f.panel);const first=f.timelines.at(-1);f.motion.historyFilter(f.panel);
+ assert.equal(first.animations[0].killed,true);assert.equal(islandContext.reverted,false);
+ assert.equal(f.flips.length,1);assert.equal(f.timelines.at(-1).animations[0].vars.duration,.16);
+});
+test('opening the palette cannot interrupt an unrelated Watch form closing callback',()=>{
+ const f=fixture();let watchClosed=0;
+ f.motion.dialogClose(f.panel,f.content,()=>watchClosed++);const watchExit=f.timelines.at(-1);
+ f.motion.dialogOpen(f.dialog,f.dialogPanel);
+ assert.equal(watchExit.animations.some(t=>t.killed),false);watchExit.vars.onComplete();assert.equal(watchClosed,1);
+ assert.equal(f.timelines.at(-1).animations.some(t=>t.killed),false);
 });

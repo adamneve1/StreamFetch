@@ -272,6 +272,12 @@ footer{padding:18px 2px 4px}
 @media(prefers-reduced-motion:reduce){.source-admission-snapshot{display:none}}
 /* Quiet login credit stays in document flow, including with a mobile keyboard. */
 .workspace-page .login-shell{grid-template-rows:minmax(min-content,1fr) auto;gap:24px}
+.workspace-page .login-shell{position:relative;isolation:isolate}
+.workspace-page .login-cursor-trail{position:fixed;inset:0;z-index:-1;overflow:clip;pointer-events:none;user-select:none}
+.workspace-page .login-cursor-trail[data-exiting=true]{z-index:99}
+.workspace-page .login-cursor-trail span{position:absolute;left:0;top:0;width:3px;height:3px;border-radius:999px;background:var(--green);opacity:0;pointer-events:none}
+.workspace-page .login-cursor-trail span:nth-child(2n){width:6px;height:2px;background:var(--muted)}
+@media(prefers-reduced-motion:reduce),(pointer:coarse),(hover:none),(max-width:680px){.workspace-page .login-cursor-trail{display:none}}
 .workspace-page .login-card{align-self:center}
 .workspace-page #login-error,.workspace-page #login-error:empty{display:block;min-height:1.5em;margin:12px 0 0}
 .workspace-page .login-credit{margin:0;font-size:11px;line-height:1.5;color:var(--muted);text-align:center}
@@ -369,3 +375,18 @@ footer{padding:18px 2px 4px}
  .workspace-page #status-monitor[data-phase=completed]{grid-template-columns:auto minmax(0,1fr);grid-template-areas:'state title';padding:12px;width:fit-content}
  .stream-dialog-card{padding:20px}.stream-dialog-actions button{min-height:44px}
 }
+
+/* Small shared feedback and navigation controls retain the existing surfaces. */
+.toast-region{position:fixed;z-index:1100;right:max(20px,env(safe-area-inset-right));bottom:max(20px,env(safe-area-inset-bottom));width:min(380px,calc(100vw - 32px));pointer-events:none}
+.toast-card{display:flex;align-items:flex-start;gap:12px;padding:14px 12px 14px 16px;border:1px solid var(--line);border-left:3px solid #629d45;border-radius:12px;background:#fff;color:var(--ink);box-shadow:0 6px 24px #18292718;pointer-events:auto;max-height:50dvh;overflow:auto}
+.toast-card[data-tone=info]{border-left-color:#72807b}.toast-card[data-tone=error]{border-left-color:#a54f40}
+.toast-card p{flex:1;min-width:0;margin:0;font-size:12px;line-height:1.6;overflow-wrap:anywhere}.toast-dismiss{flex:none;min-width:36px;min-height:36px;margin-top:-5px;padding:4px;font-size:20px;line-height:1}
+.command-open{font:11px ui-monospace,SFMono-Regular,monospace;white-space:nowrap;border:1px solid var(--line);min-height:36px}
+.command-palette{width:min(460px,calc(100vw - 32px))}.command-palette .stream-dialog-heading{justify-content:space-between}.command-palette #command-close{min-width:36px;min-height:36px;padding:4px;font-size:20px}
+.command-list{list-style:none;margin:12px 0;padding:0;display:grid;gap:3px}.command-option{padding:11px 12px;border-radius:8px;cursor:pointer;font-size:13px;line-height:1.5}.command-option[aria-selected=true],.command-option:hover{background:#edf3e7;color:var(--deep)}
+#command-hint{margin:12px 0 0;font-size:11px}#command-search{font-size:16px;min-height:44px}
+.settings-sections{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid var(--line)}.settings-sections button{font-size:12px;min-height:40px}.settings-sections button:hover{background:#eeeff0}
+.settings-admin-group{margin-top:22px}.settings-group-heading{margin:0 0 8px}.settings-admin-group>.admin-panel:first-of-type{margin-top:0}
+.workspace-page :is(#watches-panel,#settings-sources,#settings-storage,#settings-admin){scroll-margin-top:18px}
+.workspace-page .history-table td:nth-child(2)>small.capture-failure-message{display:block;white-space:normal;overflow:visible;text-overflow:clip;max-width:62ch;font-size:11px;line-height:1.5}
+@media(max-width:680px){.toast-region{right:max(12px,env(safe-area-inset-right));bottom:max(12px,env(safe-area-inset-bottom));width:calc(100vw - 24px)}.toast-dismiss,.command-palette #command-close{min-width:44px;min-height:44px}.settings-sections button{min-height:44px}.app-header .command-open{width:44px;min-height:44px;padding:4px}.command-option{min-height:44px}.workspace-page .filters input[type=search]{grid-column:1/-1}}
