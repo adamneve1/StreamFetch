@@ -69,6 +69,17 @@ function createReaderScroller(env){
       else if(env.document?.scrollingElement)env.document.scrollingElement.scrollTop=position;
     }
   };
+  function refresh(){
+    if(!smoother)return;
+    // Async Reader data starts hidden. Pinning before it has a layout would
+    // freeze zero-sized toolbar/spacer geometry and collapse both tool rows.
+    if(!toolsPin&&tools?.offsetHeight>0&&documentPanel?.offsetWidth>0&&env.ScrollTrigger.create){
+      toolsPin=env.ScrollTrigger.create({trigger:documentPanel,pin:tools,pinSpacing:false,start:'top top+=76',end:()=>`bottom top+=${76+(tools.offsetHeight||0)}`,invalidateOnRefresh:true});
+    }
+    // Refresh all triggers so the pin and the page smoother measure the same
+    // revealed/resized layout. smoother.refresh() only refreshes its own trigger.
+    env.ScrollTrigger.refresh?.();
+  }
   function sync(){
     stopInstance();
     if(reduced.matches||!desktop.matches||!env.gsap||!env.ScrollTrigger||!env.ScrollSmoother)return;
@@ -78,10 +89,10 @@ function createReaderScroller(env){
     setSmoothingMode(true);
     try{
       smoother=env.ScrollSmoother.create({wrapper,content,smooth:1,smoothTouch:0,effects:false,normalizeScroll:false,ignoreMobileResize:true});
-      if(tools&&documentPanel&&env.ScrollTrigger.create)toolsPin=env.ScrollTrigger.create({trigger:documentPanel,pin:tools,pinSpacing:false,start:'top top+=76',end:()=>`bottom top+=${76+(tools.offsetHeight||0)}`,invalidateOnRefresh:true});
+      refresh();
     }catch{toolsPin?.kill?.();toolsPin=null;smoother?.kill?.();setSmoothingMode(false);smoother=null;}
   }
-  const resize=()=>smoother?.refresh?.();
+  const resize=()=>refresh();
   function stop(){
     if(!started)return;
     started=false;mediaListen(reduced,'removeEventListener');mediaListen(desktop,'removeEventListener');env.removeEventListener?.('resize',resize);stopInstance();
@@ -102,7 +113,7 @@ function createReaderScroller(env){
     target.scrollIntoView?.({behavior:reduced.matches?'auto':smooth?'smooth':'auto',block:position.startsWith('center')?'center':'start'});
     return true;
   }
-  return {start,destroy,jumpTo,refresh:()=>smoother?.refresh?.(),isActive:()=>!!smoother};
+  return {start,destroy,jumpTo,refresh,isActive:()=>!!smoother};
 }
 
 if(typeof module!=='undefined')module.exports={readerTimestamp,readerDisplayTimestamp,timestampLabel,formatInfo,formatTranscript,findMatches,nextMatchIndex,seekTranscript,youtubePlayerAdapter,localPlayerAdapter,createReaderScroller};
@@ -194,6 +205,7 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
     }
     if(!data.segments.length&&!$('raw-view').checked){article.textContent='Transkrip kosong.';}
     current=matchNodes.length?(reset?0:Math.max(0,Math.min(current,matchNodes.length-1))):-1;updateMatch();
+    if(!content.hidden)readerScroll.refresh();
   }
   function showInfo(info){
     const dl=$('program-info');
@@ -239,6 +251,8 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
       readerScroll.jumpTo($(id),smooth,'top top+=24');
     };
     jumpToHash();window.addEventListener?.('hashchange',()=>jumpToHash(true));
-    window.StreamFetchMotion?.pageReveal?.(document.querySelector('.reader-shell'),$('reader-title'),[document.querySelector('.reader-tools'),$('transcript-text')]);
+    // Animate the tool rows, not the toolbar container whose transform is owned
+    // by ScrollTrigger while pinned inside the page-level smooth content.
+    window.StreamFetchMotion?.pageReveal?.(document.querySelector('.reader-shell'),$('reader-title'),[document.querySelector('.reader-toolbar'),document.querySelector('.reader-actions'),$('transcript-text')]);
   }catch(error){notify(error.message);}
 });

@@ -66,7 +66,9 @@ test('desktop Reader creates one subtle smoother and routes jumps without native
   let current=null;
   const ScrollSmoother={get:()=>current,create:options=>{const instance={options,killed:false,kill(){this.killed=true;if(current===this)current=null;},scrollTo(...args){scrolls.push(args);},scrollTop(){return 42;},refresh(){this.refreshed=true;}};creates.push(instance);return current=instance;}};
   const events={};
-  const ScrollTrigger={create:options=>{const pin={options,killed:false,kill(){this.killed=true;}};pins.push(pin);return pin;}};
+  documentPanel.offsetWidth=700;
+  let refreshes=0;
+  const ScrollTrigger={create:options=>{const pin={options,killed:false,kill(){this.killed=true;}};pins.push(pin);return pin;},refresh:()=>refreshes++};
   const env={document:{documentElement:root,body,scrollingElement,getElementById:id=>id==='reader-smooth-wrapper'?wrapper:id==='reader-smooth-content'?content:null,querySelector:selector=>selector==='.reader-tools'?tools:selector==='.reader-document'?documentPanel:null},gsap:{registerPlugin:(...plugins)=>registrations.push(plugins)},ScrollTrigger,ScrollSmoother,
     matchMedia:query=>query.includes('reduced')?reduced:desktop,scrollTo:options=>restores.push(options),addEventListener:(type,listener)=>events[type]=listener,removeEventListener:type=>delete events[type]};
   const scroller=reader.createReaderScroller(env);scroller.start();scroller.start();
@@ -79,13 +81,32 @@ test('desktop Reader creates one subtle smoother and routes jumps without native
   assert.deepEqual(scrolls,[[target,true,'center center']]);assert.equal(target.scrolled,false);
   const stationaryTarget=new Node();scroller.jumpTo(stationaryTarget,true,'top top+=24');
   assert.equal(stationaryTarget.scrolled,false);assert.equal(scrolls.length,1);
-  scroller.refresh();assert.equal(creates[0].refreshed,true);
+  scroller.refresh();assert.equal(refreshes,2);assert.equal(pins.length,1);
+  tools.offsetHeight=160;events.resize();assert.equal(refreshes,3);assert.equal(pins[0].options.end(),'bottom top+=236');
   reduced.change(true);assert.equal(creates[0].killed,true);assert.equal(pins[0].killed,true);assert.equal(scroller.isActive(),false);
   assert.doesNotMatch(root.className,/reader-smoothing/);assert.deepEqual(restores,[{top:42,behavior:'auto'}]);
   scroller.jumpTo(target,true,'center center');assert.deepEqual(target.scrolled,{behavior:'auto',block:'center'});
   assert.equal(reduced.listenerCount,1);events.pagehide();assert.equal(reduced.listenerCount,0);
   reduced.matches=false;events.pageshow({persisted:true});assert.equal(creates.length,2);
   scroller.destroy();assert.equal(creates[1].killed,true);assert.equal(events.pagehide,undefined);
+});
+test('Reader pins only after async content has measurable geometry and refreshes the pin with the smoother',()=>{
+  const tools=new Node(),panel=new Node(),pins=[],refreshes=[];
+  tools.offsetHeight=0;panel.offsetWidth=0;
+  const env={document:{getElementById:()=>new Node(),querySelector:selector=>selector==='.reader-tools'?tools:panel},
+    matchMedia:query=>mediaQuery(!query.includes('reduced')),gsap:{registerPlugin(){}},
+    ScrollSmoother:{create:()=>({kill(){},refresh(){assert.fail('A smoother-only refresh leaves toolbar pin geometry stale');}})},
+    ScrollTrigger:{create:options=>{assert.ok(options.pin.offsetHeight>0);assert.ok(options.trigger.offsetWidth>0);const pin={options,kill(){}};pins.push(pin);return pin;},refresh(){refreshes.push({width:panel.offsetWidth,height:tools.offsetHeight});}}};
+  const scroller=reader.createReaderScroller(env);scroller.start();scroller.refresh();
+  assert.equal(pins.length,0);
+  // The data fetch reveals the complete card before this refresh.
+  tools.offsetHeight=146;panel.offsetWidth=719;scroller.refresh();
+  assert.equal(pins.length,1);assert.equal(pins[0].options.end(),'bottom top+=222');
+  assert.deepEqual(refreshes.at(-1),{width:719,height:146});
+  // Later width/height changes must refresh the existing pin, never nest spacers.
+  tools.offsetHeight=170;panel.offsetWidth=580;scroller.refresh();
+  assert.equal(pins.length,1);assert.equal(pins[0].options.end(),'bottom top+=246');
+  assert.deepEqual(refreshes.at(-1),{width:580,height:170});scroller.destroy();
 });
 test('touch/mobile Reader stays native and keeps quick centered jumps',()=>{
   const reduced=mediaQuery(false),mobile=mediaQuery(false),creates=[];
@@ -97,20 +118,54 @@ async function fixture(data,window={},video={},hash=''){
   const html=fs.readFileSync(require.resolve('../app/static/transcript.html'),'utf8');
   const nodes=new Map([...html.matchAll(/id="([^"]+)"/g)].map(match=>[match[1],new Node()]));
   nodes.get('timestamp-mode').value='segment';
+  nodes.get('reader-smooth-wrapper').append(nodes.get('reader-smooth-content'));
+  nodes.get('reader-smooth-content').append(nodes.get('reader-content'));
+  nodes.get('reader-content').append(nodes.get('transcript-text'),nodes.get('reader-title'));
   nodes.get('reader-player').hidden=true;nodes.get('local-player').hidden=true;
   Object.assign(nodes.get('local-player'),video);
   let init;const copies=[],requests=[];
-  const head=new Node(),back=new Node(),shell=new Node(),tools=new Node();
-  const context=vm.createContext({window,document:{head,querySelectorAll:()=>[back],querySelector:selector=>selector==='.reader-shell'?shell:tools,getElementById:id=>nodes.get(id),createElement:()=>new Node(),createTextNode:text=>{const node=new Node();node.textContent=text;return node;},addEventListener:(_,callback)=>init=callback},location:{origin:'https://streamfetch.example',pathname:'/api/recordings/old/transcript/view',hash},navigator:{clipboard:{writeText:async text=>copies.push(text)}},fetch:async url=>{requests.push(url);return {ok:true,json:async()=>data};}});
+  const head=new Node(),back=new Node(),shell=new Node(),tools=new Node(),toolbar=new Node(),actions=new Node(),panel=new Node();
+  panel.offsetWidth=700;
+  const elements={'.reader-shell':shell,'.reader-tools':tools,'.reader-toolbar':toolbar,'.reader-actions':actions,'.reader-document':panel};
+  const document={head,querySelectorAll:()=>[back],querySelector:selector=>elements[selector],getElementById:id=>nodes.get(id),createElement:()=>new Node(),createTextNode:text=>{const node=new Node();node.textContent=text;return node;},addEventListener:(_,callback)=>init=callback};
+  // Match browser layout: hidden ancestors have zero width/height at startup.
+  nodes.get('reader-content').hidden=true;
+  Object.defineProperty(tools,'offsetHeight',{get:()=>nodes.get('reader-content').hidden?0:146});
+  Object.defineProperty(panel,'offsetWidth',{get:()=>nodes.get('reader-content').hidden?0:700});
+  window.document=document;
+  const context=vm.createContext({window,document,location:{origin:'https://streamfetch.example',pathname:'/api/recordings/old/transcript/view',hash},navigator:{clipboard:{writeText:async text=>copies.push(text)}},fetch:async url=>{requests.push(url);return {ok:true,json:async()=>data};}});
   vm.runInContext(fs.readFileSync(require.resolve('../app/static/transcript.js'),'utf8'),context);
   await init();
-  return {get:id=>nodes.get(id),copies,requests,head,back,shell,tools};
+  return {get:id=>nodes.get(id),copies,requests,head,back,shell,tools,toolbar,actions};
 }
 test('reader enters after data renders and Back uses shared motion without changing player or transcript requests',async()=>{
  const calls=[];
  const f=await fixture({info:{program:'Dialog'},segments,raw:'TXT',exports:[]},{StreamFetchMotion:{pageReveal(...args){calls.push(['enter',...args]);},followLink(...args){calls.push(['back',...args]);}}});
  assert.equal(calls[0][1],f.shell);assert.equal(calls[0][2],f.get('reader-title'));assert.equal(f.get('reader-content').hidden,false);
+ assert.deepEqual(Array.from(calls[0][3]),[f.toolbar,f.actions,f.get('transcript-text')]);
+ assert.ok(!calls[0][3].includes(f.tools),'Reader entry motion must not overwrite the pinned toolbar transform');
  f.back.listeners.click({});assert.equal(calls[1][1],f.back);assert.equal(calls[1][3].direction,'workspace');assert.equal(f.requests.length,1);
+});
+test('async Reader reveal, search and timestamp changes refresh shared scroll geometry while jumps and seeking remain immediate',async()=>{
+ const pins=[],scrolls=[],seeks=[];let refreshes=0,playerOptions;
+ const f=await fixture({youtube_id:'abcdefghijk',info:{program:'Long transcript'},segments:Array.from({length:1000},(_,i)=>({start:i*3,end:i*3+2,text:'Halo '+i})),raw:'Halo raw',exports:['txt','srt']},{
+  matchMedia:query=>mediaQuery(!query.includes('reduced')),gsap:{registerPlugin(){}},
+  ScrollTrigger:{create:options=>{assert.equal(options.pin.offsetHeight,146);pins.push(options);return {kill(){}};},refresh(){refreshes++;}},
+  ScrollSmoother:{create:()=>({kill(){},scrollTo(...args){scrolls.push(args);}})},
+  YT:{Player:function(id,options){this.seekTo=(...args)=>seeks.push(args);playerOptions=options;}}
+ });
+ assert.equal(pins.length,1);assert.equal(f.get('transcript-text').children.length,1000);
+ const afterReveal=refreshes;
+ f.get('transcript-search').value='Halo';f.get('transcript-search').listeners.input();assert.equal(refreshes,afterReveal+1);
+ f.get('search-next').listeners.click();assert.equal(f.get('search-count').textContent,'2 / 1000 matches');
+ f.get('search-previous').listeners.click();assert.equal(f.get('search-count').textContent,'1 / 1000 matches');
+ assert.equal(scrolls.at(-1)[2],'center center');
+ playerOptions.events.onReady();
+ f.get('transcript-text').children[2].children[0].listeners.click();
+ assert.deepEqual(seeks.at(-1),[6,true]);assert.equal(scrolls.at(-1)[0],f.get('transcript-text').children[2]);
+ f.get('timestamp-mode').value='subtitle';f.get('timestamp-mode').listeners.change();assert.equal(refreshes,afterReveal+2);
+ f.get('raw-view').checked=true;f.get('raw-view').listeners.change();assert.equal(refreshes,afterReveal+3);
+ assert.equal(pins.length,1);assert.equal(f.requests.length,1);
 });
 test('Reader restores deep links after async transcript content is revealed',async()=>{
  const f=await fixture({info:{program:'Dialog'},segments,raw:'TXT',exports:[]},{},{},'#reader-title');
