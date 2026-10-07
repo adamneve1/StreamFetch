@@ -398,4 +398,16 @@ footer{padding:18px 2px 4px}
 .settings-admin-group{margin-top:22px}.settings-group-heading{margin:0 0 8px}.settings-admin-group>.admin-panel:first-of-type{margin-top:0}
 .workspace-page :is(#watches-panel,#settings-sources,#settings-storage,#settings-admin){scroll-margin-top:18px}
 .workspace-page .history-table td:nth-child(2)>small.capture-failure-message{display:block;white-space:normal;overflow:visible;text-overflow:clip;max-width:62ch;font-size:11px;line-height:1.5}
+/* History filters fill the available width without reserving hidden action slots. */
+.workspace-page #history-panel .filters{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.workspace-page #history-panel #filter-q{flex:2 1 220px;width:auto}
+.workspace-page #history-panel .filters select{flex:1 1 120px;width:auto}
+.workspace-page #history-panel #filter-date{flex:0 0 132px;width:132px;padding-inline:8px}
+.workspace-page #history-panel #filter-reset{flex:none;width:auto;white-space:nowrap}
+.workspace-page #history-panel #download-selected{width:34px;height:34px;min-width:34px;min-height:34px;padding:0}
+.workspace-page #history-panel #download-selected:hover:not(:disabled){filter:none}
+.workspace-page #history-panel #download-selected:disabled{background:#f5faef;border-color:#cbd9c5}
+@media(max-width:900px){.workspace-page #history-panel #filter-q{flex-basis:100%}}
+@media(max-width:680px){.workspace-page #history-panel #download-selected{width:44px;height:44px;min-width:44px;min-height:44px}}
+@media(max-width:600px){.workspace-page #history-panel .filters select{flex-basis:calc((100% - 8px)/2)}}
 @media(max-width:680px){.toast-region{right:max(12px,env(safe-area-inset-right));bottom:max(12px,env(safe-area-inset-bottom));width:calc(100vw - 24px)}.toast-dismiss,.command-palette #command-close{min-width:44px;min-height:44px}.settings-sections button{min-height:44px}.app-header .command-open{width:44px;min-height:44px;padding:4px}.command-option{min-height:44px}.workspace-page .filters input[type=search]{grid-column:1/-1}}

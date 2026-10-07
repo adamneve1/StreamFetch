@@ -368,6 +368,7 @@ function renderHistory(rows){
  $('empty').hidden=!!visible.length;
  $('empty').querySelector('strong').textContent=filtered?'Tidak ada rekaman yang cocok.':'Belum ada rekaman.';
  $('empty').querySelector('p').textContent=filtered?'Ubah pencarian atau bersihkan filter untuk melihat rekaman lainnya.':'Mulai capture dari Source. Rekaman dan download akan muncul di sini.';
+ $('filter-reset').hidden=!filtered;
  $('filter-reset').disabled=!filtered;
  const selection=new Set(selectedJobs());
  for(const details of $('results').querySelectorAll('.recording-details')){
@@ -579,6 +580,7 @@ document.addEventListener('pointerdown',event=>{if(openActionMenu&&!openActionMe
 document.addEventListener('keydown',event=>{if(event.key==='Escape')closeActionMenu(true);});
 window.addEventListener('resize',()=>{closeActionMenu();positionSourceTab();});window.addEventListener('scroll',()=>closeActionMenu(),true);
 $('select-all').onchange=()=>{for(const box of $('results').querySelectorAll('.history-select'))box.checked=$('select-all').checked;updateDeleteControls();};
+$('download-selected').append(downloadIcon());
 $('download-selected').onclick=downloadSelected;
 $('delete-selected').onclick=()=>deleteJobs(selectedJobs(),$('delete-selected'));
 $('password-form').onsubmit=async event=>{event.preventDefault();const feedback=$('password-feedback');const next=$('new-password').value;const confirmation=$('confirm-password').value;if(next!==confirmation){feedback.textContent='Password yang kamu ulangi belum sama.';return;}try{await api('admin/password',{target:$('password-target').value,current_password:$('current-admin-password').value,new_password:next});event.target.reset();feedback.textContent='Sip, password-nya sudah diganti.';}catch(error){feedback.textContent=error.message;}};

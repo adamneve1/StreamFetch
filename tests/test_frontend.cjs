@@ -600,7 +600,7 @@ test('desktop Source and History share container, control geometry and spacing w
  assert.match(wide,/\.filters\{gap:14px var\(--workspace-gap\)\}/);
  assert.match(wide,/\.capture-options\{[^}]*gap:14px var\(--workspace-gap\)/);
  assert.match(css,/#status-monitor\[data-phase=transcribing\]\{width:100%;min-width:0;max-width:100%\}/);
- const phone=css.slice(css.lastIndexOf('@media(max-width:600px)'));
+ const phone=css.slice(css.indexOf('/* Phones use a composition')).split('/* Small shared feedback')[0];
  assert.match(phone,/#capture-panel \.capture-options\{grid-template-columns:minmax\(0,1fr\)/);
  assert.match(phone,/#history-panel\{padding:0;border:0;background:transparent/);
 });
@@ -1034,6 +1034,56 @@ const polishRows=[
  {job_id:'four',filename:'Queued.mp4',source:'youtube',state:'ready',transcript:{status:'queued'}},
  {job_id:'five',title:'Live now',source:'oryx',state:'recording'}
 ];
+test('History bulk download reuses the accessible row icon without initial admin placeholders',()=>{
+ const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
+ const button=html.match(/<button id="download-selected"[^>]*>/)[0];
+ assert.match(button,/class="download-direct"/);assert.match(button,/type="button"/);
+ assert.match(button,/aria-label="Unduh pilihan"/);assert.match(button,/title="Unduh pilihan"/);assert.match(button,/ disabled/);
+ assert.match(html,/<button id="download-selected"[^>]*><\/button>/);
+ assert.match(html,/<button id="delete-selected"[^>]* hidden disabled>/);
+ assert.match(html,/<button id="filter-reset"[^>]* hidden disabled>/);
+ const f=fixture();f.context.rows=polishRows;f.run('renderHistory(rows)');
+ const bulk=f.get('download-selected'),row=f.get('results').querySelector('.download-direct');
+ assert.equal(bulk.querySelectorAll('svg').length,1);assert.equal(bulk.querySelector('svg').attributes['aria-hidden'],'true');
+ assert.deepEqual(bulk.querySelectorAll('path').map(path=>path.attributes.d),row.querySelectorAll('path').map(path=>path.attributes.d));
+ assert.equal(bulk.textContent,'');assert.equal(bulk.disabled,true);assert.equal(f.get('delete-selected').hidden,true);
+ assert.ok(f.get('results').querySelector('.action-trigger'),'Row overflow actions stay available');
+});
+test('History selection enables bulk download only for ready files and preserves select-all and download behavior',()=>{
+ const f=fixture();f.context.rows=[{job_id:'ready',state:'ready',filename:'A B.mp4'},{job_id:'failed',state:'failed',filename:'partial.mp4'},{job_id:'recording',state:'recording'},{job_id:'no-file',state:'ready'}];f.run('renderHistory(rows)');
+ const boxes=f.get('results').querySelectorAll('.history-select');
+ for(const box of boxes.slice(1)){box.checked=true;box.onchange();assert.equal(f.get('download-selected').disabled,true);}
+ assert.equal(f.get('select-all').indeterminate,true);
+ boxes[0].checked=true;boxes[0].onchange();assert.equal(f.get('download-selected').disabled,false);assert.equal(f.get('select-all').checked,true);
+ const downloads=[],create=f.document.createElement;
+ f.document.createElement=tag=>{const element=create(tag);if(tag==='a')element.click=()=>downloads.push({href:element.href,filename:element.download});return element;};
+ f.get('download-selected').onclick();assert.deepEqual(downloads,[{href:'/api/files/A%20B.mp4',filename:'A B.mp4'}]);
+ f.get('select-all').checked=false;f.get('select-all').onchange();
+ assert.ok(boxes.every(box=>!box.checked));assert.equal(f.get('download-selected').disabled,true);assert.equal(f.get('select-all').indeterminate,false);
+ f.get('select-all').checked=true;f.get('select-all').onchange();
+ assert.ok(boxes.every(box=>box.checked));assert.equal(f.get('download-selected').disabled,false);
+ f.get('filter-state').value='failed';f.get('filter-state').onchange();
+ assert.equal(f.get('download-selected').disabled,true,'Filtered-out ready files must not remain downloadable selections');
+});
+test('History admin bulk deletion remains visible and follows selection while normal users never see it',()=>{
+ const f=fixture();f.context.rows=polishRows;f.run('isAdmin=true;renderHistory(rows)');
+ assert.equal(f.get('delete-selected').hidden,false);assert.equal(f.get('delete-selected').disabled,true);
+ const checkbox=f.get('results').querySelectorAll('.history-select')[1];checkbox.checked=true;checkbox.onchange();
+ assert.equal(f.get('delete-selected').disabled,false);assert.equal(f.get('download-selected').disabled,true);
+ f.run('isAdmin=false;updateDeleteControls()');assert.equal(f.get('delete-selected').hidden,true);assert.equal(f.get('delete-selected').disabled,true);
+});
+test('History clear action appears only for active search, source, status or date filters',()=>{
+ const f=fixture();f.context.rows=polishRows;f.run('renderHistory(rows)');
+ assert.equal(f.get('filter-reset').hidden,true);
+ for(const [id,value] of [['filter-q','missing'],['filter-source','youtube'],['filter-state','ready'],['filter-date','2026-10-07']]){
+  f.get(id).value=value;(id==='filter-q'?f.get(id).oninput:f.get(id).onchange)();
+  assert.equal(f.get('filter-reset').hidden,false);assert.equal(f.get('filter-reset').disabled,false);
+  f.get('filter-reset').onclick();assert.equal(f.get('filter-reset').hidden,true);assert.equal(f.get('filter-reset').disabled,true);
+ }
+ f.get('filter-q').value='  ';f.get('filter-q').oninput();assert.equal(f.get('filter-reset').hidden,true);
+ f.get('filter-source').value='youtube';f.get('filter-state').value='ready';f.get('filter-source').onchange();
+ f.get('filter-source').value='';f.get('filter-source').onchange();assert.equal(f.get('filter-reset').hidden,false,'Remaining active filters keep the clear action visible');
+});
 test('History searches filename, title, metadata and source immediately without a request',()=>{
  const f=fixture();f.context.rows=polishRows;f.run('renderHistory(rows)');
  f.context.fetch=()=>assert.fail('Client-side filters must not request the backend');
