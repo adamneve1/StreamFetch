@@ -558,6 +558,11 @@ test('external and protocol-relative login return URLs are rejected',async()=>{
   }
 });
 
+test('authentication tokens are kept out of browser storage',()=>{
+  const source=fs.readFileSync(path.resolve(__dirname,'../app/static/app.js'),'utf8');
+  assert.doesNotMatch(source,/\b(?:localStorage|sessionStorage)\b/);
+});
+
 test('login errors remain visible, retain input, support correction, and returning to login focuses password',async()=>{
   const f=fixture();f.get('password').value='wrong';
   f.context.fetch=async()=>({status:401,ok:false,headers:{get:()=> 'application/json'},json:async()=>({error:'Password salah.'})});

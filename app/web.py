@@ -11,6 +11,7 @@ from pathlib import Path
 
 import redis
 from flask import Flask, jsonify, redirect, request, session, send_from_directory, url_for
+from flask.sessions import SecureCookieSessionInterface
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 try:
@@ -52,6 +53,47 @@ return 1
 """
 
 
+class HTTPSCookieSessionInterface(SecureCookieSessionInterface):
+    """Mark cookies Secure for direct HTTPS and for explicitly configured proxies."""
+
+    def get_cookie_secure(self, app):
+        return super().get_cookie_secure(app) or request.is_secure
+
+
+def session_secret():
+    """Return a configured secret, or persist one in the mounted application data."""
+    configured = os.getenv('WEB_SECRET_KEY', '').strip()
+    if configured:
+        return configured
+    root = Path(os.getenv('DATA_DIR', '/data'))
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / '.web-secret-key'
+    try:
+        value = path.read_text(encoding='ascii').strip()
+    except FileNotFoundError:
+        value = secrets.token_hex(32)
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            value = path.read_text(encoding='ascii').strip()
+        else:
+            with os.fdopen(descriptor, 'w', encoding='ascii') as secret_file:
+                secret_file.write(value)
+    if not value:
+        raise RuntimeError(f'Session secret file is empty: {path}')
+    return value
+
+
+def positive_float_env(name, default):
+    try:
+        value = float(os.getenv(name, default))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f'{name} must be a positive number') from exc
+    if value <= 0:
+        raise RuntimeError(f'{name} must be a positive number')
+    return value
+
+
 def positive_int(value):
     try:
         return max(0, int(value or 0))
@@ -61,10 +103,16 @@ def positive_int(value):
 
 def create_app(client=None):
     app = Flask(__name__, static_folder='static')
-    app.secret_key = os.getenv('WEB_SECRET_KEY') or secrets.token_hex(32)
+    idle_lifetime = timedelta(hours=positive_float_env('SESSION_IDLE_HOURS', 24))
+    absolute_lifetime = timedelta(days=positive_float_env('SESSION_ABSOLUTE_DAYS', 30))
+    app.secret_key = session_secret()
+    app.session_interface = HTTPSCookieSessionInterface()
     app.config.update(MAX_CONTENT_LENGTH=16384, SESSION_COOKIE_HTTPONLY=True,
-                      SESSION_COOKIE_SAMESITE='Strict', SESSION_COOKIE_SECURE=os.getenv('WEB_COOKIE_SECURE') == '1',
-                      PERMANENT_SESSION_LIFETIME=timedelta(hours=8))
+                      SESSION_COOKIE_SAMESITE='Lax', SESSION_COOKIE_PATH='/',
+                      SESSION_COOKIE_SECURE=os.getenv('WEB_COOKIE_SECURE') == '1',
+                      SESSION_REFRESH_EACH_REQUEST=True,
+                      PERMANENT_SESSION_LIFETIME=idle_lifetime,
+                      SESSION_ABSOLUTE_LIFETIME=absolute_lifetime)
     r = client or redis.Redis(host=os.getenv('REDIS_HOST', 'redis'), decode_responses=True,
                              socket_connect_timeout=3, socket_timeout=3)
 
@@ -104,19 +152,43 @@ def create_app(client=None):
         if session.get('role') != 'admin':
             return jsonify(error='Fitur ini khusus admin, ya.'), 403
 
+    def html_login_redirect():
+        """Only full-page Reader navigation may receive the login HTML flow."""
+        return (request.endpoint == 'view_transcript' and request.method == 'GET'
+                and request.headers.get('Sec-Fetch-Mode') != 'cors'
+                and 'text/html' in request.headers.get('Accept', ''))
+
+    def unauthorized(message):
+        session.clear()
+        if html_login_redirect():
+            return redirect(url_for('index', next=request.full_path.rstrip('?')))
+        return jsonify(error=message), 401
+
     @app.before_request
     def authorize():
         if not request.path.startswith('/api/'):
             return
         if request.path != '/api/login' and not session.get('operator'):
-            if request.endpoint == 'view_transcript' and request.method == 'GET':
-                return redirect(url_for('index', next=request.full_path.rstrip('?')))
-            return jsonify(error='Masuk dulu untuk lanjut, ya.'), 401
+            return unauthorized('Masuk dulu untuk lanjut, ya.')
+        if request.path != '/api/login':
+            now = time.time()
+            created = session.get('session_created_at')
+            last_seen = session.get('session_last_seen_at')
+            if created is None and last_seen is None:
+                # Preserve valid cookies issued before lifetime timestamps existed.
+                created = last_seen = now
+                session['session_created_at'] = created
+                session['session_last_seen_at'] = last_seen
+            valid_timestamps = (isinstance(created, (int, float))
+                                and isinstance(last_seen, (int, float)))
+            if (not valid_timestamps
+                    or now - last_seen >= idle_lifetime.total_seconds()
+                    or now - created >= absolute_lifetime.total_seconds()):
+                return unauthorized('Sesi kamu sudah habis. Masuk lagi, ya.')
         if request.path != '/api/login' and session.get('auth_version') != auth_version(session.get('role', 'user')):
-            session.clear()
-            if request.endpoint == 'view_transcript' and request.method == 'GET':
-                return redirect(url_for('index', next=request.full_path.rstrip('?')))
-            return jsonify(error='Password akun ini sudah diganti. Yuk, masuk lagi.'), 401
+            return unauthorized('Password akun ini sudah diganti. Yuk, masuk lagi.')
+        if request.path != '/api/login':
+            session['session_last_seen_at'] = time.time()
         if request.method != 'GET' and request.path != '/api/login':
             if not hmac.compare_digest(request.headers.get('X-CSRF-Token', ''), session.get('csrf', 'missing')):
                 return jsonify(error='Sesi kamu sudah habis. Masuk lagi, ya.'), 403
@@ -175,8 +247,11 @@ def create_app(client=None):
         if not role:
             return jsonify(error='Password-nya belum cocok. Coba lagi, ya.'), 401
         r.delete(key)
+        now = time.time()
         session.clear()
-        session.update(operator=True, role=role, auth_version=auth_version(role), csrf=secrets.token_hex(32))
+        session.update(operator=True, role=role, auth_version=auth_version(role),
+                       csrf=secrets.token_hex(32), session_created_at=now,
+                       session_last_seen_at=now)
         session.permanent = True
         return jsonify(csrf=session['csrf'], role=role, is_admin=role == 'admin')
 

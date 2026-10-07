@@ -269,6 +269,8 @@ ORYX_STREAM_URL=http://oryx/live/livestream.flv
 WEB_PASSWORD=isi-password-operator
 WEB_ADMIN_PASSWORD=isi-password-admin-yang-berbeda
 WEB_SECRET_KEY=isi-string-acak-panjang
+SESSION_IDLE_HOURS=24
+SESSION_ABSOLUTE_DAYS=30
 WEB_PORT=8080
 WEB_BIND=127.0.0.1
 
@@ -429,7 +431,14 @@ Untuk deployment melalui reverse proxy HTTPS:
 WEB_COOKIE_SECURE=1
 ```
 
-Jangan aktifkan secure cookie jika panel masih menggunakan HTTP biasa.
+Sesi berakhir setelah 24 jam tanpa aktivitas dan selalu berakhir setelah 30 hari;
+ubah dengan `SESSION_IDLE_HOURS` dan `SESSION_ABSOLUTE_DAYS`. `WEB_SECRET_KEY`
+harus tetap sama antar-deploy. Jika variabel itu kosong, web membuat
+`/data/.web-secret-key` sekali dan memakainya kembali dari volume `./data`.
+
+Cookie otomatis memakai `Secure` saat aplikasi menerima HTTPS langsung. Tetap
+atur `WEB_COOKIE_SECURE=1` bila TLS dihentikan oleh reverse proxy; jangan aktifkan
+opsi itu jika panel masih menggunakan HTTP biasa.
 
 ## Workflow Recording
 

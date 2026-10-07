@@ -370,6 +370,91 @@ class WebTests(unittest.TestCase):
         self.assertEqual(missing.status_code, 404)
         self.assertTrue(missing.is_json)
 
+    def test_session_idle_timeout_slides_until_absolute_limit(self):
+        now = web.time.time()
+        idle_seconds = self.app.config['PERMANENT_SESSION_LIFETIME'].total_seconds()
+        with self.client.session_transaction() as state:
+            state['session_created_at'] = now - 60
+            state['session_last_seen_at'] = now - idle_seconds + 60
+            previous_activity = state['session_last_seen_at']
+        self.assertEqual(self.client.get('/api/session').status_code, 200)
+        with self.client.session_transaction() as state:
+            self.assertGreater(state['session_last_seen_at'], previous_activity)
+            state['session_last_seen_at'] = web.time.time() - idle_seconds - 1
+        expired = self.client.get('/api/session')
+        self.assertEqual(expired.status_code, 401)
+        self.assertEqual(expired.json, {'error': 'Sesi kamu sudah habis. Masuk lagi, ya.'})
+
+    def test_existing_signed_session_is_upgraded_with_lifetime_timestamps(self):
+        with self.client.session_transaction() as state:
+            state.pop('session_created_at')
+            state.pop('session_last_seen_at')
+        self.assertEqual(self.client.get('/api/session').status_code, 200)
+        with self.client.session_transaction() as state:
+            self.assertIsInstance(state['session_created_at'], float)
+            self.assertIsInstance(state['session_last_seen_at'], float)
+
+    def test_session_absolute_lifetime_does_not_slide(self):
+        absolute_seconds = self.app.config['SESSION_ABSOLUTE_LIFETIME'].total_seconds()
+        with self.client.session_transaction() as state:
+            state['session_created_at'] = web.time.time() - absolute_seconds - 1
+            state['session_last_seen_at'] = web.time.time()
+        self.assertEqual(self.client.get('/api/session').status_code, 401)
+
+    def test_logout_clears_session_and_requires_login_again(self):
+        response = self.post('logout', {})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('Max-Age=0', response.headers['Set-Cookie'])
+        self.assertEqual(self.client.get('/api/session').status_code, 401)
+
+    def test_session_cookie_flags_cover_https_and_local_http(self):
+        secure_client = self.app.test_client()
+        secure = secure_client.post('/api/login', json={'password': 'test-password'},
+                                    base_url='https://localhost').headers['Set-Cookie']
+        self.assertIn('HttpOnly', secure)
+        self.assertIn('SameSite=Lax', secure)
+        self.assertIn('Path=/', secure)
+        self.assertIn('Secure', secure)
+        local_client = self.app.test_client()
+        local = local_client.post('/api/login', json={'password': 'test-password'}).headers['Set-Cookie']
+        self.assertNotIn('Secure', [part.strip() for part in local.split(';')])
+
+    def test_reader_navigation_redirects_but_fetch_gets_json_401(self):
+        reader = '/api/recordings/job/transcript/view?layout=compact'
+        anonymous = self.app.test_client()
+        navigation = anonymous.get(reader, headers={'Accept': 'text/html'})
+        self.assertEqual(navigation.status_code, 302)
+        self.assertEqual(navigation.location, '/?next=/api/recordings/job/transcript/view?layout%3Dcompact')
+        fetched = anonymous.get(reader, headers={'Accept': 'application/json',
+                                                 'Sec-Fetch-Mode': 'cors'})
+        self.assertEqual(fetched.status_code, 401)
+        self.assertTrue(fetched.is_json)
+        self.assertEqual(anonymous.get(reader).status_code, 401)
+
+    def test_generated_session_secret_persists_across_app_restart(self):
+        with tempfile.TemporaryDirectory() as data_root, patch.dict(os.environ, {
+                'DATA_DIR': data_root, 'DOWNLOAD_DIR': data_root,
+                'WEB_PASSWORD': 'restart-password',
+                'WEB_ADMIN_PASSWORD': 'restart-admin-password',
+                'SESSION_IDLE_HOURS': '12', 'SESSION_ABSOLUTE_DAYS': '7'}, clear=True):
+            first = web.create_app(fakeredis.FakeRedis(decode_responses=True))
+            first.testing = True
+            self.assertEqual(first.config['PERMANENT_SESSION_LIFETIME'], timedelta(hours=12))
+            self.assertEqual(first.config['SESSION_ABSOLUTE_LIFETIME'], timedelta(days=7))
+            first_client = first.test_client()
+            self.assertEqual(first_client.post('/api/login',
+                             json={'password': 'restart-password'}).status_code, 200)
+            cookie = first_client.get_cookie(first.config['SESSION_COOKIE_NAME'])
+            secret_path = Path(data_root) / '.web-secret-key'
+            self.assertTrue(secret_path.is_file())
+
+            restarted = web.create_app(fakeredis.FakeRedis(decode_responses=True))
+            restarted.testing = True
+            restarted_client = restarted.test_client()
+            restarted_client.set_cookie(restarted.config['SESSION_COOKIE_NAME'], cookie.value)
+            self.assertEqual(restarted_client.get('/api/session').status_code, 200)
+            self.assertEqual(first.secret_key, restarted.secret_key)
+
     def test_social_url_detection_validation_and_job_options(self):
         for source, url, live in [('tiktok', 'https://tiktok.com/@a/video/123?share=1', False),
                                   ('tiktok', 'https://tiktok.com/@a/live', True),
