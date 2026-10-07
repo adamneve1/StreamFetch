@@ -273,11 +273,20 @@ footer{padding:18px 2px 4px}
 /* Quiet login credit stays in document flow, including with a mobile keyboard. */
 .workspace-page .login-shell{grid-template-rows:minmax(min-content,1fr) auto;gap:24px}
 .workspace-page .login-shell{position:relative;isolation:isolate}
-.workspace-page .login-cursor-trail{position:fixed;inset:0;z-index:-1;overflow:clip;pointer-events:none;user-select:none}
+.workspace-page .login-shell>.login-card,.workspace-page .login-shell>.login-credit{position:relative;z-index:2}
+.workspace-page .login-cursor-trail{position:fixed;inset:0;z-index:0;overflow:clip;pointer-events:none;user-select:none}
 .workspace-page .login-cursor-trail[data-exiting=true]{z-index:99}
-.workspace-page .login-cursor-trail span{position:absolute;left:0;top:0;width:3px;height:3px;border-radius:999px;background:var(--green);opacity:0;pointer-events:none}
-.workspace-page .login-cursor-trail span:nth-child(2n){width:6px;height:2px;background:var(--muted)}
-@media(prefers-reduced-motion:reduce),(pointer:coarse),(hover:none),(max-width:680px){.workspace-page .login-cursor-trail{display:none}}
+.workspace-page .login-ambient,.workspace-page .login-trail-particles{position:absolute;inset:0;pointer-events:none}
+.workspace-page .login-ambient{z-index:0}.workspace-page .login-trail-particles{z-index:1}
+.workspace-page .login-geometry{position:absolute;display:block;left:0;top:0;width:20px;height:20px;margin:-10px;opacity:0;color:#629d45;pointer-events:none}
+.workspace-page .login-geometry:nth-child(2n){color:var(--deep)}
+.workspace-page .login-geometry::before{content:'';position:absolute;inset:0;border:2px solid currentColor;border-radius:5px;pointer-events:none}
+.workspace-page .login-geometry[data-shape=circle]::before{border-radius:50%}
+.workspace-page .login-geometry[data-shape=diamond]::before{inset:15%;border-radius:2px;transform:rotate(45deg)}
+.workspace-page .login-geometry[data-shape=plus]::before{inset:50% 0 auto;height:2px;border:0;border-radius:1px;background:currentColor;transform:translateY(-50%)}
+.workspace-page .login-geometry[data-shape=plus]::after{content:'';position:absolute;inset:0 auto 0 50%;width:2px;border-radius:1px;background:currentColor;transform:translateX(-50%);pointer-events:none}
+@media(prefers-reduced-motion:reduce),(pointer:coarse),(hover:none){.workspace-page .login-trail-particles{display:none}}
+@media(prefers-reduced-motion:reduce){.workspace-page .login-ambient .login-geometry{opacity:.08!important}}
 .workspace-page .login-card{align-self:center}
 .workspace-page #login-error,.workspace-page #login-error:empty{display:block;min-height:1.5em;margin:12px 0 0}
 .workspace-page .login-credit{margin:0;font-size:11px;line-height:1.5;color:var(--muted);text-align:center}

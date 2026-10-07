@@ -9,7 +9,7 @@
  const dialogKeys=new WeakMap();let dialogId=0;
  let islandKey='',dismissedKey='',dismissTimer;
  let authState='idle',pendingNavigation,loginMarkMotion;
- const trailMedia=env.matchMedia?.('(pointer: fine) and (hover: hover) and (min-width: 681px) and (prefers-reduced-motion: no-preference)');
+ const trailMedia=env.matchMedia?.('(pointer: fine) and (hover: hover) and (prefers-reduced-motion: no-preference)');
  let loginTrailShell=null,loginTrail;
  const tokens=Object.freeze({micro:.16,navigation:.32,reveal:.8,geometry:.38,source:.44,accepted:.48,sourceMobile:.36,acceptedMobile:.4,ease:'power3.out',settle:'power2.inOut'});
  const loginShapes=Object.freeze({
@@ -22,60 +22,101 @@
  if(gsap&&Flip)gsap.registerPlugin(Flip);
  if(gsap&&MorphSVGPlugin)gsap.registerPlugin(MorphSVGPlugin);
  const reduced=()=>!!media?.matches;
+ const trailShapes=['circle','diamond','plus','square'];
+ // Deliberate negative space around the form; no randomly placed confetti.
+ const ambientShapes=[
+  [9,18,42,'circle',.12,14,-18,14], [28,9,22,'diamond',.16,-16,12,18],
+  [66,13,34,'square',.1,18,16,16], [89,30,26,'plus',.16,-12,-20,12],
+  [13,74,32,'diamond',.14,16,-12,20], [37,88,18,'plus',.12,-18,-14,15],
+  [72,82,48,'circle',.08,14,-20,19], [94,68,26,'square',.18,-18,12,13],
+  [5,48,20,'square',.12,12,18,17], [80,52,22,'diamond',.1,-14,-16,11],
+ ];
+ function resetTrailTravel(trail){trail.lastX=null;trail.lastTime=0;trail.lastEmit=-Infinity;trail.distance=0;}
+ function detachLoginTrail(trail){
+  trail.shell.removeEventListener('pointermove',trail.move);trail.shell.removeEventListener('pointerleave',trail.leave);
+  trail.active=false;resetTrailTravel(trail);
+ }
  function parkLoginTrail(trail){
   trail.layer.hidden=true;delete trail.layer.dataset.exiting;
   if(trail.layer.parentNode!==trail.shell)trail.shell.append(trail.layer);
  }
  function stopLoginTrail(fade=false){
   const trail=loginTrail;if(!trail)return;
-  trail.shell.removeEventListener('pointermove',trail.move);
-  trail.shell.removeEventListener('pointerleave',trail.leave);
-  trail.active=false;trail.lastTime=-Infinity;trail.lastX=null;
+  detachLoginTrail(trail);trail.ambientAnimated=false;
   const generation=++trail.generation;
-  trail.clearTween?.kill();trail.clearTween=null;gsap.killTweensOf(trail.particles);
-  if(fade&&!reduced()&&!trail.layer.hidden){
+  trail.clearTween?.kill();trail.clearTween=null;gsap?.killTweensOf(trail.decorations);
+  if(fade&&gsap&&!reduced()&&!trail.layer.hidden){
    // Like the logo exit snapshot, let existing particles finish after login hides.
    // No listener survives this move, so the workspace can never spawn a trail.
    trail.layer.dataset.exiting='true';env.document.body.append(trail.layer);
-   trail.clearTween=gsap.to(trail.particles,{opacity:0,scale:.4,duration:.12,ease:tokens.ease,onComplete:()=>{
+   trail.clearTween=gsap.to(trail.decorations,{opacity:0,scale:.3,duration:.2,ease:tokens.ease,onComplete:()=>{
     if(trail.generation!==generation)return;
     trail.clearTween=null;parkLoginTrail(trail);
    }});
-  }else{gsap.set(trail.particles,{opacity:0});parkLoginTrail(trail);}
+  }else{gsap?.set(trail.decorations,{opacity:0});parkLoginTrail(trail);}
  }
  function syncLoginTrail(){
   const shell=loginTrailShell;
-  if(!shell||shell.hidden||!gsap||!trailMedia?.matches||reduced()){stopLoginTrail();return;}
+  if(!shell||shell.hidden){stopLoginTrail();return;}
   if(!loginTrail){
    const layer=env.document.createElement('div');layer.className='login-cursor-trail';layer.setAttribute('aria-hidden','true');layer.inert=true;layer.hidden=true;
-   const particles=Array.from({length:6},()=>{const particle=env.document.createElement('span');layer.append(particle);return particle;});
-   const trail=loginTrail={shell,layer,particles,active:false,next:0,lastTime:-Infinity,lastX:null,lastY:0,generation:0};
-   trail.leave=()=>{trail.lastX=null;};
+   const ambientLayer=env.document.createElement('div');ambientLayer.className='login-ambient';
+   const particleLayer=env.document.createElement('div');particleLayer.className='login-trail-particles';
+   layer.append(ambientLayer);layer.append(particleLayer);
+   const ambient=ambientShapes.map(([left,top,size,shape,opacity])=>{
+    const node=env.document.createElement('span');node.className='login-geometry';node.dataset.shape=shape;
+    Object.assign(node.style,{left:left+'%',top:top+'%',width:size+'px',height:size+'px',opacity});ambientLayer.append(node);return node;
+   });
+   const particles=Array.from({length:16},(_,index)=>{const particle=env.document.createElement('span');particle.className='login-geometry';particle.dataset.shape=trailShapes[index%4];particleLayer.append(particle);return particle;});
+   const trail=loginTrail={shell,layer,particleLayer,ambient,particles,decorations:[...ambient,...particles],active:false,ambientAnimated:false,next:0,generation:0};
+   resetTrailTravel(trail);trail.leave=()=>resetTrailTravel(trail);
    trail.move=event=>{
     if(!trail.active)return;
     if(shell.hidden){stopLoginTrail();return;}
-    if(event.pointerType==='touch'||event.isPrimary===false||event.target?.closest?.('.login-card,input,textarea,select,button,a,label,[role="button"],[contenteditable]:not([contenteditable="false"])'))return;
+    if(event.pointerType==='touch'||event.isPrimary===false||event.target?.closest?.('input,textarea,select,button,a,summary,[role="button"],[role="link"],[contenteditable]:not([contenteditable="false"])')){resetTrailTravel(trail);return;}
     const x=event.clientX,y=event.clientY,time=event.timeStamp??Date.now();
-    if(!Number.isFinite(x)||!Number.isFinite(y)||time-trail.lastTime<90)return;
-    const dx=trail.lastX===null?0:x-trail.lastX,dy=trail.lastX===null?0:y-trail.lastY;
-    if(trail.lastX!==null&&Math.hypot(dx,dy)<12)return;
-    const index=trail.next++%particles.length,particle=particles[index];
-    trail.lastTime=time;trail.lastX=x;trail.lastY=y;
-    // Viewport coordinates and a fixed pool: no geometry reads or nodes per move.
-    gsap.killTweensOf(particle);
-    gsap.fromTo(particle,{x:x-2,y:y-2,opacity:.28,scale:index%2?.8:1.05},{
-     x:x-2-Math.max(-10,Math.min(10,dx*.12)),y:y+6-Math.max(-6,Math.min(6,dy*.1)),opacity:0,scale:.35,duration:.42,ease:'power2.out',
-    });
+    if(!Number.isFinite(x)||!Number.isFinite(y))return;
+    if(trail.lastX===null){trail.lastX=x;trail.lastY=y;trail.lastTime=time;return;}
+    const dx=x-trail.lastX,dy=y-trail.lastY,distance=Math.hypot(dx,dy),elapsed=Math.max(8,time-trail.lastTime);
+    trail.lastTime=time;trail.lastX=x;trail.lastY=y;trail.distance+=distance;
+    if(!distance||time-trail.lastEmit<24)return;
+    const strength=Math.min(1,distance/elapsed/2),spacing=48-24*strength,count=Math.min(4,Math.floor(trail.distance/spacing));
+    if(!count)return;
+    trail.distance%=spacing;trail.lastEmit=time;
+    const ux=dx/distance,uy=dy/distance,angle=Math.atan2(dy,dx)*180/Math.PI;
+    // Fixed viewport coordinates; distance sampling needs no layout reads.
+    for(let n=count-1;n>=0;n--){
+     const index=trail.next++%particles.length,particle=particles[index],back=Math.min(distance,n*spacing);
+     const px=x-ux*back,py=y-uy*back,sign=index%2?1:-1,drift=14+42*strength;
+     gsap.killTweensOf(particle);
+     gsap.fromTo(particle,{x:px,y:py,opacity:.8+.18*strength,scale:.55+.7*strength,rotation:angle},{
+      x:px-ux*drift+uy*sign*8,y:py-uy*drift-ux*sign*8+6,rotation:angle+sign*(30+150*strength),
+      opacity:0,scale:.12,duration:.5+.18*strength,ease:'power1.in',
+     });
+    }
    };
    shell.append(layer);
   }
-  const trail=loginTrail;if(trail.active)return;
-  ++trail.generation;trail.clearTween?.kill();trail.clearTween=null;gsap.killTweensOf(trail.particles);
-  gsap.set(trail.particles,{opacity:0});
-  delete trail.layer.dataset.exiting;if(trail.layer.parentNode!==trail.shell)trail.shell.append(trail.layer);
-  trail.layer.hidden=false;trail.active=true;trail.lastTime=-Infinity;trail.lastX=null;
-  trail.shell.addEventListener('pointermove',trail.move,{passive:true});
-  trail.shell.addEventListener('pointerleave',trail.leave,{passive:true});
+  const trail=loginTrail;
+  if(trail.layer.hidden||trail.layer.dataset.exiting){
+   ++trail.generation;trail.clearTween?.kill();trail.clearTween=null;gsap?.killTweensOf(trail.decorations);
+   gsap?.set(trail.particles,{opacity:0});trail.next=0;
+   delete trail.layer.dataset.exiting;if(trail.layer.parentNode!==trail.shell)trail.shell.append(trail.layer);
+   trail.layer.hidden=false;
+   trail.ambient.forEach((node,index)=>{node.style.opacity=ambientShapes[index][4];gsap?.set(node,{x:0,y:0,rotation:0,scale:1,opacity:ambientShapes[index][4]});});
+  }
+  const animateAmbient=!!gsap&&!reduced();
+  if(animateAmbient!==trail.ambientAnimated){
+   gsap?.killTweensOf(trail.ambient);trail.ambientAnimated=animateAmbient;
+   if(animateAmbient)trail.ambient.forEach((node,index)=>{
+    const spec=ambientShapes[index];gsap.to(node,{x:spec[5],y:spec[6],rotation:index%2?-30:24,duration:spec[7],repeat:-1,yoyo:true,ease:'sine.inOut'});
+   });
+  }
+  const active=!!gsap&&!!trailMedia?.matches&&!reduced();trail.particleLayer.hidden=!active;
+  if(active===trail.active)return;
+  if(!active){detachLoginTrail(trail);gsap?.killTweensOf(trail.particles);gsap?.set(trail.particles,{opacity:0});return;}
+  resetTrailTravel(trail);trail.active=true;
+  trail.shell.addEventListener('pointermove',trail.move,{passive:true});trail.shell.addEventListener('pointerleave',trail.leave,{passive:true});
  }
  function choreograph(name,element,animate,ghost){
   settle(name);

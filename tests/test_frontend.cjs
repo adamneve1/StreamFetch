@@ -818,13 +818,17 @@ test('login cursor lifecycle stops before workspace visibility and resets before
  f.run('showLogin()');assert.deepEqual(events,['success','reset','reveal']);
  f.run('showLogin()');assert.deepEqual(events,['success','reset','reveal']);
 });
-test('login cursor styling is decorative, tiny, clipped and disabled on mobile/coarse/reduced motion',()=>{
+test('login geometric layers use explicit ambient/trail/content ordering and device eligibility, not a narrow-screen cutoff',()=>{
  const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8');
  assert.match(css,/\.workspace-page \.login-shell\{position:relative;isolation:isolate\}/);
- assert.match(css,/\.login-cursor-trail\{position:fixed;inset:0;z-index:-1;overflow:clip;pointer-events:none;user-select:none\}/);
- assert.match(css,/\.login-cursor-trail span\{[^}]*width:3px;height:3px;[^}]*background:var\(--green\);opacity:0;pointer-events:none/);
- assert.match(css,/\.login-cursor-trail span:nth-child\(2n\)\{width:6px;height:2px;background:var\(--muted\)\}/);
- assert.match(css,/@media\(prefers-reduced-motion:reduce\),\(pointer:coarse\),\(hover:none\),\(max-width:680px\)\{\.workspace-page \.login-cursor-trail\{display:none\}\}/);
+ assert.match(css,/\.login-shell>\.login-card,\.workspace-page \.login-shell>\.login-credit\{position:relative;z-index:2\}/);
+ assert.match(css,/\.login-cursor-trail\{position:fixed;inset:0;z-index:0;overflow:clip;pointer-events:none;user-select:none\}/);
+ assert.match(css,/\.login-ambient\{z-index:0\}\.workspace-page \.login-trail-particles\{z-index:1\}/);
+ assert.match(css,/\.login-geometry\{[^}]*display:block;[^}]*width:20px;height:20px;[^}]*pointer-events:none/);
+ for(const shape of ['circle','diamond','plus'])assert.ok(css.includes('[data-shape='+shape+']::before'));
+ assert.match(css,/@media\(prefers-reduced-motion:reduce\),\(pointer:coarse\),\(hover:none\)\{\.workspace-page \.login-trail-particles\{display:none\}\}/);
+ assert.match(css,/prefers-reduced-motion:reduce\)\{\.workspace-page \.login-ambient \.login-geometry\{opacity:\.08!important\}/);
+ assert.doesNotMatch(css,/@media[^}]*max-width:[^}]*login-(cursor-trail|trail-particles)/);
  assert.doesNotMatch(css,/cursor\s*:\s*none/);
 });
 test('rejected submission never runs the accepted morph or discards input',async()=>{

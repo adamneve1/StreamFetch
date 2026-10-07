@@ -3,7 +3,7 @@ const assert=require('node:assert/strict');
 const createMotion=require('../app/static/motion.js');
 
 function fixture(reduced=false,available=true,trailOptions){
- const flips=[],states=[],tweens=[],contexts=[],timelines=[],conversions=[],timers=new Map(),listeners={},created=[],sets=[],killedTargets=[];let timerId=0,current;
+ const flips=[],states=[],tweens=[],contexts=[],timelines=[],conversions=[],timers=new Map(),listeners={},created=[],sets=[],killedTargets=[],queries=[];let timerId=0,current;
  const element=()=>({dataset:{},style:{},children:[],hidden:false,value:0,events:new Map(),eventAdds:[],
   addEventListener(type,fn,options){if(!this.events.has(type))this.events.set(type,new Set());this.events.get(type).add(fn);this.eventAdds.push({type,options});},
   removeEventListener(type,fn){this.events.get(type)?.delete(fn);},
@@ -24,7 +24,7 @@ function fixture(reduced=false,available=true,trailOptions){
   const t={target,vars,killed:false,kill(){this.killed=true;}};tweens.push(t);current?.animations.push(t);return t;
  };
  const media={matches:reduced,addEventListener(type,fn){listeners.media=fn;}};
- const trailMedia={matches:!!trailOptions&&!reduced&&trailOptions.fine!==false&&trailOptions.hover!==false&&trailOptions.mobile!==true,addEventListener(type,fn){listeners.trailMedia=fn;}};
+ const trailMedia={matches:!!trailOptions&&!reduced&&trailOptions.fine!==false&&trailOptions.hover!==false,addEventListener(type,fn){listeners.trailMedia=fn;}};
  const gsap={registerPlugin(){},to:tween,fromTo(target,from,vars){const t=tween(target,vars);t.from=from;return t;},
   set(target,vars){sets.push({target,vars});},killTweensOf(target){killedTargets.push(target);const targets=Array.isArray(target)?target:[target];for(const t of tweens)if((Array.isArray(t.target)?t.target:[t.target]).some(node=>targets.includes(node)))t.kill();},
   timeline(vars){const timeline={vars,animations:[],killed:false,kill(){this.killed=true;for(const t of this.animations)t.kill();},to(target,vars,position){const t=tween(target,vars);t.position=position;this.animations.push(t);return this;},fromTo(target,from,vars,position){const t=tween(target,vars);t.from=from;t.position=position;this.animations.push(t);return this;}};timelines.push(timeline);return timeline;},
@@ -35,7 +35,7 @@ function fixture(reduced=false,available=true,trailOptions){
  const MorphSVGPlugin={convertToPath(target){target.tagName='path';conversions.push(target);return [target];}};
  const navigations=[],stored=new Map();
  const env={document:{getElementById:id=>ids[id],body,createElement(tag){const node=element();node.tagName=tag;created.push(node);return node;}},location:{assign:url=>navigations.push(url)},sessionStorage:{setItem:(key,value)=>stored.set(key,value),getItem:key=>stored.get(key),removeItem:key=>stored.delete(key)},
-  gsap:available?gsap:null,Flip:available?Flip:null,MorphSVGPlugin:available?MorphSVGPlugin:null,matchMedia:query=>query.includes('pointer: fine')?trailMedia:media,
+  gsap:available?gsap:null,Flip:available?Flip:null,MorphSVGPlugin:available?MorphSVGPlugin:null,matchMedia:query=>{queries.push(query);return query.includes('pointer: fine')?trailMedia:media;},
   setTimeout(fn){timers.set(++timerId,fn);return timerId;},clearTimeout(id){timers.delete(id);},
   addEventListener(type,fn){listeners[type]=fn;}};
  const motion=createMotion(env);
@@ -44,98 +44,127 @@ function fixture(reduced=false,available=true,trailOptions){
  },{accepted,job});
  const status=(key,phase)=>motion.island(island,key,phase,()=>{island.hidden=false;island.detail=phase;});
  const tick=()=>{const callbacks=[...timers.values()];timers.clear();callbacks.forEach(fn=>fn());};
- return {motion,source,status,tick,flips,states,tweens,contexts,timelines,conversions,timers,listeners,media,trailMedia,created,sets,killedTargets,panel,content,compact,island,bar,job,Flip,shell,form,brand,label,password,button,credit,error,workspace,mark,ring,glyph,wordmark,surface,body,dialog,dialogPanel,navigations,stored};
+ return {motion,source,status,tick,flips,states,tweens,contexts,timelines,conversions,timers,listeners,media,trailMedia,created,sets,killedTargets,queries,panel,content,compact,island,bar,job,Flip,shell,form,brand,label,password,button,credit,error,workspace,mark,ring,glyph,wordmark,surface,body,dialog,dialogPanel,navigations,stored};
 }
 const trailMove=(f,time=0,x=20,target={closest:()=>null},pointerType='mouse')=>f.shell.fire('pointermove',{timeStamp:time,clientX:x,clientY:40,target,pointerType,isPrimary:true});
-const particleTweens=f=>f.tweens.filter(t=>f.created.includes(t.target)&&t.target.tagName==='span');
-test('login cursor trail activates only on a visible login with a fine hover pointer',()=>{
- const f=fixture(false,true,{});
+const particles=f=>f.created.filter(node=>node.parentNode?.className==='login-trail-particles');
+const ambient=f=>f.created.filter(node=>node.parentNode?.className==='login-ambient');
+const particleTweens=f=>f.tweens.filter(t=>particles(f).includes(t.target));
+const emitTrail=f=>{trailMove(f);trailMove(f,100,80);};
+const exitTween=f=>f.tweens.findLast(t=>Array.isArray(t.target)&&t.target.includes(ambient(f)[0]));
+test('login geometry activates only on visible login with a fine hover trail, including narrow desktop windows',()=>{
+ const f=fixture(false,true,{mobile:true});
  assert.equal(f.created.length,0);assert.equal(f.shell.events.size,0);
  f.shell.hidden=true;f.motion.loginReveal(f.shell);assert.equal(f.created.length,0);
  f.shell.hidden=false;f.motion.loginReveal(f.shell);
- assert.equal(f.created.length,7);assert.equal(f.shell.children.length,1);
- const layer=f.shell.children[0];assert.equal(layer.children.length,6);assert.equal(layer['aria-hidden'],'true');assert.equal(layer.inert,true);
+ assert.equal(f.created.length,29);assert.equal(f.shell.children.length,1);
+ const layer=f.shell.children[0];assert.equal(particles(f).length,16);assert.equal(ambient(f).length,10);assert.equal(layer['aria-hidden'],'true');assert.equal(layer.inert,true);
+ assert.equal(layer.hidden,false);assert.equal(layer.children[1].hidden,false);
  assert.equal(f.shell.events.get('pointermove').size,1);assert.equal(f.shell.eventAdds[0].options.passive,true);
- trailMove(f);assert.equal(particleTweens(f).length,1);
+ assert.ok(f.queries.includes('(pointer: fine) and (hover: hover) and (prefers-reduced-motion: no-preference)'));
+ emitTrail(f);assert.equal(particleTweens(f).length,1);
  assert.equal(f.body.children.length,0);assert.equal(f.workspace.events.size,0);
- f.shell.hidden=true;trailMove(f,100,60);assert.equal(particleTweens(f).length,1);assert.equal(layer.hidden,true);
+ f.shell.hidden=true;trailMove(f,200,140);assert.equal(particleTweens(f).length,1);assert.equal(layer.hidden,true);
  assert.equal(f.shell.events.get('pointermove').size,0);
 });
-test('login cursor trail allocates no particles or pointer listeners for coarse, touch, mobile, reduced motion or missing GSAP',()=>{
- for(const f of [fixture(false,true,{fine:false}),fixture(false,true,{hover:false}),fixture(false,true,{mobile:true}),fixture(true,true,{}),fixture(false,false,{})]){
-  f.motion.loginReveal(f.shell);assert.equal(f.created.length,0);assert.equal(f.shell.events.size,0);
+test('coarse, non-hover, reduced motion and missing GSAP disable the login trail but retain accessible static ambient decoration',()=>{
+ for(const f of [fixture(false,true,{fine:false}),fixture(false,true,{hover:false}),fixture(true,true,{}),fixture(false,false,{})]){
+  f.motion.loginReveal(f.shell);assert.equal(ambient(f).length,10);assert.equal(f.shell.children[0].children[1].hidden,true);assert.equal(f.shell.events.size,0);
+  emitTrail(f);assert.equal(particleTweens(f).length,0);
+  if(f.media.matches||!f.timelines.length)assert.equal(f.tweens.length,0);
  }
 });
-test('login cursor trail reuses six particles, throttles moves and animates transforms and opacity only',()=>{
+test('login cursor trail uses a distance threshold, visible start state, bounded cadence and sixteen recycled shapes without layout reads',()=>{
  const f=fixture(false,true,{});f.motion.loginReveal(f.shell);
  for(const node of [f.shell,f.form,...f.created])node.getBoundingClientRect=()=>{throw Error('No geometry reads during pointermove');};
- trailMove(f);trailMove(f,10,40);trailMove(f,100,21);assert.equal(particleTweens(f).length,1);
- for(let i=1;i<=12;i++)trailMove(f,i*100,i*40);
- const tweens=particleTweens(f);assert.equal(tweens.length,13);assert.equal(f.created.length,7);
- assert.equal(new Set(tweens.map(t=>t.target)).size,6);assert.equal(tweens[0].killed,true);
- assert.equal(f.killedTargets.filter(t=>t===tweens[0].target).length,3);
+ trailMove(f);trailMove(f,1,21);assert.equal(particleTweens(f).length,0);
+ trailMove(f,50,80);assert.equal(particleTweens(f).length,1);
+ trailMove(f,51,150);assert.equal(particleTweens(f).length,1);
+ trailMove(f,100,160);assert.ok(particleTweens(f).length>1);
+ for(let i=1;i<=25;i++)trailMove(f,100+i*100,160+i*80);
+ const tweens=particleTweens(f);assert.equal(f.created.length,29);assert.equal(new Set(tweens.map(t=>t.target)).size,16);assert.equal(tweens[0].killed,true);
+ assert.deepEqual(particles(f).slice(0,4).map(node=>node.dataset.shape),['circle','diamond','plus','square']);
  for(const tween of tweens){
-  assert.equal(tween.vars.duration,.42);assert.equal(tween.vars.opacity,0);assert.ok(tween.from.opacity<=.3);
-  assert.deepEqual(Object.keys(tween.from).sort(),['opacity','scale','x','y']);
-  assert.deepEqual(Object.keys(tween.vars).sort(),['duration','ease','opacity','scale','x','y']);
+  assert.ok(tween.vars.duration>=.45&&tween.vars.duration<=.75);assert.equal(tween.vars.opacity,0);assert.ok(tween.from.opacity>=.75&&tween.from.opacity<=1);
+  assert.ok(tween.from.scale>=.5&&tween.from.scale<=1.3);assert.ok(tween.from.x>0);assert.equal(tween.from.y,40);
+  assert.deepEqual(Object.keys(tween.from).sort(),['opacity','rotation','scale','x','y']);
+  assert.deepEqual(Object.keys(tween.vars).sort(),['duration','ease','opacity','rotation','scale','x','y']);
  }
 });
-test('login cursor trail suppresses the form and interactive controls and ignores touch events',()=>{
+test('login trail velocity controls emission count, shape size, spin, drift and lifetime',()=>{
+ const slow=fixture(false,true,{}),fast=fixture(false,true,{});
+ for(const f of [slow,fast]){f.motion.loginReveal(f.shell);trailMove(f);}
+ trailMove(slow,200,80);trailMove(fast,16,240);
+ const slowTween=particleTweens(slow)[0],fastTween=particleTweens(fast).at(-1);
+ assert.equal(particleTweens(slow).length,1);assert.equal(particleTweens(fast).length,4);
+ assert.ok(fastTween.from.scale>slowTween.from.scale);assert.ok(fastTween.vars.duration>slowTween.vars.duration);
+ assert.ok(Math.abs(fastTween.vars.rotation-fastTween.from.rotation)>Math.abs(slowTween.vars.rotation-slowTween.from.rotation));
+ assert.ok(Math.abs(fastTween.vars.x-fastTween.from.x)>Math.abs(slowTween.vars.x-slowTween.from.x));
+});
+test('login trail suppresses only actual interactive controls, never the card or label, and ignores touch',()=>{
  const f=fixture(false,true,{});f.motion.loginReveal(f.shell);
- for(const selector of ['.login-card','input','button','a','select','[contenteditable]']){
+ for(const selector of ['input','button','a','select','summary','[contenteditable]']){
   trailMove(f,100,40,{closest(query){assert.ok(query.includes(selector));return {};}});
  }
  trailMove(f,100,40,undefined,'touch');assert.equal(particleTweens(f).length,0);
- trailMove(f,100,40);assert.equal(particleTweens(f).length,1);
+ const card={closest(query){assert.ok(!query.includes('.login-card'));assert.ok(!query.split(',').includes('label'));return null;}};
+ trailMove(f,100,40,card);trailMove(f,200,100,card);assert.equal(particleTweens(f).length,1);
 });
-test('successful login immediately removes cursor listeners and fades existing particles before the exit completes',()=>{
- const f=fixture(false,true,{});f.motion.loginReveal(f.shell);trailMove(f);
- const particle=particleTweens(f)[0],layer=f.shell.children[0];f.motion.loginSuccess(f.workspace);
- assert.equal(layer.parentNode,f.body);assert.equal(layer.dataset.exiting,'true');
- assert.equal(particle.killed,true);assert.equal(f.shell.events.get('pointermove').size,0);assert.equal(f.shell.events.get('pointerleave').size,0);
- const clear=f.tweens.find(t=>Array.isArray(t.target)&&t.target[0]===layer.children[0]);assert.equal(clear.vars.duration,.12);
- trailMove(f,100,60);assert.equal(particleTweens(f).length,1);
+test('login ambient geometry has intentional placements, sizes and restrained GSAP loops that are never duplicated',()=>{
+ const f=fixture(false,true,{});f.motion.loginReveal(f.shell);
+ const loops=f.tweens.filter(t=>ambient(f).includes(t.target));assert.equal(loops.length,10);
+ assert.equal(new Set(ambient(f).map(node=>node.style.left+':'+node.style.top)).size,10);
+ for(const node of ambient(f)){assert.ok(parseInt(node.style.width)>=16&&parseInt(node.style.width)<=48);assert.ok(node.style.opacity>=.08&&node.style.opacity<=.2);}
+ for(const loop of loops){assert.ok(loop.vars.duration>=8&&loop.vars.duration<=20);assert.equal(loop.vars.repeat,-1);assert.equal(loop.vars.yoyo,true);}
+ f.motion.loginReveal(f.shell);assert.equal(f.tweens.filter(t=>ambient(f).includes(t.target)).length,10);assert.equal(f.created.length,29);
+});
+test('successful login removes cursor listeners and kills ambient loops before dissolving the shared pool',()=>{
+ const f=fixture(false,true,{});f.motion.loginReveal(f.shell);emitTrail(f);
+ const particle=particleTweens(f)[0],layer=f.shell.children[0],loops=f.tweens.filter(t=>ambient(f).includes(t.target));f.motion.loginSuccess(f.workspace);
+ assert.equal(layer.parentNode,f.body);assert.equal(layer.dataset.exiting,'true');assert.equal(particle.killed,true);assert.ok(loops.every(t=>t.killed));
+ assert.equal(f.shell.events.get('pointermove').size,0);assert.equal(f.shell.events.get('pointerleave').size,0);
+ const clear=exitTween(f);assert.equal(clear.target.length,26);assert.equal(clear.vars.duration,.2);
+ emitTrail(f);assert.equal(particleTweens(f).length,1);
  clear.vars.onComplete();assert.equal(layer.hidden,true);assert.equal(layer.parentNode,f.shell);assert.equal(layer.dataset.exiting,undefined);
  f.listeners.trailMedia();assert.equal(f.shell.events.get('pointermove').size,0);
 });
-test('rapid login/error/logout reinitialization reuses the pool and rejects stale fade callbacks',()=>{
- const f=fixture(false,true,{});f.motion.loginReveal(f.shell);trailMove(f);const layer=f.shell.children[0];
+test('rapid login/error/logout reinitialization reuses geometry and rejects obsolete dissolve callbacks',()=>{
+ const f=fixture(false,true,{});f.motion.loginReveal(f.shell);emitTrail(f);const layer=f.shell.children[0];
  f.motion.loginError(f.error);assert.equal(f.shell.events.get('pointermove').size,1);
- f.motion.loginSuccess(f.workspace);const clear=f.tweens.find(t=>Array.isArray(t.target)&&t.target[0]===layer.children[0]);
+ f.motion.loginSuccess(f.workspace);const clear=exitTween(f);
  f.motion.reset();assert.equal(clear.killed,true);assert.equal(layer.hidden,true);
  f.motion.loginReveal(f.shell);f.motion.loginReveal(f.shell);
- clear.vars.onComplete();assert.equal(layer.hidden,false);assert.equal(f.created.length,7);
+ clear.vars.onComplete();assert.equal(layer.hidden,false);assert.equal(f.created.length,29);
  assert.equal(f.shell.events.get('pointermove').size,1);assert.equal(f.shell.eventAdds.filter(e=>e.type==='pointermove').length,2);
- trailMove(f);assert.equal(particleTweens(f).length,2);
- f.motion.reset();assert.equal(f.shell.events.get('pointermove').size,0);assert.equal(particleTweens(f).at(-1).killed,true);
- assert.equal(f.sets.at(-1).vars.opacity,0);
+ emitTrail(f);assert.equal(particleTweens(f).length,2);
+ f.motion.reset();assert.equal(f.shell.events.get('pointermove').size,0);assert.equal(particleTweens(f).at(-1).killed,true);assert.equal(f.sets.at(-1).vars.opacity,0);
 });
-test('login cursor trail responds to motion/device preference changes without reviving after login',()=>{
- const f=fixture(false,true,{});f.motion.loginReveal(f.shell);trailMove(f);
- f.media.matches=true;f.listeners.media();assert.equal(f.shell.children[0].hidden,true);assert.equal(f.shell.events.get('pointermove').size,0);
- assert.equal(particleTweens(f)[0].killed,true);
+test('login geometry responds to reduced motion and device changes without reviving after login',()=>{
+ const f=fixture(false,true,{});f.motion.loginReveal(f.shell);emitTrail(f);
+ const loops=f.tweens.filter(t=>ambient(f).includes(t.target));
+ f.media.matches=true;f.listeners.media();assert.equal(f.shell.children[0].children[1].hidden,true);assert.equal(f.shell.events.get('pointermove').size,0);
+ assert.equal(particleTweens(f)[0].killed,true);assert.ok(loops.every(t=>t.killed));
  f.media.matches=false;f.listeners.media();assert.equal(f.shell.events.get('pointermove').size,1);
  f.trailMedia.matches=false;f.listeners.trailMedia();assert.equal(f.shell.events.get('pointermove').size,0);
  f.trailMedia.matches=true;f.listeners.trailMedia();assert.equal(f.shell.events.get('pointermove').size,1);
  f.motion.loginSuccess(f.workspace);f.listeners.trailMedia();assert.equal(f.shell.events.get('pointermove').size,0);
 });
-test('pagehide clears the login cursor trail and bfcache restores it only when login is visible',()=>{
- const f=fixture(false,true,{});f.motion.loginReveal(f.shell);trailMove(f);
+test('pagehide clears login geometry and bfcache restores it only while login is visible',()=>{
+ const f=fixture(false,true,{});f.motion.loginReveal(f.shell);emitTrail(f);
  f.listeners.pagehide();assert.equal(f.shell.events.get('pointermove').size,0);assert.equal(f.shell.children[0].hidden,true);
- f.listeners.pageshow({persisted:true});assert.equal(f.shell.events.get('pointermove').size,1);assert.equal(f.created.length,7);
+ f.listeners.pageshow({persisted:true});assert.equal(f.shell.events.get('pointermove').size,1);assert.equal(f.created.length,29);
  f.shell.hidden=true;f.listeners.pagehide();f.listeners.pageshow({persisted:true});assert.equal(f.shell.events.get('pointermove').size,0);
 });
-test('cursor particles remain independent of the existing MorphSVG login choreography',()=>{
- const f=fixture(false,true,{});f.motion.loginReveal(f.shell);assert.equal(f.tweens.length,7);assert.deepEqual(f.conversions,[f.ring]);
- const entrance=f.timelines[0];trailMove(f);const particle=particleTweens(f)[0];
+test('geometric pools remain independent of the existing MorphSVG login choreography',()=>{
+ const f=fixture(false,true,{});f.motion.loginReveal(f.shell);assert.equal(f.timelines[0].animations.length,7);assert.deepEqual(f.conversions,[f.ring]);
+ const entrance=f.timelines[0];emitTrail(f);const particle=particleTweens(f)[0];
  f.motion.loginInteract('submit');assert.equal(particle.killed,false);const loading=f.timelines.find(t=>t.animations.some(a=>a.vars.repeat===-1));
  assert.ok(f.tweens.some(t=>t.target===f.glyph&&t.vars.morphSVG?.shape.includes('V28a7')));
  assert.ok(f.tweens.some(t=>t.target===f.ring&&t.vars.repeat===-1));
  f.motion.loginError(f.error);assert.equal(loading.killed,true);assert.equal(particle.killed,false);
  f.timelines.at(-2).vars.onComplete();assert.match(f.glyph.d,/M32 25a7/);
  entrance.vars.onComplete();assert.equal(f.shell.children[0].hidden,false);
- f.motion.loginSuccess(f.workspace);assert.equal(particle.killed,true);
- assert.ok(f.tweens.some(t=>t.vars.morphSVG?.shape.includes('17-18')));
+ f.motion.loginSuccess(f.workspace);assert.equal(particle.killed,true);assert.ok(f.tweens.some(t=>t.vars.morphSVG?.shape.includes('17-18')));
 });
 test('Source admission snapshots before mutation, morphs surface, and keeps snapshot inert',()=>{
  const f=fixture();f.source(true,true);
@@ -215,12 +244,12 @@ test('a failed geometry read cannot turn accepted admission into a rejected subm
 });
 test('login signature converts and draws the ring, morphs only the glyph, and settles within 820ms',()=>{
  const f=fixture();f.motion.loginReveal(f.shell);
- assert.equal(f.flips.length,0);assert.equal(f.tweens.length,7);assert.deepEqual(f.conversions,[f.ring]);
- const [mark,draw,glyph,wordmark,surface,fields,credit]=f.tweens;
+ assert.equal(f.flips.length,0);assert.equal(f.timelines[0].animations.length,7);assert.deepEqual(f.conversions,[f.ring]);
+ const [mark,draw,glyph,wordmark,surface,fields,credit]=f.timelines[0].animations;
  assert.equal(mark.target,f.mark);assert.equal(mark.from.scale,.88);assert.ok(mark.from.x<=10);
  assert.equal(draw.target,f.ring);assert.equal(draw.from.strokeDasharray,'0 114');assert.equal(draw.vars.strokeDasharray,'114 0');
  assert.equal(glyph.target,f.glyph);assert.match(glyph.from.morphSVG.shape,/C28 26/);assert.equal(glyph.vars.morphSVG.shape,f.glyph.d);
- assert.equal(f.tweens.some(t=>t.vars.repeat||t.vars.yoyo),false);
+ assert.equal(f.timelines[0].animations.some(t=>t.vars.repeat||t.vars.yoyo),false);
  assert.equal(wordmark.from.clipPath,'inset(0 100% 0 0)');
  assert.equal(surface.target,f.surface);assert.match(surface.from.clipPath,/72%/);
  assert.equal(fields.from.y,4);assert.equal(fields.vars.stagger,f.motion.tokens.micro/4);
@@ -241,7 +270,7 @@ test('success settles immediately without promise, timer, or architecture change
  const result=f.motion.loginSuccess(f.workspace);
  assert.equal(result,undefined);assert.equal(f.timers.size,0);
  assert.equal(f.contexts[1].reverted,true);
- const ghost=f.body.children[0];assert.equal(ghost.inert,true);assert.equal(ghost['aria-hidden'],'true');assert.ok(!ghost.inputs[0].value);
+ const ghost=f.body.children.find(node=>node.className?.includes('auth-exit-snapshot'));assert.equal(ghost.inert,true);assert.equal(ghost['aria-hidden'],'true');assert.ok(!ghost.inputs[0].value);
  assert.equal(f.tweens.find(t=>t.target===f.workspace).vars.duration,.2);
  const check=f.tweens.find(t=>t.vars.morphSVG?.shape?.includes('17-18'));assert.ok(check);assert.equal(check.vars.duration,.32);
  assert.equal(f.tweens.at(-1).position+f.tweens.at(-1).vars.duration,.4);
@@ -249,7 +278,7 @@ test('success settles immediately without promise, timer, or architecture change
  assert.equal(ghost.removed,true);
 });
 test('typing or pointer interaction immediately settles signature motion without gating the password',()=>{
- const f=fixture();f.motion.loginReveal(f.shell);const entrance=[...f.tweens];f.motion.loginInteract();
+ const f=fixture();f.motion.loginReveal(f.shell);const entrance=[...f.timelines[0].animations];f.motion.loginInteract();
  assert.equal(f.contexts[0].reverted,true);assert.equal(entrance.every(t=>t.killed),true);
  assert.equal(f.password.hidden,false);assert.equal(f.password.disabled,undefined);
 });
