@@ -413,6 +413,19 @@ test('workspace markup keeps Source and Clipper separate while sharing History b
   for(const id of ['password-form','source-form','disk-meter']){assert.ok(admin.includes('id="'+id+'"'));assert.ok(!workspace.includes('id="'+id+'"'));}
   assert.ok(admin.includes('TRANSCRIPTION_PROVIDER'));assert.ok(!workspace.includes('TRANSCRIPTION_PROVIDER'));
 });
+test('Clipper layout centers bounded desktop blocks while retaining fluid narrow widths',()=>{
+  const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8');
+  const clipper=css.slice(css.indexOf('/* Clipper is a separate workspace view'));
+  assert.match(clipper,/#clipper-panel\{width:100%;max-width:1180px;margin-inline:auto/);
+  assert.match(clipper,/\.clip-url-field\{width:100%;max-width:1000px;margin-inline:auto/);
+  assert.match(clipper,/\.clip-metadata\{[^}]*width:100%;max-width:1000px;margin:14px auto/);
+  assert.match(clipper,/\.clip-preview\{width:100%;max-width:900px;margin:14px auto/);
+  assert.match(clipper,/#clip-helpers\{width:100%;max-width:900px;margin-inline:auto/);
+  assert.match(clipper,/\.clip-preview-toolbar\{[^}]*width:100%/);
+  assert.match(clipper,/@media\(min-width:1100px\)\{[^}]*max-width:1260px/);
+  assert.match(clipper,/@media\(max-width:760px\)\{\.clip-time-grid\{grid-template-columns:1fr\}/);
+  assert.match(clipper,/@media\(max-width:600px\)\{[\s\S]*?#clipper-panel\{padding:16px\}/);
+});
 test('Clipper timestamp helpers normalize supported forms and reject invalid values',()=>{
   const f=fixture();
   for(const value of [90,'90','1:30','01:30','00:01:30','1m30s']){
