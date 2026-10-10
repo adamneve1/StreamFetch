@@ -713,6 +713,22 @@ test('authentication tokens are kept out of browser storage',()=>{
   assert.doesNotMatch(source,/\b(?:localStorage|sessionStorage)\b/);
 });
 
+test('only trusted user activity marks one API request as session activity',async()=>{
+ const f=fixture(),requests=[];
+ f.context.fetch=async(url,options)=>{requests.push({url,options});return {status:200,ok:true,headers:{get:()=> 'application/json'},json:async()=>({})};};
+ f.run("csrf='test-csrf'");
+ await f.run("api('session')");
+ assert.equal(requests[0].options.headers['X-Session-Activity'],undefined);
+ f.listeners.pointerdown[0]({isTrusted:false});
+ await f.run("api('session')");
+ assert.equal(requests[1].options.headers['X-Session-Activity'],undefined);
+ f.listeners.keydown[0]({isTrusted:true});
+ await f.run("api('session')");
+ assert.equal(requests[2].options.headers['X-Session-Activity'],'1');
+ await f.run("api('session')");
+ assert.equal(requests[3].options.headers['X-Session-Activity'],undefined);
+});
+
 test('login errors remain visible, retain input, support correction, and returning to login focuses password',async()=>{
   const f=fixture();f.get('password').value='wrong';
   f.context.fetch=async()=>({status:401,ok:false,headers:{get:()=> 'application/json'},json:async()=>({error:'Password salah.'})});
@@ -1143,6 +1159,23 @@ test('rapid repeated submission cannot duplicate admission and a changed source 
  assert.equal(count,1);f.run("setMode('instagram')");reject(Error('Offline'));await first;
  assert.equal(f.get('record').textContent,'Mulai');assert.equal(f.get('capture-content').hidden,false);
  assert.equal(motion.calls.some(c=>c[0]==='source'&&c[1]),false);
+});
+
+test('Source duplicate result reuses preview and download paths and routes to canonical History',()=>{
+ const f=fixture();
+ f.run(`showSourceDuplicate({status:'ready',job:{job_id:'existing',source:'youtube',state:'ready',filename:'Dialog Batam.mp4',title:'Dialog Batam',size:12500000,file_date:1700000000}})`);
+ assert.equal(f.get('source-duplicate').hidden,false);
+ assert.equal(f.get('source-duplicate-heading').textContent,'Sudah ada di StreamFetch');
+ assert.equal(f.get('source-duplicate-title').textContent,'Dialog Batam');
+ assert.match(f.get('source-duplicate-meta').textContent,/12.5 MB.*WIB/);
+ assert.equal(f.get('source-duplicate-download').href,'/api/files/Dialog%20Batam.mp4');
+ f.get('source-duplicate-preview').onclick();
+ assert.equal(f.get('history-video-preview').src,'/api/files/Dialog%20Batam.mp4?inline=1');
+ f.run(`showSourceDuplicate({status:'processing',job:{job_id:'active',source:'youtube',state:'recording',title:'Live dialog'}})`);
+ assert.equal(f.get('source-duplicate-heading').textContent,'Video ini sedang diproses');
+ assert.equal(f.get('source-duplicate-preview').hidden,true);
+ assert.equal(f.get('source-duplicate-download').hidden,true);
+ assert.equal(f.get('source-duplicate-history').textContent,'Lihat proses');
 });
 
 test('toasts announce success politely and errors assertively, dismiss on time, and preserve page notices',()=>{

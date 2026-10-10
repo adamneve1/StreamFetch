@@ -586,7 +586,7 @@ async def heartbeat(job=None):
 
 async def set_state(job, status, state, detail=''):
     r.set(f"state:{job['job_id']}", state, ex=86400)
-    public = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'quality', 'output_format', 'compression', 'is_live', 'is_clip', 'clip_start', 'clip_end', 'clip_duration', 'live_status', 'was_live', 'download_attempt', 'download_attempts', 'download_exit_code', 'progress_percent', 'progress_phase', 'eta_seconds', 'started_at', 'elapsed', 'size', 'filename', 'original_filename', 'processing_status', 'processing_error', 'processing_detail', 'attempt_root_id', 'retry_of', 'attempt_number', 'attempt_total', 'error_code', 'error_title', 'error_message') if key in job}
+    public = {key: job[key] for key in ('job_id', 'source', 'source_type', 'source_id', 'source_name', 'note', 'origin', 'quality', 'output_format', 'compression', 'is_live', 'is_clip', 'clip_start', 'clip_end', 'clip_duration', 'live_status', 'was_live', 'download_attempt', 'download_attempts', 'download_exit_code', 'progress_percent', 'progress_phase', 'eta_seconds', 'started_at', 'elapsed', 'size', 'filename', 'original_filename', 'processing_status', 'processing_error', 'processing_detail', 'attempt_root_id', 'retry_of', 'attempt_number', 'attempt_total', 'error_code', 'error_title', 'error_message') if key in job}
     public.update(state=state, detail=detail)
     r.set('web:job:' + job['job_id'], json.dumps(public), ex=86400)
     if os.getenv('DATA_DIR'):
@@ -816,6 +816,8 @@ def update_youtube_metadata(job, info):
                 metadata[key] = info[key]
         if job.get('source') == 'youtube' and re.fullmatch(r'[A-Za-z0-9_-]{11}', str(info.get('id') or '')):
             metadata['youtube_id'] = info['id']
+            job['source_type'] = 'youtube'
+            job['source_id'] = info['id']
         job['source_metadata'] = metadata
 
 
@@ -958,6 +960,28 @@ def should_log_diagnostic(text):
     ))
 
 
+async def bounded_output_lines(stream, chunk_size=16384, line_limit=65536):
+    """Yield subprocess output lines without StreamReader's separator limit."""
+    buffered = bytearray()
+    while True:
+        chunk = await stream.read(chunk_size)
+        if not chunk:
+            break
+        buffered.extend(chunk)
+        while buffered:
+            newline = buffered.find(b'\n')
+            if 0 <= newline < line_limit:
+                end = newline + 1
+            elif len(buffered) >= line_limit:
+                end = line_limit
+            else:
+                break
+            yield bytes(buffered[:end])
+            del buffered[:end]
+    if buffered:
+        yield bytes(buffered)
+
+
 async def capture(job, status, lease):
     command, temp_path = capture_command(job)
     process = await spawn(command, merge_stderr=False)
@@ -970,10 +994,7 @@ async def capture(job, status, lease):
     output_tail = deque(maxlen=40)
 
     async def drain(stream, channel):
-        while True:
-            line = await stream.readline()
-            if not line:
-                return
+        async for line in bounded_output_lines(stream):
             text = line.decode(errors='replace').strip()
             parsed_progress = None
             if job['source'] in {'youtube', 'tiktok', 'instagram'}:

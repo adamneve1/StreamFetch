@@ -106,18 +106,105 @@ def positive_int(value):
 
 def create_app(client=None):
     app = Flask(__name__, static_folder='static')
-    idle_lifetime = timedelta(hours=positive_float_env('SESSION_IDLE_HOURS', 24))
-    absolute_lifetime = timedelta(days=positive_float_env('SESSION_ABSOLUTE_DAYS', 30))
+    idle_lifetime = timedelta(hours=positive_float_env('SESSION_IDLE_HOURS', 1))
+    absolute_lifetime = timedelta(days=positive_float_env('SESSION_ABSOLUTE_DAYS', 1))
     app.secret_key = session_secret()
     app.session_interface = HTTPSCookieSessionInterface()
     app.config.update(MAX_CONTENT_LENGTH=16384, SESSION_COOKIE_HTTPONLY=True,
                       SESSION_COOKIE_SAMESITE='Lax', SESSION_COOKIE_PATH='/',
                       SESSION_COOKIE_SECURE=os.getenv('WEB_COOKIE_SECURE') == '1',
-                      SESSION_REFRESH_EACH_REQUEST=True,
+                      SESSION_REFRESH_EACH_REQUEST=False,
                       PERMANENT_SESSION_LIFETIME=idle_lifetime,
                       SESSION_ABSOLUTE_LIFETIME=absolute_lifetime)
     r = client or redis.Redis(host=os.getenv('REDIS_HOST', 'redis'), decode_responses=True,
                              socket_connect_timeout=3, socket_timeout=3)
+
+    def active_job_ids():
+        ids = {r.get('capture:owner')}
+        for payload in r.lrange('download_queue', 0, -1):
+            try:
+                ids.add(json.loads(payload)['job_id'])
+            except (ValueError, KeyError, TypeError):
+                continue
+        ids.discard(None)
+        return ids
+
+    def duplicate_visible(row):
+        """Do not let duplicate discovery broaden existing media visibility."""
+        if session.get('role') == 'admin':
+            return True
+        owner_type, owner_id = row.get('owner_type'), row.get('owner_id')
+        if owner_type or owner_id:
+            return owner_type == 'web' and owner_id == session.get('role', 'user')
+        # Legacy rows predate explicit ownership and retain their existing shared visibility.
+        return True
+
+    def local_media(row):
+        filename = row.get('filename')
+        if not filename or Path(filename).name != filename:
+            return None
+        root = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve()
+        path = root / filename
+        try:
+            if path.parent.resolve() != root or path.is_symlink() or not path.is_file():
+                return None
+            return path.stat()
+        except OSError:
+            return None
+
+    def row_identity(row):
+        source_type = row.get('source_type') or row.get('source')
+        source_id = row.get('source_id')
+        if source_type == 'youtube' and not source_id:
+            source_id = clipper.youtube_video_id((row.get('source_metadata') or {}).get('youtube_id'))
+        return source_type, source_id
+
+    def row_output(row):
+        output = row.get('output_format')
+        if output in {'mp4', 'mp3'}:
+            return output
+        suffix = Path(row.get('filename') or '').suffix.lower().lstrip('.')
+        return suffix if suffix in {'mp4', 'mp3'} else 'mp4'
+
+    def duplicate_payload(row, status, stat=None):
+        metadata = row.get('source_metadata') or {}
+        title = metadata.get('title') or row.get('note') or row.get('filename') or 'Video YouTube'
+        public = {key: row[key] for key in (
+            'job_id', 'source', 'source_type', 'source_id', 'source_name', 'note', 'output_format',
+            'compression', 'quality', 'storage', 'is_live', 'state', 'requested_at', 'size', 'filename',
+        ) if key in row}
+        public['title'] = title
+        if metadata.get('title'):
+            public['source_metadata'] = {'title': metadata['title']}
+        if stat:
+            public['size'] = stat.st_size
+            public['file_date'] = stat.st_mtime
+        return {'status': status, 'job': public}
+
+    def find_duplicate(rows, identity, output_format):
+        if not identity:
+            return None
+        active_ids = None
+        for row in rows:
+            if row.get('is_clip') or not duplicate_visible(row):
+                continue
+            if row_identity(row) != (identity['source_type'], identity['source_id']):
+                continue
+            if row_output(row) != output_format:
+                continue
+            if row.get('state') == 'ready':
+                stat = local_media(row)
+                if stat:
+                    return duplicate_payload(row, 'ready', stat)
+                continue
+            if row.get('state') in {'queued', 'starting', 'recording', 'waiting', 'stopping', 'finalizing'}:
+                active_ids = active_ids if active_ids is not None else active_job_ids()
+                if row.get('job_id') in active_ids:
+                    return duplicate_payload(row, 'processing')
+        return None
+
+    def current_duplicate(identity, output_format):
+        return find_duplicate(storage.recordings(), identity, output_format)
 
     def annotate_attempts(rows):
         """Add public attempt totals/retry eligibility without exposing request URLs."""
@@ -190,11 +277,14 @@ def create_app(client=None):
                 return unauthorized('Sesi kamu sudah habis. Masuk lagi, ya.')
         if request.path != '/api/login' and session.get('auth_version') != auth_version(session.get('role', 'user')):
             return unauthorized('Password akun ini sudah diganti. Yuk, masuk lagi.')
-        if request.path != '/api/login':
-            session['session_last_seen_at'] = time.time()
         if request.method != 'GET' and request.path != '/api/login':
             if not hmac.compare_digest(request.headers.get('X-CSRF-Token', ''), session.get('csrf', 'missing')):
                 return jsonify(error='Sesi kamu sudah habis. Masuk lagi, ya.'), 403
+        if (request.path != '/api/login'
+                and request.headers.get('X-Session-Activity') == '1'
+                and hmac.compare_digest(request.headers.get('X-CSRF-Token', ''),
+                                        session.get('csrf', 'missing'))):
+            session['session_last_seen_at'] = time.time()
 
     @app.after_request
     def headers(response):
@@ -441,6 +531,12 @@ def create_app(client=None):
 
             if source == 'youtube':
                 url = storage.validate_url(str(data.get('url', '')).strip(), youtube=True)
+                identity = storage.source_identity(source, url)
+                duplicate = current_duplicate(identity, output_format)
+                if duplicate:
+                    return jsonify(duplicate=duplicate, estimated_bytes=duplicate['job'].get('size'),
+                                   quality=selected_quality, format=output_format,
+                                   compression=compression, is_live=False)
             elif source == 'tiktok':
                 url = storage.validate_tiktok_url(str(data.get('url', '')).strip())
             elif source == 'instagram':
@@ -570,7 +666,9 @@ def create_app(client=None):
         archive_enabled = os.getenv('ARCHIVE_ENABLED', 'false').lower() in {'1', 'true', 'yes', 'on'}
         if storage_target == 'archive' and not archive_enabled:
             raise ValueError('Penyimpanan arsip belum diaktifkan oleh admin.')
+        role = session.get('role', 'user')
         job = dict(job_id=uuid.uuid4().hex, source=source, origin='web', chat_id='web',
+                   owner_type='web', owner_id=role,
                    requested_at=time.time(), note=str(data.get('note', '')).strip()[:500],
                    storage=storage_target, archive=storage_target == 'archive',
                    quality=selected_quality, output_format=output_format,
@@ -588,15 +686,31 @@ def create_app(client=None):
             job.update(url=storage.validate_instagram_url(data.get('url', '').strip()), source_name='Instagram', is_live=False)
         elif source == 'youtube':
             job.update(url=storage.validate_url(data.get('url', '').strip(), youtube=True), source_name='YouTube')
+            identity = storage.source_identity(source, job['url'])
+            if identity:
+                job.update(identity)
         else:
             raise ValueError('Pilih sumber rekaman yang tersedia.')
+        identity = ({'source_type': job['source_type'], 'source_id': job['source_id']}
+                    if job.get('source_type') and job.get('source_id') else None)
+        duplicate = current_duplicate(identity, output_format)
+        if duplicate:
+            return jsonify(duplicate=duplicate)
         if not storage.disk_status()['can_record']:
             return jsonify(error='Ruang penyimpanannya hampir habis. Kosongkan dulu sebelum mulai merekam.'), 507
-        result = r.eval(ADMIT, 0, job['job_id'], json.dumps(job))
+        if identity:
+            result, duplicate = storage.claim_recording(
+                job, lambda rows: find_duplicate(rows, identity, output_format),
+                lambda: r.eval(ADMIT, 0, job['job_id'], json.dumps(job)),
+                'Capture diterima. Menunggu worker…')
+            if result == 'existing':
+                return jsonify(duplicate=duplicate)
+        else:
+            result = r.eval(ADMIT, 0, job['job_id'], json.dumps(job))
         if result != 'accepted':
             return jsonify(error='Masih ada rekaman yang berjalan. Tunggu sampai selesai, ya.' if result == 'busy' else 'Perekamnya belum siap. Coba lagi sebentar atau hubungi admin.'), 409
         storage.save_capture_request(job)
-        telegram_store.subscribe_web(job['job_id'], session.get('role', 'user'))
+        telegram_store.subscribe_web(job['job_id'], role)
         return jsonify(job_id=job['job_id']), 202
 
     @app.post('/api/recordings/<job_id>/retry')
@@ -617,7 +731,8 @@ def create_app(client=None):
             return jsonify(error='Tujuan arsip capture ini sedang tidak tersedia.'), 409
         root = previous['attempt_root_id']
         number = previous['attempt_number'] + 1
-        job = {key: original[key] for key in ('source', 'source_name', 'note', 'storage', 'archive',
+        job = {key: original[key] for key in ('source', 'source_type', 'source_id', 'source_name',
+                                               'owner_type', 'owner_id', 'note', 'storage', 'archive',
                                                'quality', 'output_format', 'compression', 'is_live',
                                                'url', 'stream_url', 'is_clip', 'clip_start', 'clip_end',
                                                'clip_duration', 'source_duration', 'title') if key in original}
@@ -711,6 +826,9 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
             for row in rows:
                 row.pop('download_count', None)
                 row.pop('last_downloaded_at', None)
+        for row in rows:
+            row.pop('owner_type', None)
+            row.pop('owner_id', None)
         return jsonify(recordings=rows[:200], total=len(rows))
 
     @app.post('/api/recordings/<job_id>/transcript')

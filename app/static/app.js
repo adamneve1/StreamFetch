@@ -1,8 +1,11 @@
 const $ = id => document.getElementById(id);
 const motion=window.StreamFetchMotion;
 let csrf='', isAdmin=false, mode='oryx', sources=[], editing='', active=null, online=false, queued=0, pending=false, disk=null, archiveEnabled=false, historyRows=[], refreshId=0, estimateId=0, estimateTimer, lastObservedJob=null;
-let focusedJobId=null, submittedJob=null, focusPending=false;
+let focusedJobId=null, submittedJob=null, focusPending=false, sourceDuplicateJob=null;
 let historyTotal=0;
+let sessionActivityPending=false;
+function noteSessionActivity(event){if(event.isTrusted)sessionActivityPending=true;}
+for(const type of ['pointerdown','keydown','touchstart','wheel'])document.addEventListener(type,noteSessionActivity,{passive:true});
 const routeView=()=>window.location.pathname==='/clipper'?'clipper':'control';
 let clipMetadata=null,clipMetadataRevision=0,clipMetadataTimer=null,clipDurationLock=null,clipSubmitting=false;
 let clipPlayer=null,clipPlayerReady=false,clipPlayerGeneration=0,clipPlayerClock=null,clipPendingSeek=null,clipYoutubeAPIPromise=null,clipPreviewVideoId='',clipRelevantBoundary='start';
@@ -153,6 +156,7 @@ function collapseSource(collapsed,options={}){
  if(motion)motion.source($('capture-panel'),collapsed,change,options);else change();
 }
 function captureSubmitted(result,payload){
+ clearSourceDuplicate();
  focusedJobId=result.job_id;focusPending=true;
  submittedJob={job_id:result.job_id,source:payload.source,note:payload.note,
   quality:payload.quality,output_format:payload.format,compression:payload.compression,
@@ -174,7 +178,9 @@ function captureSubmitted(result,payload){
  $('empty').hidden=true;
 }
 async function api(path, data){
- const response=await fetch('/api/'+path,{method:data===undefined?'GET':'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:data===undefined?undefined:JSON.stringify(data)});
+ const headers={'Content-Type':'application/json','X-CSRF-Token':csrf};
+ if(path!=='login'&&csrf&&sessionActivityPending){headers['X-Session-Activity']='1';sessionActivityPending=false;}
+ const response=await fetch('/api/'+path,{method:data===undefined?'GET':'POST',headers,body:data===undefined?undefined:JSON.stringify(data)});
  const contentType=response.headers.get('content-type')||'';
  let result;
  if(contentType.includes('application/json')){
@@ -189,9 +195,24 @@ async function api(path, data){
  return result;
 }
 function notice(text){$('notice').textContent=text;$('notice').hidden=!text;}
-function showLogin(){const returning=$('login').hidden;closePalette(false);resetToasts();if(returning)motion?.reset();$('workspace').hidden=true;$('login').hidden=false;csrf='';isAdmin=false;active=null;lastObservedJob=null;focusedJobId=null;submittedJob=null;focusPending=false;historyRows=[];collapseSource(false);showSection(routeView());expandedHistoryDetails.clear();if(returning)motion?.loginReveal?.($('login'));$('password').focus({preventScroll:true});}
-function controls(){const canMark=!!active&&active.state==='recording'&&active.is_live!==false;$('mark').disabled=pending||!canMark;$('record').disabled=pending||!online||!disk?.can_record||!!active||queued>0||(mode==='oryx'&&!$('source').value);$('stop').disabled=pending||!active||['stopping','ready','failed'].includes(active.state);updateClipControls();renderOperationalStatus();}
+function showLogin(){const returning=$('login').hidden;closePalette(false);resetToasts();clearSourceDuplicate();if(returning)motion?.reset();$('workspace').hidden=true;$('login').hidden=false;csrf='';isAdmin=false;active=null;lastObservedJob=null;focusedJobId=null;submittedJob=null;focusPending=false;historyRows=[];collapseSource(false);showSection(routeView());expandedHistoryDetails.clear();if(returning)motion?.loginReveal?.($('login'));$('password').focus({preventScroll:true});}
+function controls(){const canMark=!!active&&active.state==='recording'&&active.is_live!==false;$('mark').disabled=pending||!online||!disk?.can_record||!!active||queued>0||(mode==='oryx'&&!$('source').value);$('stop').disabled=pending||!active||['stopping','ready','failed'].includes(active.state);updateClipControls();renderOperationalStatus();}
 function bytes(n=0){return n>=1e9?(n/1e9).toFixed(2)+' GB':(n/1e6).toFixed(1)+' MB';}
+function clearSourceDuplicate(){sourceDuplicateJob=null;$('source-duplicate').hidden=true;$('source-duplicate-download').removeAttribute('href');}
+function showSourceDuplicate(duplicate,route=false){
+ const job=duplicate?.job;if(!job)return clearSourceDuplicate();
+ sourceDuplicateJob=job;$('source-duplicate').hidden=false;
+ const ready=duplicate.status==='ready';
+ $('source-duplicate-heading').textContent=ready?'Sudah ada di StreamFetch':'Video ini sedang diproses';
+ $('source-duplicate-title').textContent=job.title||job.source_metadata?.title||job.note||job.filename||'Video YouTube';
+ const date=job.file_date||job.requested_at;
+ $('source-duplicate-meta').textContent=[ready&&job.size?bytes(job.size):null,date?downloadedAtWIB(date):null].filter(Boolean).join(' · ');
+ $('source-duplicate-preview').hidden=!ready;$('source-duplicate-download').hidden=!ready;
+ if(ready){$('source-duplicate-download').href='/api/files/'+encodeURIComponent(job.filename);$('source-duplicate-download').download=job.filename;}else $('source-duplicate-download').removeAttribute('href');
+ $('source-duplicate-history').textContent=ready?'Lihat di Riwayat':'Lihat proses';
+ controls();
+ if(route){focusedJobId=job.job_id;focusPending=true;clearHistoryFilters(false);if(!ready)lastObservedJob=job;refresh();}
+}
 function stateName(state){return ({queued:'Menunggu',starting:'Menghubungkan',recording:'Berjalan',waiting:'Menunggu YouTube',stopping:'Menghentikan',finalizing:'Memproses',ready:'Siap',failed:'Gagal',interrupted:'Terputus'})[state]||state||'Siap';}
 function isFiniteDownload(job){return ['youtube','tiktok','instagram'].includes(job?.source)&&job.is_live===false;}
 function jobStateName(job){return isFiniteDownload(job)&&job.state==='recording'?'Mengunduh':stateName(job?.state);}
@@ -336,7 +357,7 @@ function editSource(id){editing=id;const s=sources.find(x=>x.id===id);$('source-
 async function loadSources(){const previous=$('source').value; sources=(await api('sources')).sources;$('source').replaceChildren();for(const s of sources){const o=document.createElement('option');o.value=s.id;o.textContent=s.name;$('source').append(o);}if(!sources.length){const o=document.createElement('option');o.value='';o.textContent='Belum ada sumber — tambahkan dulu';$('source').append(o);}if(sources.some(x=>x.id===previous))$('source').value=previous;editSource($('source').value);scheduleEstimate();controls();}
 function estimateText(data){const detail=data.format==='mp3'?' · MP3':data.height?' · '+data.height+'p':'';const compressed=data.compression&&data.compression!=='original';if(data.is_live)return data.bytes_per_hour?'Perkiraan sumber '+bytes(data.bytes_per_hour)+' per jam'+detail+(compressed?' · hasil preset bisa berbeda':''):'Ukuran live bergantung pada durasi dan bitrate sumber'+detail;return data.estimated_bytes?(compressed?'Perkiraan ukuran sumber ':'Perkiraan ukuran ')+bytes(data.estimated_bytes)+detail+(compressed?' · hasil preset bisa berbeda':''):'Ukuran belum tersedia dari sumber'+detail;}
 function sourceInput(){return mode==='oryx'?$('source'):$(mode+'-url');}
-async function estimateSize(){const requestId=++estimateId;const url=mode==='oryx'?'':sourceInput().value.trim();if((mode==='oryx'&&!$('source').value)||(mode!=='oryx'&&!url)){$('size-estimate').textContent='Pilih sumber dulu untuk melihat perkiraan ukurannya.';return;}$('size-estimate').textContent='Lagi menghitung perkiraan ukuran…';try{const data=await api('estimate',{source:mode,source_id:$('source').value,url,quality:$('quality').value,format:$('media-format').value,compression:$('compression').value});if(requestId===estimateId)$('size-estimate').textContent=estimateText(data);}catch(e){if(requestId===estimateId)$('size-estimate').textContent=e.message;}}
+async function estimateSize(){const requestId=++estimateId;const url=mode==='oryx'?'':sourceInput().value.trim();if((mode==='oryx'&&!$('source').value)||(mode!=='oryx'&&!url)){clearSourceDuplicate();$('size-estimate').textContent='Pilih sumber dulu untuk melihat perkiraan ukurannya.';return;}$('size-estimate').textContent='Lagi menghitung perkiraan ukuran…';try{const data=await api('estimate',{source:mode,source_id:$('source').value,url,quality:$('quality').value,format:$('media-format').value,compression:$('compression').value});if(requestId===estimateId){if(data.duplicate)showSourceDuplicate(data.duplicate);else clearSourceDuplicate();$('size-estimate').textContent=estimateText(data);}}catch(e){if(requestId===estimateId){clearSourceDuplicate();$('size-estimate').textContent=e.message;}}}
 function scheduleEstimate(){clearTimeout(estimateTimer);estimateTimer=setTimeout(estimateSize,500);}
 function updateCompressionHint(){
  const audio=mode==='youtube'&&$('media-format').value==='mp3';
@@ -348,7 +369,7 @@ function updateCompressionHint(){
 function updateFormatControls(){const audio=mode==='youtube'&&$('media-format').value==='mp3';$('capture-options').hidden=false;$('format-field').hidden=mode!=='youtube';$('media-options').classList.toggle('has-format',mode==='youtube');$('media-format').disabled=mode!=='youtube';$('quality').disabled=mode==='oryx'||audio;$('compression').disabled=audio;if(mode==='oryx'||audio)$('quality').value='best';if(audio)$('compression').value='original';updateCompressionHint();$('note').placeholder=mode==='youtube'?'Kosongkan untuk memakai judul asli':'Contoh: Batam menyapa';$('filename-hint').textContent='Nama file: DDMMYYNN - '+(mode==='youtube'?'Judul video':'Judul')+'.'+(audio?'mp3':'mp4');$('record').textContent=mode==='youtube'?'Download':'Mulai';}
 const sourceModes=['youtube','tiktok','instagram','oryx'];
 function positionSourceTab(value=mode){const tabs=$('source-tabs'),tab=$('tab-'+value),indicator=$('source-tab-indicator');if(!tabs||!tab||!indicator||!Number.isFinite(tab.offsetLeft)||!tab.offsetWidth)return;indicator.style.left=tab.offsetLeft+'px';indicator.style.width=tab.offsetWidth+'px';tabs.dataset.motionReady='true';}
-function applyMode(value){mode=value;for(const source of sourceModes){$('tab-'+source).setAttribute('aria-pressed',String(source===mode));$('tab-'+source).classList.toggle('selected',source===mode);$(source+'-fields').hidden=source!==mode;}if(mode!=='youtube')$('media-format').value='mp4';updateFormatControls();scheduleEstimate();controls();positionSourceTab();}
+function applyMode(value){mode=value;clearSourceDuplicate();for(const source of sourceModes){$('tab-'+source).setAttribute('aria-pressed',String(source===mode));$('tab-'+source).classList.toggle('selected',source===mode);$(source+'-fields').hidden=source!==mode;}if(mode!=='youtube')$('media-format').value='mp4';updateFormatControls();scheduleEstimate();controls();positionSourceTab();}
 function setMode(value){
  const previous=mode,nextTab=$('tab-'+value),tabs=$('source-tabs');
  if(!tabs.dataset.motionReady)positionSourceTab(previous);
@@ -728,7 +749,9 @@ async function createWatch(){
  catch(error){$('watch-error').textContent=error.message;}
  finally{watchCreating=false;$('watch-form').setAttribute('aria-busy','false');$('watch-create-submit').disabled=false;$('watch-create-cancel').disabled=false;$('watch-create-submit').textContent='Simpan Watch';}
 }
-$('record').onclick=async()=>{if(pending)return;pending=true;$('record').textContent='Mengirim…';$('capture-panel').setAttribute('aria-busy','true');controls();notice('');const payload={source:mode,source_id:$('source').value,url:mode==='oryx'?'':sourceInput().value,note:$('note').value,storage:$('storage-target').value,quality:$('quality').value,format:$('media-format').value,compression:$('compression').value};try{const result=await api('record',payload);captureSubmitted(result,payload);await refresh();}catch(e){collapseSource(false);notice(e.message);}finally{pending=false;updateFormatControls();$('capture-panel').setAttribute('aria-busy','false');controls();}};
+$('record').onclick=async()=>{if(pending)return;pending=true;$('record').textContent='Mengirim…';$('capture-panel').setAttribute('aria-busy','true');controls();notice('');const payload={source:mode,source_id:$('source').value,url:mode==='oryx'?'':sourceInput().value,note:$('note').value,storage:$('storage-target').value,quality:$('quality').value,format:$('media-format').value,compression:$('compression').value};try{const result=await api('record',payload);if(result.duplicate)showSourceDuplicate(result.duplicate,true);else{captureSubmitted(result,payload);await refresh();}}catch(e){collapseSource(false);notice(e.message);}finally{pending=false;updateFormatControls();$('capture-panel').setAttribute('aria-busy','false');controls();}};
+$('source-duplicate-preview').onclick=()=>previewHistoryMedia(sourceDuplicateJob,$('source-duplicate-preview'));
+$('source-duplicate-history').onclick=()=>{if(!sourceDuplicateJob)return;focusedJobId=sourceDuplicateJob.job_id;focusPending=true;clearHistoryFilters(false);showSection('control');renderHistory(historyRows);refresh();};
 $('clip-url').oninput=scheduleClipMetadata;
 $('clip-start').oninput=()=>clipInputChanged('start');$('clip-end').oninput=()=>clipInputChanged('end');
 $('clip-start').onblur=()=>normalizeClipInput('clip-start');$('clip-end').onblur=()=>normalizeClipInput('clip-end');
@@ -752,7 +775,7 @@ $('clip-form').onsubmit=async event=>{
  finally{clipSubmitting=false;$('clip-form').setAttribute('aria-busy','false');$('create-clip').textContent='Create Clip';controls();}
 };
 $('storage-target').onchange=updateStorageHint;
-$('quality').onchange=scheduleEstimate;$('compression').onchange=()=>{updateCompressionHint();scheduleEstimate();};$('media-format').onchange=()=>{updateFormatControls();scheduleEstimate();};$('youtube-url').oninput=scheduleEstimate;$('tiktok-url').oninput=scheduleEstimate;$('instagram-url').oninput=scheduleEstimate;
+$('quality').onchange=()=>{clearSourceDuplicate();scheduleEstimate();};$('compression').onchange=()=>{clearSourceDuplicate();updateCompressionHint();scheduleEstimate();};$('media-format').onchange=()=>{clearSourceDuplicate();updateFormatControls();scheduleEstimate();};$('youtube-url').oninput=()=>{clearSourceDuplicate();scheduleEstimate();};$('tiktok-url').oninput=()=>{clearSourceDuplicate();scheduleEstimate();};$('instagram-url').oninput=()=>{clearSourceDuplicate();scheduleEstimate();};
 $('watch-create').onclick=openWatchForm;$('watch-create-cancel').onclick=closeWatchForm;$('watch-form').onsubmit=event=>{event.preventDefault();return createWatch();};
 for(const id of ['watch-url','watch-date','watch-start','watch-end','watch-mode','watch-auto'])$(id).oninput=()=>{$('watch-error').textContent='';};
 $('watch-day').onchange=()=>{$('watch-date-field').hidden=$('watch-day').value!=='date';$('watch-error').textContent='';};resetWatchForm();$('watch-create-panel').hidden=true;

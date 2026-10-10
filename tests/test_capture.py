@@ -606,6 +606,31 @@ class CaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(public['progress_percent'], 42.5)
         self.assertEqual(public['download_attempts'], 1)
 
+    async def test_capture_handles_oversized_newline_free_subprocess_output(self):
+        job = self.job('youtube')
+        job.update(is_live=False, download_attempt=1, download_attempts=1)
+        lease = asyncio.get_running_loop().create_future()
+        self.addCleanup(lease.cancel)
+        command = [
+            sys.executable, '-c',
+            "import pathlib, sys, time; "
+            "pathlib.Path(sys.argv[1]).write_bytes(b'partial'); "
+            "sys.stdout.buffer.write(b'x' * 131072); "
+            "sys.stdout.buffer.write(b'\\nstreamfetch:none|mp4a| 42.5%\\n'); "
+            "sys.stdout.buffer.flush(); "
+            "sys.stderr.buffer.write(b'WARNING: ' + b'y' * 131072); "
+            "sys.stderr.buffer.flush(); "
+            "time.sleep(1)",
+            str(self.root / 'test-job-140.m4a.part'),
+        ]
+        with patch.object(worker, 'capture_command', return_value=(command, None)):
+            reason = await worker.capture(job, None, lease)
+        self.assertEqual(reason, 'completed')
+        self.assertEqual(job['progress_phase'], 'audio')
+        self.assertEqual(job['progress_percent'], 42.5)
+        self.assertGreaterEqual(len(job['_capture_output']), 5)
+        self.assertLessEqual(max(map(len, job['_capture_output'])), 1210)
+
     async def test_normal_vod_and_active_live_do_not_use_outer_retry(self):
         lease = asyncio.get_running_loop().create_future()
         self.addCleanup(lease.cancel)

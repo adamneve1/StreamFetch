@@ -16,10 +16,8 @@ RUN apt-get update && \
         libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Deno
-RUN curl -fsSL https://deno.land/install.sh | sh
-
-ENV PATH="/root/.deno/bin:${PATH}"
+# Install Deno where the non-root runtime user can execute it.
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
 
 RUN pip install --no-cache-dir --upgrade "yt-dlp[default,curl-cffi]"
 

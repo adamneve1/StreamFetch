@@ -370,20 +370,36 @@ class WebTests(unittest.TestCase):
         self.assertEqual(missing.status_code, 404)
         self.assertTrue(missing.is_json)
 
-    def test_session_idle_timeout_slides_until_absolute_limit(self):
-        now = web.time.time()
+    def test_session_idle_timeout_only_slides_on_explicit_user_activity(self):
         idle_seconds = self.app.config['PERMANENT_SESSION_LIFETIME'].total_seconds()
+        self.assertEqual(idle_seconds, 60 * 60)
+        self.assertFalse(self.app.config['SESSION_REFRESH_EACH_REQUEST'])
         with self.client.session_transaction() as state:
-            state['session_created_at'] = now - 60
-            state['session_last_seen_at'] = now - idle_seconds + 60
-            previous_activity = state['session_last_seen_at']
-        self.assertEqual(self.client.get('/api/session').status_code, 200)
+            state['session_created_at'] = 100.0
+            state['session_last_seen_at'] = 100.0
+        with patch.object(web, 'time') as clock:
+            clock.time.return_value = 200.0
+            poll = self.client.get('/api/session')
+            self.assertEqual(poll.status_code, 200)
+            self.assertNotIn('Set-Cookie', poll.headers)
+            forged = self.client.get('/api/session', headers={
+                'X-CSRF-Token': 'wrong', 'X-Session-Activity': '1'})
+            self.assertEqual(forged.status_code, 200)
         with self.client.session_transaction() as state:
-            self.assertGreater(state['session_last_seen_at'], previous_activity)
-            state['session_last_seen_at'] = web.time.time() - idle_seconds - 1
-        expired = self.client.get('/api/session')
+            self.assertEqual(state['session_last_seen_at'], 100.0)
+        with patch.object(web, 'time') as clock:
+            clock.time.return_value = 200.0
+            active = self.client.get('/api/session', headers={
+                'X-CSRF-Token': self.csrf, 'X-Session-Activity': '1'})
+        self.assertEqual(active.status_code, 200)
+        with self.client.session_transaction() as state:
+            self.assertEqual(state['session_last_seen_at'], 200.0)
+        with patch.object(web, 'time') as clock:
+            clock.time.return_value = 200.0 + idle_seconds
+            expired = self.client.get('/api/session')
         self.assertEqual(expired.status_code, 401)
         self.assertEqual(expired.json, {'error': 'Sesi kamu sudah habis. Masuk lagi, ya.'})
+        self.assertIn('Max-Age=0', expired.headers['Set-Cookie'])
 
     def test_existing_signed_session_is_upgraded_with_lifetime_timestamps(self):
         with self.client.session_transaction() as state:
@@ -396,10 +412,12 @@ class WebTests(unittest.TestCase):
 
     def test_session_absolute_lifetime_does_not_slide(self):
         absolute_seconds = self.app.config['SESSION_ABSOLUTE_LIFETIME'].total_seconds()
+        self.assertEqual(absolute_seconds, 24 * 60 * 60)
         with self.client.session_transaction() as state:
             state['session_created_at'] = web.time.time() - absolute_seconds - 1
             state['session_last_seen_at'] = web.time.time()
-        self.assertEqual(self.client.get('/api/session').status_code, 401)
+        self.assertEqual(self.client.get('/api/session', headers={
+            'X-CSRF-Token': self.csrf, 'X-Session-Activity': '1'}).status_code, 401)
 
     def test_logout_clears_session_and_requires_login_again(self):
         response = self.post('logout', {})
@@ -676,6 +694,142 @@ class WebTests(unittest.TestCase):
         self.assertEqual(job['output_format'], 'mp3')
         self.assertEqual(job['quality'], 'best')
         self.assertEqual(job['compression'], 'original')
+
+    def test_youtube_canonical_identity_ignores_url_noise_and_never_uses_titles(self):
+        video_id = 'abcDEF_1234'
+        for url in (
+                f'https://youtube.com/watch?v={video_id}',
+                f'https://www.youtube.com/watch?v={video_id}&t=90&list=PL123&index=4',
+                f'https://m.youtube.com/watch?index=4&v={video_id}&feature=share',
+                f'https://youtu.be/{video_id}?t=90'):
+            self.assertEqual(storage.source_identity('youtube', url),
+                             {'source_type': 'youtube', 'source_id': video_id})
+        self.assertNotEqual(storage.youtube_source_id('https://youtu.be/abcDEF_1234'),
+                            storage.youtube_source_id('https://youtu.be/xyzDEF_1234'))
+        self.assertEqual(storage.youtube_source_id('https://youtube.com/watch?v=too-short'), '')
+
+        path = Path(self.tmp.name) / 'same title.mp4'
+        path.write_bytes(b'first')
+        storage.save_recording(dict(job_id='first-title', source='youtube', output_format='mp4',
+                                    filename=path.name, note='Exactly the same title',
+                                    source_metadata={'youtube_id': video_id,
+                                                     'title': 'Exactly the same title'}), 'ready')
+        self.redis.set('worker:heartbeat', 1)
+        response = self.post('record', dict(source='youtube',
+                                             url='https://youtu.be/xyzDEF_1234',
+                                             note='Exactly the same title'))
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(json.loads(self.redis.lindex('download_queue', 0))['source_id'],
+                         'xyzDEF_1234')
+
+    def test_ready_canonical_file_is_reused_but_missing_failed_and_other_output_are_not(self):
+        video_id = 'abcDEF_1234'
+        media = Path(self.tmp.name) / 'Dialog Batam.mp4'
+        media.write_bytes(b'canonical-media')
+        storage.save_recording(dict(job_id='ready-canonical', source='youtube', output_format='mp4',
+                                    filename=media.name, requested_at=1_700_000_000,
+                                    source_metadata={'youtube_id': video_id,
+                                                     'title': 'Dialog Batam'}), 'ready')
+        self.redis.set('worker:heartbeat', 1)
+        with patch.object(web.subprocess, 'run') as extractor:
+            resolved = self.post('estimate', dict(source='youtube',
+                                 url=f'https://youtu.be/{video_id}?t=22', format='mp4'))
+        self.assertEqual(resolved.status_code, 200)
+        self.assertEqual(resolved.json['duplicate']['job']['job_id'], 'ready-canonical')
+        extractor.assert_not_called()
+        response = self.post('record', dict(source='youtube',
+                                             url=f'https://www.youtube.com/watch?v={video_id}&t=22&list=PL1&index=2',
+                                             format='mp4'))
+        self.assertEqual(response.status_code, 200)
+        duplicate = response.json['duplicate']
+        self.assertEqual(duplicate['status'], 'ready')
+        self.assertEqual(duplicate['job']['job_id'], 'ready-canonical')
+        self.assertEqual(duplicate['job']['title'], 'Dialog Batam')
+        self.assertEqual(duplicate['job']['size'], len(b'canonical-media'))
+        self.assertNotIn(self.tmp.name, response.get_data(as_text=True))
+        self.assertEqual(self.redis.llen('download_queue'), 0)
+
+        # An incompatible output does not reuse the MP4.
+        audio = self.post('record', dict(source='youtube', url=f'https://youtu.be/{video_id}', format='mp3'))
+        self.assertEqual(audio.status_code, 202)
+        self.assertEqual(json.loads(self.redis.lindex('download_queue', 0))['output_format'], 'mp3')
+
+        # A ready catalogue row whose physical file was deleted permits a new job.
+        self.redis.flushall();self.redis.set('worker:heartbeat', 1)
+        missing_id = 'missing_123'
+        storage.save_recording(dict(job_id='missing-file', source='youtube', source_type='youtube',
+                                    source_id=missing_id, output_format='mp4',
+                                    filename='deleted.mp4'), 'ready')
+        missing = self.post('record', dict(source='youtube', url=f'https://youtu.be/{missing_id}'))
+        self.assertEqual(missing.status_code, 202)
+
+        # Failed jobs likewise never reserve the identity.
+        self.redis.flushall();self.redis.set('worker:heartbeat', 1)
+        failed_id = 'failed__123'
+        storage.save_recording(dict(job_id='failed-canonical', source='youtube', source_type='youtube',
+                                    source_id=failed_id, output_format='mp4'), 'failed')
+        failed = self.post('record', dict(source='youtube', url=f'https://youtu.be/{failed_id}'))
+        self.assertEqual(failed.status_code, 202)
+
+    def test_active_canonical_job_routes_to_existing_progress_without_new_queue_item(self):
+        video_id = 'active__123'
+        job = dict(job_id='active-canonical', source='youtube', source_type='youtube',
+                   source_id=video_id, output_format='mp4', origin='web',
+                   owner_type='web', owner_id='admin')
+        storage.save_recording(job, 'recording')
+        self.redis.set('worker:heartbeat', 1)
+        self.redis.set('capture:owner', job['job_id'])
+        response = self.post('record', dict(source='youtube',
+                                             url=f'https://youtube.com/watch?v={video_id}&index=9'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json['duplicate']['status'], 'processing')
+        self.assertEqual(response.json['duplicate']['job']['job_id'], job['job_id'])
+        self.assertEqual(self.redis.llen('download_queue'), 0)
+
+    def test_duplicate_detection_respects_explicit_web_ownership(self):
+        video_id = 'private_123'
+        media = Path(self.tmp.name) / 'private.mp4'
+        media.write_bytes(b'private')
+        storage.save_recording(dict(job_id='admin-private', source='youtube', source_type='youtube',
+                                    source_id=video_id, output_format='mp4', filename=media.name,
+                                    owner_type='web', owner_id='admin'), 'ready')
+        self.redis.set('worker:heartbeat', 1)
+        user = self.app.test_client()
+        token = user.post('/api/login', json={'password': 'test-password'}).json['csrf']
+        response = user.post('/api/record', json={'source': 'youtube',
+                             'url': f'https://youtu.be/{video_id}'},
+                             headers={'X-CSRF-Token': token})
+        self.assertEqual(response.status_code, 202)
+        self.assertNotIn('duplicate', response.json)
+        queued = json.loads(self.redis.lindex('download_queue', 0))
+        self.assertEqual((queued['owner_type'], queued['owner_id']), ('web', 'user'))
+
+    def test_near_simultaneous_canonical_submissions_create_only_one_job(self):
+        self.redis.set('worker:heartbeat', 1)
+        barrier = __import__('threading').Barrier(2)
+
+        def submit(url):
+            client = self.app.test_client()
+            token = client.post('/api/login', json={'password': 'admin-password'}).json['csrf']
+            barrier.wait()
+            response = client.post('/api/record', json={'source': 'youtube', 'url': url},
+                                   headers={'X-CSRF-Token': token})
+            return response.status_code, response.json
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(submit, [
+                'https://youtube.com/watch?v=racing__123&t=1',
+                'https://youtu.be/racing__123?list=PL1&index=2',
+            ]))
+        self.assertEqual(sorted(status for status, _ in results), [200, 202])
+        duplicate = next(body['duplicate'] for status, body in results if status == 200)
+        accepted = next(body['job_id'] for status, body in results if status == 202)
+        self.assertEqual(duplicate['status'], 'processing')
+        self.assertEqual(duplicate['job']['job_id'], accepted)
+        self.assertEqual(self.redis.llen('download_queue'), 1)
+        canonical = [row for row in storage.recordings()
+                     if row.get('source_id') == 'racing__123']
+        self.assertEqual(len(canonical), 1)
 
     def test_mp3_is_rejected_for_live_sources(self):
         source = self.client.get('/api/sources').json['sources'][0]

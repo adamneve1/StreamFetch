@@ -8,7 +8,7 @@ import math
 import re
 from pathlib import Path
 from contextlib import contextmanager
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 
 @contextmanager
@@ -37,6 +37,8 @@ def validate_url(url, youtube=False):
         raise ValueError('Pakai link playback HTTP, HTTPS, RTMP, RTMPS, atau SRT, ya.')
     if youtube and parsed.hostname.lower() not in {'youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be'}:
         raise ValueError('Masukkan link YouTube yang valid, ya.')
+    if youtube and (parsed.username or parsed.password or parsed.port not in {None, 80, 443}):
+        raise ValueError('Masukkan link YouTube yang valid, ya.')
     # Public RRI Restreamer players use the channel UUID for their HLS path.
     # Restrict conversion to the observed player route on the official host.
     if not youtube and parsed.hostname.lower() == 'public-streaming.rri.go.id':
@@ -48,6 +50,31 @@ def validate_url(url, youtube=False):
     if not youtube and parsed.path.endswith('.html'):
         raise ValueError('Pakai link stream langsung, bukan halaman player.')
     return url
+
+
+def youtube_source_id(url):
+    """Return the stable video id from supported YouTube URL forms."""
+    parsed = urlsplit(validate_url(url, youtube=True))
+    host = parsed.hostname.lower()
+    candidate = ''
+    if host == 'youtu.be':
+        parts = [part for part in parsed.path.split('/') if part]
+        candidate = parts[0] if len(parts) == 1 else ''
+    elif parsed.path.rstrip('/') == '/watch':
+        candidate = (parse_qs(parsed.query).get('v') or [''])[0]
+    else:
+        match = re.fullmatch(r'/(?:shorts|live|embed)/([A-Za-z0-9_-]{11})/?', parsed.path)
+        candidate = match.group(1) if match else ''
+    return candidate if re.fullmatch(r'[A-Za-z0-9_-]{11}', candidate) else ''
+
+
+def source_identity(source, url):
+    """Resolve a generic canonical identity without using titles or filenames."""
+    if source == 'youtube':
+        source_id = youtube_source_id(url)
+        if source_id:
+            return {'source_type': 'youtube', 'source_id': source_id}
+    return None
 
 
 def validate_tiktok_url(url):
@@ -140,29 +167,71 @@ def _recording_data(value):
     return data
 
 
-def save_recording(job, state, detail=''):
+def _recording_payload(job, state, detail, previous_data=None):
     # Never store playback URLs/credentials in catalogue or browser status.
-    data = {key: job[key] for key in ('job_id', 'source', 'source_name', 'note', 'origin', 'storage', 'quality', 'output_format', 'compression', 'is_live', 'is_clip', 'clip_start', 'clip_end', 'clip_duration', 'live_status', 'was_live', 'download_attempt', 'download_attempts', 'download_exit_code', 'requested_at', 'started_at', 'elapsed', 'size', 'filename', 'stop_reason', 'original_filename', 'original_size', 'requested_compression', 'processing_status', 'processing_error', 'processing_detail', 'progress_percent', 'progress_phase', 'eta_seconds', 'silent_video', 'attempt_root_id', 'retry_of', 'attempt_number', 'attempt_total', 'error_code', 'error_title', 'error_message') if key in job}
+    data = {key: job[key] for key in ('job_id', 'source', 'source_type', 'source_id', 'source_name',
+                                      'owner_type', 'owner_id', 'note', 'origin', 'storage', 'quality',
+                                      'output_format', 'compression', 'is_live', 'is_clip', 'clip_start',
+                                      'clip_end', 'clip_duration', 'live_status', 'was_live',
+                                      'download_attempt', 'download_attempts', 'download_exit_code',
+                                      'requested_at', 'started_at', 'elapsed', 'size', 'filename',
+                                      'stop_reason', 'original_filename', 'original_size',
+                                      'requested_compression', 'processing_status', 'processing_error',
+                                      'processing_detail', 'progress_percent', 'progress_phase',
+                                      'eta_seconds', 'silent_video', 'attempt_root_id', 'retry_of',
+                                      'attempt_number', 'attempt_total', 'error_code', 'error_title',
+                                      'error_message') if key in job}
     data.update(state=state, detail=detail)
     if isinstance(job.get('source_metadata'), dict):
         data['source_metadata'] = {key: job['source_metadata'][key]
                                    for key in ('title', 'description', 'channel', 'upload_date', 'youtube_id',
                                                'uploader', 'uploader_id', 'timestamp', 'duration', 'id')
                                    if key in job['source_metadata']}
+    previous_data = previous_data or {}
+    if 'source_metadata' not in data and previous_data.get('source_metadata') is not None:
+        data['source_metadata'] = previous_data['source_metadata']
+    data['download_count'] = previous_data.get('download_count', 0)
+    data['last_downloaded_at'] = previous_data.get('last_downloaded_at')
+    return data
+
+
+def _save_recording(db, job, state, detail=''):
+    previous = db.execute('SELECT data FROM recordings WHERE id=?',
+                          (job['job_id'],)).fetchone()
+    previous_data = _recording_data(previous['data']) if previous else {}
+    data = _recording_payload(job, state, detail, previous_data)
+    db.execute('INSERT INTO recordings VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET updated=excluded.updated, data=excluded.data', (job['job_id'], time.time(), json.dumps(data)))
+
+
+def save_recording(job, state, detail=''):
     with connection() as db:
-        previous = db.execute('SELECT data FROM recordings WHERE id=?',
-                              (job['job_id'],)).fetchone()
-        previous_data = _recording_data(previous['data']) if previous else {}
-        if 'source_metadata' not in data and previous_data.get('source_metadata') is not None:
-            data['source_metadata'] = previous_data['source_metadata']
-        data['download_count'] = previous_data.get('download_count', 0)
-        data['last_downloaded_at'] = previous_data.get('last_downloaded_at')
-        db.execute('INSERT INTO recordings VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET updated=excluded.updated, data=excluded.data', (job['job_id'], time.time(), json.dumps(data)))
+        _save_recording(db, job, state, detail)
+
+
+def claim_recording(job, matcher, admit, detail='Menunggu worker…'):
+    """Atomically check canonical History and admit one new canonical job.
+
+    The SQLite write lock spans the duplicate check and Redis admission callback,
+    making the existing recordings catalogue the race-safe claim rather than
+    introducing a second media index.
+    """
+    with connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        rows = [_recording_data(row['data']) for row in
+                db.execute('SELECT data FROM recordings ORDER BY updated DESC')]
+        existing = matcher(rows)
+        if existing:
+            return 'existing', existing
+        result = admit()
+        if result == 'accepted':
+            _save_recording(db, job, 'queued', detail)
+        return result, None
 
 
 def save_capture_request(job):
     """Persist retry inputs privately; URLs never join the public catalogue payload."""
-    allowed = ('source', 'source_name', 'note', 'storage', 'archive', 'quality',
+    allowed = ('source', 'source_type', 'source_id', 'source_name', 'owner_type', 'owner_id',
+               'note', 'storage', 'archive', 'quality',
                'output_format', 'compression', 'is_live', 'url', 'stream_url',
                'is_clip', 'clip_start', 'clip_end', 'clip_duration',
                'source_duration', 'title')
