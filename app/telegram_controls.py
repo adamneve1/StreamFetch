@@ -10,16 +10,18 @@ import time
 import uuid
 from datetime import datetime
 from functools import wraps
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 try:
-    from . import storage, telegram_store, transcription_queue, watch_service
+    from . import storage, telegram_store, transcription_queue, watch_service, youtube_transcript
 except ImportError:
     import storage
     import telegram_store
     import transcription_queue
     import watch_service
+    import youtube_transcript
 
 log = logging.getLogger(__name__)
 WIB = watch_service.WIB
@@ -141,6 +143,24 @@ def transcript_button(row):
             and (row.get('transcript') or {}).get('status') not in {'queued', 'transcribing', 'completed'}):
         return InlineKeyboardMarkup([[InlineKeyboardButton('Transcribe', callback_data='transcribe:' + row['job_id'])]])
     return None
+
+
+def transcript_task_key(video_id, user_id):
+    return f'transcript-only:{video_id}:{user_id}'
+
+
+def telegram_transcript_accessible(row, user_id, chat_id):
+    owner_type, owner_id = row.get('owner_type'), row.get('owner_id')
+    if not owner_type and owner_id is None:
+        return True
+    if owner_type == 'telegram':
+        return str(owner_id) == str(user_id)
+    return telegram_store.web_destination(owner_id) == dict(user_id=user_id, chat_id=chat_id)
+
+
+def transcript_source_label(source):
+    return {'manual': 'subtitle manual', 'auto': 'subtitle otomatis',
+            'ai': 'AI'}.get(source, source or 'tidak diketahui')
 
 
 def safe_notice(value):
@@ -345,6 +365,210 @@ class Controls:
                 telegram_store.update_watch(watch['id'], cancelled_notice=True)
             return
         await update.effective_message.reply_text('Watch tidak ditemukan.')
+
+    @staticmethod
+    def mode_buttons():
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton('Download', callback_data='mode:download'),
+            InlineKeyboardButton('Transcript Only', callback_data='mode:transcript'),
+        ]])
+
+    @staticmethod
+    def ai_buttons(video_id):
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton('Use AI transcription', callback_data='transcriptai:' + video_id),
+            InlineKeyboardButton('Cancel', callback_data='transcriptcancel:' + video_id),
+        ]])
+
+    @authorized
+    async def mode_callback(self, update, context):
+        query = update.callback_query
+        await query.answer()
+        match = re.fullmatch(r'mode:(download|transcript)', query.data or '')
+        if not match:
+            return
+        context.user_data['url_mode'] = match[1]
+        await query.message.reply_text(
+            'Transcript Only aktif · kirim URL YouTube.' if match[1] == 'transcript'
+            else 'Download aktif · kirim URL YouTube, TikTok, atau Instagram.',
+            reply_markup=self.mode_buttons())
+
+    @staticmethod
+    def _transcript_job(task):
+        return dict(job_id=task['job_id'], source='youtube', source_type='youtube',
+                    source_id=task['video_id'], source_name='YouTube',
+                    owner_type='telegram', owner_id=str(task['user_id']),
+                    origin='telegram_transcript', transcript_only=True,
+                    requested_at=task['requested_at'], note=task.get('title') or '',
+                    source_metadata=task.get('source_metadata') or {'youtube_id': task['video_id']})
+
+    async def _request_ai_consent(self, message, key, task):
+        task['state'] = 'awaiting_consent'
+        telegram_store.save_task(key, task)
+        await message.reply_text(
+            'Subtitle manual maupun otomatis tidak tersedia atau diblokir. '
+            'Gunakan AI? Audio sementara akan dihapus setelah proses selesai.',
+            reply_markup=self.ai_buttons(task['video_id']))
+
+    async def transcript_only(self, update, url):
+        """Resolve subtitles first; AI is never entered without a callback consent."""
+        message = update.effective_message
+        video_id = storage.youtube_source_id(url)
+        if not video_id:
+            await message.reply_text('❌ Transcript Only memerlukan URL video YouTube yang valid.')
+            return
+        user_id, chat_id = update.effective_user.id, update.effective_chat.id
+        accessible = lambda row: telegram_transcript_accessible(row, user_id, chat_id)
+        cached = youtube_transcript.find_cached(video_id, 'id', accessible)
+        if cached:
+            source = transcript_source_label((cached.get('transcript') or {}).get('source'))
+            await message.reply_text(f'Transkrip sudah tersedia · sumber: {source}.',
+                                     reply_markup=self.view_button(cached['job_id']))
+            return
+        key = transcript_task_key(video_id, user_id)
+        task = dict(job_id=uuid.uuid4().hex, video_id=video_id, url=url, user_id=user_id,
+                    chat_id=chat_id, requested_at=time.time(), state='probing')
+        if not telegram_store.claim_task(key, task):
+            current = telegram_store.task(key) or {}
+            row = storage.recording(current.get('job_id', ''))
+            transcript = (row or {}).get('transcript') or {}
+            if transcript.get('status') == 'completed':
+                telegram_store.delete_task(key)
+                await message.reply_text('Transkrip sudah tersedia.',
+                                         reply_markup=self.view_button(row['job_id']))
+            elif current.get('state') == 'awaiting_consent' or transcript.get('status') == 'failed':
+                await self._request_ai_consent(message, key, current)
+            else:
+                await message.reply_text('Permintaan Transcript Only untuk video ini sedang diproses.')
+            return
+        try:
+            metadata = await asyncio.to_thread(youtube_transcript.probe, url)
+            choice = youtube_transcript.select_subtitle(metadata)
+            task.update(title=metadata.get('title') or '',
+                        source_metadata=youtube_transcript.public_metadata(metadata, video_id),
+                        language=(choice.language if choice else
+                                  metadata.get('language') or metadata.get('original_language') or 'id'))
+            cached = youtube_transcript.find_cached(video_id, task['language'], accessible)
+            if cached:
+                telegram_store.delete_task(key)
+                source = transcript_source_label((cached.get('transcript') or {}).get('source'))
+                await message.reply_text(f'Transkrip sudah tersedia · sumber: {source}.',
+                                         reply_markup=self.view_button(cached['job_id']))
+                return
+            if choice:
+                content = await asyncio.to_thread(
+                    youtube_transcript.download_subtitle, url, video_id, choice)
+                row = await asyncio.to_thread(
+                    youtube_transcript.publish, self._transcript_job(task), choice, content)
+                telegram_store.delete_task(key)
+                await message.reply_text(
+                    f'Transkrip siap · sumber: {transcript_source_label(choice.source)} '
+                    f'({choice.language}).', reply_markup=self.view_button(row['job_id']))
+                return
+        except Exception as exc:
+            log.warning('youtube subtitle ingestion unavailable video=%s error_type=%s',
+                        video_id, type(exc).__name__)
+        await self._request_ai_consent(message, key, task)
+
+    @authorized
+    async def transcript_ai_callback(self, update, context):
+        query = update.callback_query
+        await query.answer()
+        match = re.fullmatch(r'transcriptai:([A-Za-z0-9_-]{11})', query.data or '')
+        if not match:
+            return
+        video_id = match[1]
+        key = transcript_task_key(video_id, update.effective_user.id)
+        task = telegram_store.task(key)
+        if (not task or task.get('chat_id') != update.effective_chat.id
+                or task.get('user_id') != update.effective_user.id):
+            await query.message.reply_text('Permintaan Transcript Only tidak ditemukan atau sudah selesai.')
+            return
+        if task.get('state') == 'probing':
+            await query.message.reply_text('Subtitle masih diperiksa. Tunggu hasilnya sebelum memilih AI.')
+            return
+        lock_key = 'transcript-only-ai:' + task['job_id']
+        lock_token = uuid.uuid4().hex
+        try:
+            acquired = self.client.set(lock_key, lock_token, nx=True, ex=330)
+        except Exception:
+            acquired = False
+        if not acquired:
+            await query.message.reply_text('Persiapan transkripsi AI sedang diproses.')
+            return
+        temporary = None
+        try:
+            row = storage.recording(task['job_id'])
+            transcript = (row or {}).get('transcript') or {}
+            if transcript.get('status') == 'completed':
+                telegram_store.delete_task(key)
+                await query.message.reply_text('Transkrip sudah tersedia.',
+                                               reply_markup=self.view_button(row['job_id']))
+                return
+            if transcript.get('status') in {'queued', 'transcribing'}:
+                await query.message.reply_text('Transkripsi AI sedang diproses.')
+                return
+            temporary = await asyncio.to_thread(
+                youtube_transcript.download_temporary_audio, task['url'], task['job_id'])
+            job = self._transcript_job(task)
+            if not row:
+                storage.save_recording(job, 'ready', 'Transcript Only · menunggu transkripsi AI')
+            storage.save_capture_request({**job, 'url': task['url'],
+                                          'temporary_media_filename': temporary})
+            status, created = transcription_queue.enqueue(self.client, task['job_id'])
+            if not created and status not in {'queued', 'transcribing'}:
+                raise ValueError('Transkrip sudah selesai atau tidak dapat diulang.')
+            telegram_store.subscribe(task['job_id'], task['chat_id'], task['user_id'],
+                                     owner_type='telegram', owner_id=str(task['user_id']),
+                                     monitor_transcript=True)
+            telegram_store.update_task(key, state='ai_queued')
+            await query.message.reply_text('Transkripsi AI masuk antrean. Audio sementara akan dihapus otomatis.')
+        except Exception as exc:
+            current = storage.recording(task['job_id'])
+            status = ((current or {}).get('transcript') or {}).get('status')
+            if status in {'queued', 'transcribing'}:
+                telegram_store.subscribe(task['job_id'], task['chat_id'], task['user_id'],
+                                         owner_type='telegram', owner_id=str(task['user_id']),
+                                         monitor_transcript=True)
+                telegram_store.update_task(key, state='ai_queued')
+                await query.message.reply_text(
+                    'Transkripsi AI tersimpan dan akan dilanjutkan saat antrean tersedia.')
+                return
+            if temporary:
+                candidate = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve() / temporary
+                if Path(temporary).name == temporary and candidate.parent.resolve() == Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve() and not candidate.is_symlink():
+                    candidate.unlink(missing_ok=True)
+            if storage.recording(task['job_id']):
+                storage.save_transcription_state(task['job_id'], 'failed', source='ai',
+                                                 error='Audio atau antrean AI belum dapat disiapkan.')
+            telegram_store.update_task(key, state='awaiting_consent')
+            log.warning('telegram transcript AI admission unavailable video=%s error_type=%s',
+                        video_id, type(exc).__name__)
+            await query.message.reply_text('Transkripsi AI belum dapat dimulai. Coba lagi nanti.',
+                                           reply_markup=self.ai_buttons(video_id))
+        finally:
+            try:
+                if self.client.get(lock_key) == lock_token:
+                    self.client.delete(lock_key)
+            except Exception:
+                pass
+
+    @authorized
+    async def transcript_cancel_callback(self, update, context):
+        query = update.callback_query
+        await query.answer()
+        match = re.fullmatch(r'transcriptcancel:([A-Za-z0-9_-]{11})', query.data or '')
+        if not match:
+            return
+        key = transcript_task_key(match[1], update.effective_user.id)
+        task = telegram_store.task(key)
+        if (task and task.get('chat_id') == update.effective_chat.id
+                and task.get('user_id') == update.effective_user.id
+                and task.get('state') == 'awaiting_consent'):
+            telegram_store.delete_task(key)
+            await query.message.reply_text('Transcript Only dibatalkan. Tidak ada audio yang diunduh.')
+        else:
+            await query.message.reply_text('Permintaan tidak ditemukan atau sudah diproses.')
 
     @authorized
     async def transcribe(self, update, context):
@@ -575,12 +799,29 @@ class Controls:
                     button = self.view_button(row['job_id'])
                 except ValueError:
                     button = None
-                await bot.send_message(task['chat_id'], 'Transkripsi selesai.', reply_markup=button)
+                source = transcript_source_label(transcript.get('source'))
+                await bot.send_message(task['chat_id'],
+                                       ('Transkripsi selesai · sumber: ' + source + '.'
+                                        if row.get('transcript_only') else 'Transkripsi selesai.'),
+                                       reply_markup=button)
+                if row.get('transcript_only') and youtube_transcript.video_id_for(row):
+                    telegram_store.delete_task(transcript_task_key(
+                        youtube_transcript.video_id_for(row), task['user_id']))
             elif status == 'failed':
-                await bot.send_message(task['chat_id'], 'Transkripsi gagal. Coba /transcribe untuk retry.'
-                                       + ('\n' + safe_notice(transcript['error']) if transcript.get('error') else ''))
+                retry = (self.ai_buttons(youtube_transcript.video_id_for(row))
+                         if row.get('transcript_only') and youtube_transcript.video_id_for(row) else None)
+                await bot.send_message(task['chat_id'],
+                                       ('Transkripsi gagal. Gunakan tombol untuk mencoba AI lagi.'
+                                        if retry else 'Transkripsi gagal. Coba /transcribe untuk retry.')
+                                       + ('\n' + safe_notice(transcript['error']) if transcript.get('error') else ''),
+                                       reply_markup=retry)
             elif status == 'cancelled':
-                await bot.send_message(task['chat_id'], 'Transkripsi dibatalkan. Gunakan /transcribe untuk mulai lagi.')
+                retry = (self.ai_buttons(youtube_transcript.video_id_for(row))
+                         if row.get('transcript_only') and youtube_transcript.video_id_for(row) else None)
+                await bot.send_message(task['chat_id'],
+                                       ('Transkripsi dibatalkan. Gunakan tombol untuk mulai lagi.'
+                                        if retry else 'Transkripsi dibatalkan. Gunakan /transcribe untuk mulai lagi.'),
+                                       reply_markup=retry)
             telegram_store.checkpoint_subscription(key, transcript_notice=status,
                                                   transcript_request_notice=request_id)
 

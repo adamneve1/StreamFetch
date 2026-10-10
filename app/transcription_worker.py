@@ -214,6 +214,18 @@ def safe_media_path(filename):
     return path
 
 
+def temporary_media_path(job_id, row=None):
+    row = row or storage.recording(job_id) or {}
+    if not row.get('transcript_only'):
+        return None
+    filename = (storage.capture_request(job_id) or {}).get('temporary_media_filename')
+    if not filename or Path(filename).name != filename:
+        return None
+    root = DOWNLOAD_DIR.resolve()
+    path = root / filename
+    return path if path.parent.resolve() == root and not path.is_symlink() else None
+
+
 def ensure_audio_stream(path):
     try:
         result = subprocess.run(
@@ -714,6 +726,7 @@ def transcribe(job, model=None, cancel_event=None):
     provider = None
     active_model = MODEL_NAME
     last_progress = 0.0
+    temporary_media = None
     current = storage.recording(job_id) or {}
     request_id = job.get('request_id', (current.get('transcript') or {}).get('request_id'))
     guard = dict(guarded=True, request_id=request_id)
@@ -738,7 +751,9 @@ def transcribe(job, model=None, cancel_event=None):
         row = storage.recording(job_id)
         if not row or row.get("state") != "ready":
             raise TranscriptionError("Rekaman belum siap untuk ditranskripsi.")
-        media_path = safe_media_path(row.get("filename"))
+        temporary_media = temporary_media_path(job_id, row)
+        media_filename = temporary_media.name if temporary_media else row.get("filename")
+        media_path = safe_media_path(media_filename)
         ensure_audio_stream(media_path)
 
         if provider in {"auto", "cloudflare"}:
@@ -808,6 +823,8 @@ def transcribe(job, model=None, cancel_event=None):
             job_id, provider or "unknown", type(exc).__name__,
             time.time() - started)
     finally:
+        if temporary_media:
+            temporary_media.unlink(missing_ok=True)
         current = storage.recording(job_id)
         if current and (current.get("transcript") or {}).get("status") in {"failed", "cancelled"}:
             try:
@@ -859,6 +876,11 @@ def run_cancellable_job(job, process_factory=None):
     job.setdefault('request_id', transcript.get('request_id'))
     cancelled = PersistentCancellation(job)
     if cancelled.is_set():
+        if (transcript.get('status') == 'cancelled'
+                and transcript.get('request_id') == job.get('request_id')):
+            temporary = temporary_media_path(job['job_id'])
+            if temporary:
+                temporary.unlink(missing_ok=True)
         return
     working_dir = tempfile.TemporaryDirectory(prefix='streamfetch-transcription-job-')
     job['_temp_dir'] = working_dir.name
@@ -887,6 +909,9 @@ def run_cancellable_job(job, process_factory=None):
                 process.join()
         process.close()
         working_dir.cleanup()
+        temporary = temporary_media_path(job['job_id'])
+        if temporary:
+            temporary.unlink(missing_ok=True)
 
 
 def queued_job_ids():

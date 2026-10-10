@@ -71,7 +71,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/record - rekam live Oryx yang dikonfigurasi\n"
         "/stop - hentikan capture\n"
         "/watch · /watchlist · /cancelwatch\n"
-        "/transcribe - pilih rekaman"
+        "/transcribe - pilih rekaman",
+        reply_markup=controls.mode_buttons(),
     )
 
 
@@ -134,6 +135,15 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     url = update.message.text.strip()
+
+    if getattr(context, 'user_data', {}).get('url_mode') == 'transcript':
+        try:
+            url = storage.validate_url(url, youtube=True)
+        except ValueError:
+            await update.message.reply_text('❌ Transcript Only memerlukan URL video YouTube yang valid.')
+            return
+        await controls.transcript_only(update, url)
+        return
 
     source = 'youtube'
     try:
@@ -206,6 +216,9 @@ def main():
     app.add_handler(CommandHandler('watchlist', controls.watchlist))
     app.add_handler(CommandHandler('cancelwatch', controls.cancelwatch))
     app.add_handler(CallbackQueryHandler(controls.cancelwatch_callback, pattern=r'^watchcancel:'))
+    app.add_handler(CallbackQueryHandler(controls.mode_callback, pattern=r'^mode:'))
+    app.add_handler(CallbackQueryHandler(controls.transcript_ai_callback, pattern=r'^transcriptai:'))
+    app.add_handler(CallbackQueryHandler(controls.transcript_cancel_callback, pattern=r'^transcriptcancel:'))
     app.add_handler(CommandHandler('transcribe', controls.transcribe))
     app.add_handler(CallbackQueryHandler(controls.callback, pattern=r'^transcribe:'))
     app.add_handler(CallbackQueryHandler(controls.watch_callback, pattern=r'^watch:'))

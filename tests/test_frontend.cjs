@@ -94,6 +94,16 @@ test('one transcript CTA follows all lifecycle states without provider details',
     if(status==='completed')assert.equal(box.querySelector('a').href,'/api/recordings/transcript/transcript/view');
   }
 });
+test('Transcript Only History reuses the Reader without inventing a media download',()=>{
+ const f=fixture();
+ f.run(`renderHistory([{job_id:'subtitle',source:'youtube',source_id:'abcdefghijk',state:'ready',transcript_only:true,source_metadata:{title:'Dialog Batam'},transcript:{status:'completed',source:'manual',language:'id'}}])`);
+ const row=f.get('results').children[0];
+ assert.equal(row.querySelector('.recording-heading').querySelector('strong').textContent,'Dialog Batam');
+ assert.equal(row.querySelector('.preset-badge').textContent,'Transcript Only');
+ assert.equal(row.querySelector('.transcript-cta').textContent,'View Transcript');
+ assert.equal(row.querySelector('.download-direct'),null);
+ assert.equal(row.querySelector('.media-preview-direct'),null);
+});
 test('ETA is rounded, ages from its last update, and handles legacy missing estimates',()=>{
   const f=fixture();
   assert.equal(f.run('transcriptETA({})'),'Estimating time…');

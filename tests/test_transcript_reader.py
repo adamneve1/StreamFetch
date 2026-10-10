@@ -64,6 +64,11 @@ class ReaderTests(unittest.TestCase):
         self.row['source'] = 'oryx'
         self.assertIsNone(transcript_reader.reader_data(self.row, self.root)['youtube_id'])
 
+    def test_reader_exposes_transcript_source_for_subtitle_and_ai_results(self):
+        storage.save_transcription_state('reader-job', 'completed', source='manual',
+                                         txt_filename='reader.txt', srt_filename='reader.srt')
+        self.assertEqual(self.data().json['transcript_source'], 'manual')
+
     def test_legacy_youtube_without_id_does_not_invent_a_player(self):
         self.assertIsNone(self.data().json['youtube_id'])
 

@@ -197,4 +197,5 @@ def reader_data(row, root):
             'segments': segments, 'raw': files['txt'] if files['txt'] is not None
             else '\n'.join(segment['text'] for segment in segments),
             'exports': [kind for kind, content in files.items() if content is not None],
-            'language': transcript.get('language')}
+            'language': transcript.get('language'),
+            'transcript_source': transcript.get('source')}

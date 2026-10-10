@@ -25,7 +25,15 @@ def enqueue(client, job_id):
         db.execute('BEGIN IMMEDIATE')
         found = db.execute('SELECT data FROM recordings WHERE id=?', (job_id,)).fetchone()
         row = json.loads(found['data']) if found else {}
-        if row.get('state') != 'ready' or Path(row.get('filename') or '').suffix.lower() != '.mp4':
+        filename = row.get('filename')
+        if row.get('transcript_only'):
+            request = db.execute('SELECT data FROM capture_requests WHERE id=?',
+                                 (job_id,)).fetchone()
+            filename = (json.loads(request['data']).get('temporary_media_filename')
+                        if request else None)
+        supported = {'.mp4'} if not row.get('transcript_only') else {
+            '.m4a', '.mp3', '.aac', '.wav', '.ogg', '.opus', '.flac', '.webm'}
+        if row.get('state') != 'ready' or Path(filename or '').suffix.lower() not in supported:
             raise ValueError('Rekaman tidak ditemukan atau belum siap.')
         previous = (row.get('transcript') or {}).get('status')
         if previous in {'queued', 'transcribing', 'completed'}:
@@ -34,8 +42,9 @@ def enqueue(client, job_id):
             client.delete('transcription:guard:' + job_id)
         request_id = uuid.uuid4().hex
         now = time.time()
-        row['transcript'] = dict(status='queued', request_id=request_id, updated_at=now, requested_at=now,
-                                 model=os.getenv('WHISPER_MODEL', 'small'), error='')
+        row['transcript'] = dict(status='queued', request_id=request_id, updated_at=now,
+                                 requested_at=now, model=os.getenv('WHISPER_MODEL', 'small'),
+                                 source='ai', error='')
         db.execute('UPDATE recordings SET updated=?, data=? WHERE id=?',
                    (now, json.dumps(row), job_id))
     result = client.eval(TRANSCRIPTION_ADMIT, 0, job_id, json.dumps({'job_id': job_id, 'request_id': request_id}))

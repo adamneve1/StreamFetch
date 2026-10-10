@@ -120,6 +120,20 @@ def save_task(key, value):
                    (key, json.dumps(value)))
 
 
+def claim_task(key, value):
+    """Atomically reserve one private Telegram workflow."""
+    with storage.connection() as db:
+        tables(db)
+        return bool(db.execute('INSERT OR IGNORE INTO telegram_tasks VALUES (?, ?)',
+                               (key, json.dumps(value))).rowcount)
+
+
+def delete_task(key):
+    with storage.connection() as db:
+        tables(db)
+        db.execute('DELETE FROM telegram_tasks WHERE id=?', (key,))
+
+
 def update_task(key, **fields):
     with storage.connection() as db:
         tables(db)

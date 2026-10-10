@@ -172,7 +172,7 @@ def _recording_payload(job, state, detail, previous_data=None):
     data = {key: job[key] for key in ('job_id', 'source', 'source_type', 'source_id', 'source_name',
                                       'owner_type', 'owner_id', 'note', 'origin', 'storage', 'quality',
                                       'output_format', 'compression', 'is_live', 'is_clip', 'clip_start',
-                                      'clip_end', 'clip_duration', 'live_status', 'was_live',
+                                      'clip_end', 'clip_duration', 'transcript_only', 'live_status', 'was_live',
                                       'download_attempt', 'download_attempts', 'download_exit_code',
                                       'requested_at', 'started_at', 'elapsed', 'size', 'filename',
                                       'stop_reason', 'original_filename', 'original_size',
@@ -234,7 +234,7 @@ def save_capture_request(job):
                'note', 'storage', 'archive', 'quality',
                'output_format', 'compression', 'is_live', 'url', 'stream_url',
                'is_clip', 'clip_start', 'clip_end', 'clip_duration',
-               'source_duration', 'title')
+               'source_duration', 'title', 'temporary_media_filename')
     data = {key: job[key] for key in allowed if key in job}
     with connection() as db:
         db.execute('INSERT INTO capture_requests VALUES (?, ?, ?) '
@@ -275,6 +275,7 @@ def save_transcription_state(job_id, status, replace=False, guarded=False, reque
         'requested_at', 'started_at', 'completed_at', 'processing_seconds',
         'language', 'language_probability', 'model', 'txt_filename',
         'srt_filename', 'vtt_filename', 'error', 'progress_percent', 'eta_seconds',
+        'source',
     }
     with connection() as db:
         if guarded:

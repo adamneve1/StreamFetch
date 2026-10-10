@@ -146,6 +146,12 @@ test('reader enters after data renders and Back uses shared motion without chang
  assert.ok(!calls[0][3].includes(f.tools),'Reader entry motion must not overwrite the pinned toolbar transform');
  f.back.listeners.click({});assert.equal(calls[1][1],f.back);assert.equal(calls[1][3].direction,'workspace');assert.equal(f.requests.length,1);
 });
+test('Reader identifies manual, automatic, and AI transcript sources',async()=>{
+ for(const [source,label] of [['manual','Manual subtitles'],['auto','Auto-generated subtitles'],['ai','AI transcription']]){
+  const f=await fixture({info:{program:'Dialog',source:'YouTube'},language:'id',transcript_source:source,segments,raw:'TXT',exports:['txt']});
+  assert.match(f.get('reader-source').textContent,new RegExp(label));
+ }
+});
 test('async Reader reveal, search and timestamp changes refresh shared scroll geometry while jumps and seeking remain immediate',async()=>{
  const pins=[],scrolls=[],seeks=[];let refreshes=0,playerOptions;
  const f=await fixture({youtube_id:'abcdefghijk',info:{program:'Long transcript'},segments:Array.from({length:1000},(_,i)=>({start:i*3,end:i*3+2,text:'Halo '+i})),raw:'Halo raw',exports:['txt','srt']},{

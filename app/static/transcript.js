@@ -228,7 +228,8 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
     if(!response.ok){const error=await response.json();throw Error(error.error||'Transkrip tidak dapat dibuka.');}
     data=await response.json();document.title=data.info.program+' · StreamFetch';
     $('reader-title').textContent=data.info.program;
-    $('reader-source').textContent=[data.info.source,data.language,data.info.date_time_label==='Source upload date'?'Source upload date: '+data.info.date_time:''].filter(Boolean).join(' · ');
+    const transcriptSource=({manual:'Manual subtitles',auto:'Auto-generated subtitles',ai:'AI transcription'})[data.transcript_source]||data.transcript_source;
+    $('reader-source').textContent=[data.info.source,data.language,transcriptSource,data.info.date_time_label==='Source upload date'?'Source upload date: '+data.info.date_time:''].filter(Boolean).join(' · ');
     initPlayer(data.youtube_id,data.media_url);
     showInfo(data.info);
     for(const kind of data.exports){const link=document.createElement('a');link.href=base+'/'+kind;link.textContent='Export '+kind.toUpperCase();$('transcript-exports').append(link);}

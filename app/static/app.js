@@ -218,7 +218,7 @@ function isFiniteDownload(job){return ['youtube','tiktok','instagram'].includes(
 function jobStateName(job){return isFiniteDownload(job)&&job.state==='recording'?'Mengunduh':stateName(job?.state);}
 function sourceDisplayName(job){if(job.is_clip&&Number.isFinite(job.clip_start)&&Number.isFinite(job.clip_end))return 'YouTube · '+formatClipTimestamp(job.clip_start)+'–'+formatClipTimestamp(job.clip_end)+' · '+formatClipTimestamp(job.clip_duration);return job.source==='tiktok'&&(!job.source_name||job.source_name==='TikTok Live')?'TikTok':job.source_name||({youtube:'YouTube',oryx:'Oryx',tiktok:'TikTok',instagram:'Instagram'})[job.source]||job.source||'';}
 function statusTone(state){return ({starting:'working',recording:'working',waiting:'waiting',stopping:'waiting',finalizing:'working',ready:'success',failed:'error',interrupted:'error'})[state]||'idle';}
-function presetName(row){if(row.output_format==='mp3'||row.filename?.toLowerCase().endsWith('.mp3'))return 'Audio MP3';return ({original:'Original',balanced:'Seimbang',compact:'Hemat'})[row.compression]||'Preset tidak tercatat';}
+function presetName(row){if(row.transcript_only)return 'Transcript Only';if(row.output_format==='mp3'||row.filename?.toLowerCase().endsWith('.mp3'))return 'Audio MP3';return ({original:'Original',balanced:'Seimbang',compact:'Hemat'})[row.compression]||'Preset tidak tercatat';}
 function duration(n=0){return [Math.floor(n/3600),Math.floor(n/60)%60,Math.floor(n)%60].map(x=>String(x).padStart(2,'0')).join(':');}
 function parseClipTimestamp(value){
  if(typeof value==='number'){if(Number.isInteger(value)&&value>=0)return value;throw Error('Timestamp harus berupa detik positif.');}
@@ -434,10 +434,11 @@ function renderHistory(rows){
   tr.dataset.jobId=row.job_id;
   if(row.job_id===focusedJobId){tr.className='focused-job';tr.tabIndex=-1;tr.setAttribute('aria-label','Capture terbaru');}
   selectCell.className='select-cell';checkbox.type='checkbox';checkbox.className='history-select';checkbox.value=row.job_id;
-  checkbox.checked=selection.has(row.job_id);checkbox.setAttribute('aria-label','Pilih '+(row.filename||'riwayat'));checkbox.onchange=updateDeleteControls;
+  const rowTitle=row.filename||row.source_metadata?.title||row.note||'Rekaman '+row.job_id.slice(0,8);
+  checkbox.checked=selection.has(row.job_id);checkbox.setAttribute('aria-label','Pilih '+rowTitle);checkbox.onchange=updateDeleteControls;
   const selectionLabel=document.createElement('label');selectionLabel.className='history-selection';selectionLabel.append(checkbox);selectCell.append(selectionLabel);tr.append(selectCell);
   const file=document.createElement('td'),strong=document.createElement('strong'),small=document.createElement('small');
-  strong.textContent=row.filename||'Rekaman '+row.job_id.slice(0,8);strong.title=strong.textContent;
+  strong.textContent=rowTitle;strong.title=strong.textContent;
   small.className=row.state==='failed'?'capture-failure-message':'';
   small.textContent=row.state==='failed'?captureFailureMessage(row):row.processing_detail||row.note||(row.state==='interrupted'?'Proses belum selesai. Buka detail untuk melihat penyebab.':row.detail||'Tanpa catatan');
   small.title=row.state==='failed'?small.textContent:row.note||row.error_message||(!row.error_title?row.detail:'');

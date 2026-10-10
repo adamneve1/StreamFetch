@@ -80,6 +80,27 @@ class TranscriptionWorkerTests(unittest.TestCase):
         self.assertEqual(transcription_queue.cancel(self.redis, 'video-job'), ('completed', False))
         self.assertTrue(self.path.with_suffix('.txt').exists())
 
+    def test_cancelled_transcript_only_input_is_cleaned_without_deleting_retry_audio(self):
+        job_id = 'temporary-cancelled'
+        audio = Path(self.tmp.name) / f'transcript-ai-{job_id}.m4a'
+        audio.write_bytes(b'temporary audio')
+        storage.save_recording(dict(job_id=job_id, source='youtube', source_type='youtube',
+                                    source_id='abcdefghijk', transcript_only=True), 'ready')
+        storage.save_capture_request(dict(job_id=job_id, source='youtube',
+                                           temporary_media_filename=audio.name))
+        transcription_queue.enqueue(self.redis, job_id)
+        old = storage.recording(job_id)['transcript']['request_id']
+        transcription_queue.cancel(self.redis, job_id, old)
+        transcription_worker.run_cancellable_job(dict(job_id=job_id, request_id=old),
+            lambda **kwargs: self.fail('Cancelled queue executed'))
+        self.assertFalse(audio.exists())
+
+        audio.write_bytes(b'retry audio')
+        transcription_queue.enqueue(self.redis, job_id)
+        transcription_worker.run_cancellable_job(dict(job_id=job_id, request_id=old),
+            lambda **kwargs: self.fail('Stale queue executed'))
+        self.assertTrue(audio.exists())
+
     def test_cancellation_at_publication_boundary_never_publishes_partial_sidecars(self):
         transcription_queue.enqueue(self.redis, 'video-job')
         job = dict(job_id='video-job', request_id=storage.recording('video-job')['transcript']['request_id'])
@@ -204,6 +225,29 @@ class TranscriptionWorkerTests(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), original)
         self.assertFalse(self.path.with_suffix('.txt').exists())
         self.assertFalse(self.redis.exists('transcription:guard:video-job'))
+
+    def test_transcript_only_ai_removes_temporary_audio_after_success_and_failure(self):
+        for job_id, model, expected in [
+                ('temporary-success', FakeModel(), 'completed'),
+                ('temporary-failure', FakeModel(RuntimeError('private detail')), 'failed')]:
+            with self.subTest(job_id=job_id):
+                audio = Path(self.tmp.name) / f'transcript-ai-{job_id}.m4a'
+                audio.write_bytes(b'temporary audio')
+                storage.save_recording(dict(job_id=job_id, source='youtube',
+                                            source_type='youtube', source_id='abcdefghijk',
+                                            transcript_only=True), 'ready')
+                storage.save_capture_request(dict(job_id=job_id, source='youtube',
+                                                   url='https://youtu.be/abcdefghijk',
+                                                   temporary_media_filename=audio.name))
+                transcription_queue.enqueue(self.redis, job_id)
+                request_id = storage.recording(job_id)['transcript']['request_id']
+                transcription_worker.transcribe({'job_id': job_id, 'request_id': request_id}, model)
+                transcript = storage.recording(job_id)['transcript']
+                self.assertEqual(transcript['status'], expected)
+                self.assertEqual(transcript['source'], 'ai')
+                self.assertFalse(audio.exists())
+                self.assertEqual(Path(self.tmp.name, f'transcript-ai-{job_id}.txt').exists(),
+                                 expected == 'completed')
 
     def test_missing_video_is_reported_as_failed(self):
         self.path.unlink()

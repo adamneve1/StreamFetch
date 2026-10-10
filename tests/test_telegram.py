@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 import fakeredis
 
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', '123456:TEST_TOKEN')
-from app import bot, storage, telegram_controls as tc, telegram_store as store, transcription_queue, watch_service, web, worker
+from app import bot, storage, telegram_controls as tc, telegram_store as store, transcription_queue, watch_service, web, worker, youtube_transcript
 
 
 class TelegramTests(unittest.IsolatedAsyncioTestCase):
@@ -572,6 +572,125 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         await self.controls.callback(update, self.context)
         self.assertEqual(update.message.reply_text.call_args.kwargs['reply_markup'].inline_keyboard[0][0].text, 'View Transcript')
 
+    async def test_transcript_only_reuses_accessible_cache_without_ytdlp_or_download(self):
+        storage.save_recording(dict(job_id='cached', source='youtube', source_type='youtube',
+                                    source_id='abcdefghijk', transcript_only=True,
+                                    owner_type='telegram', owner_id='7'), 'ready')
+        storage.save_transcription_state('cached', 'completed', language='id', source='manual',
+                                         txt_filename='cached.txt', srt_filename='cached.srt')
+        Path(self.tmp.name, 'cached.txt').write_text('cached')
+        storage.save_recording(dict(job_id='foreign', source='youtube', source_type='youtube',
+                                    source_id='bbbbbbbbbbb', transcript_only=True,
+                                    owner_type='telegram', owner_id='8'), 'ready')
+        storage.save_transcription_state('foreign', 'completed', language='id', source='manual')
+        update = self.update('https://youtu.be/abcdefghijk')
+        with patch.object(youtube_transcript, 'probe') as probe, \
+                patch.object(youtube_transcript, 'download_temporary_audio') as audio:
+            await self.controls.transcript_only(update, update.message.text)
+        probe.assert_not_called();audio.assert_not_called()
+        self.assertIn('sudah tersedia', update.message.reply_text.call_args.args[0])
+        self.assertEqual(update.message.reply_text.call_args.kwargs['reply_markup'].inline_keyboard[0][0].url,
+                         'https://stream.example/api/recordings/cached/transcript/view')
+
+    async def test_transcript_only_publishes_subtitles_without_media_or_ai(self):
+        metadata = {'id': 'abcdefghijk', 'title': 'Dialog', 'language': 'id',
+                    'subtitles': {'id': [{'ext': 'vtt'}]}, 'automatic_captions': {}}
+        subtitle = 'WEBVTT\n\n00:00:01.000 --> 00:00:02.500\nHalo Batam\n'
+        update = self.update('https://youtube.com/watch?v=abcdefghijk')
+        with patch.object(youtube_transcript, 'probe', return_value=metadata), \
+                patch.object(youtube_transcript, 'download_subtitle', return_value=subtitle), \
+                patch.object(youtube_transcript, 'download_temporary_audio') as audio:
+            await self.controls.transcript_only(update, update.message.text)
+        audio.assert_not_called()
+        row = next(row for row in storage.recordings() if row.get('source_id') == 'abcdefghijk')
+        self.assertTrue(row['transcript_only'])
+        self.assertNotIn('filename', row)
+        self.assertEqual(row['transcript']['source'], 'manual')
+        self.assertEqual(self.redis.llen('download_queue'), 0)
+        self.assertEqual(self.redis.llen('transcription_queue'), 0)
+        self.assertIn('subtitle manual', update.message.reply_text.call_args.args[0])
+
+    async def test_missing_subtitles_require_consent_before_ai_and_deduplicate_requests(self):
+        metadata = {'id': 'abcdefghijk', 'title': 'Blocked', 'language': 'en',
+                    'subtitles': {}, 'automatic_captions': {}}
+        update = self.update('https://youtu.be/abcdefghijk')
+        with patch.object(youtube_transcript, 'probe', return_value=metadata), \
+                patch.object(youtube_transcript, 'download_temporary_audio') as audio:
+            await self.controls.transcript_only(update, update.message.text)
+            await self.controls.transcript_only(update, update.message.text)
+        audio.assert_not_called()
+        self.assertEqual(self.redis.llen('transcription_queue'), 0)
+        self.assertEqual(len([key for key, _ in store.tasks() if key.startswith('transcript-only:')]), 1)
+        buttons = update.message.reply_text.call_args.kwargs['reply_markup'].inline_keyboard[0]
+        self.assertEqual([button.callback_data for button in buttons],
+                         ['transcriptai:abcdefghijk', 'transcriptcancel:abcdefghijk'])
+
+    async def test_old_ai_button_cannot_bypass_a_fresh_subtitle_probe(self):
+        task = dict(job_id='probing-job', video_id='abcdefghijk',
+                    url='https://youtu.be/abcdefghijk', user_id=7, chat_id=77,
+                    requested_at=100, state='probing')
+        store.save_task(tc.transcript_task_key('abcdefghijk', 7), task)
+        update = self.update(callback='transcriptai:abcdefghijk')
+        with patch.object(youtube_transcript, 'download_temporary_audio') as download:
+            await self.controls.transcript_ai_callback(update, self.context)
+        download.assert_not_called()
+        self.assertEqual(self.redis.llen('transcription_queue'), 0)
+        self.assertIn('Subtitle masih diperiksa', update.message.reply_text.call_args.args[0])
+
+    async def test_blocked_subtitle_download_falls_back_to_consent_without_media(self):
+        metadata = {'id': 'abcdefghijk', 'language': 'id',
+                    'subtitles': {'id': [{'ext': 'vtt'}]}, 'automatic_captions': {}}
+        update = self.update('https://youtu.be/abcdefghijk')
+        with patch.object(youtube_transcript, 'probe', return_value=metadata), \
+                patch.object(youtube_transcript, 'download_subtitle',
+                             side_effect=youtube_transcript.SubtitleUnavailable('blocked')), \
+                patch.object(youtube_transcript, 'download_temporary_audio') as audio:
+            await self.controls.transcript_only(update, update.message.text)
+        audio.assert_not_called()
+        self.assertEqual(self.redis.llen('transcription_queue'), 0)
+        self.assertIn('tidak tersedia atau diblokir', update.message.reply_text.call_args.args[0])
+
+    async def test_ai_consent_uses_existing_queue_and_retries_without_duplicate_audio(self):
+        task = dict(job_id='ai-job', video_id='abcdefghijk',
+                    url='https://youtu.be/abcdefghijk', user_id=7, chat_id=77,
+                    requested_at=100, state='awaiting_consent', language='en', title='Dialog',
+                    source_metadata={'youtube_id': 'abcdefghijk', 'title': 'Dialog'})
+        store.save_task(tc.transcript_task_key('abcdefghijk', 7), task)
+        audio = Path(self.tmp.name) / 'transcript-ai-ai-job.m4a'
+        def download(*_args):
+            audio.write_bytes(b'audio')
+            return audio.name
+        update = self.update(callback='transcriptai:abcdefghijk')
+        with patch.object(youtube_transcript, 'download_temporary_audio', side_effect=download) as fetch:
+            await self.controls.transcript_ai_callback(update, self.context)
+            await self.controls.transcript_ai_callback(update, self.context)
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(self.redis.llen('transcription_queue'), 1)
+        row = storage.recording('ai-job')
+        self.assertEqual(row['transcript']['source'], 'ai')
+        self.assertNotIn('filename', row)
+        self.assertTrue(audio.exists())
+        self.assertIn('masuk antrean', update.message.reply_text.call_args_list[0].args[0])
+        self.assertIn('sedang diproses', update.message.reply_text.call_args_list[1].args[0])
+
+    async def test_ai_admission_outage_keeps_audio_for_durable_queue_recovery(self):
+        task = dict(job_id='durable-ai', video_id='abcdefghijk',
+                    url='https://youtu.be/abcdefghijk', user_id=7, chat_id=77,
+                    requested_at=100, state='awaiting_consent', language='en',
+                    source_metadata={'youtube_id': 'abcdefghijk'})
+        store.save_task(tc.transcript_task_key('abcdefghijk', 7), task)
+        audio = Path(self.tmp.name) / 'transcript-ai-durable-ai.m4a'
+        def download(*_args):
+            audio.write_bytes(b'audio')
+            return audio.name
+        update = self.update(callback='transcriptai:abcdefghijk')
+        with patch.object(youtube_transcript, 'download_temporary_audio', side_effect=download), \
+                patch.object(self.redis, 'eval', side_effect=RuntimeError('redis unavailable')):
+            await self.controls.transcript_ai_callback(update, self.context)
+        self.assertEqual(storage.recording('durable-ai')['transcript']['status'], 'queued')
+        self.assertTrue(audio.exists())
+        self.assertIn('akan dilanjutkan', update.message.reply_text.call_args.args[0])
+
     async def test_invalid_callback_and_missing_recording_do_not_enqueue(self):
         for data in ['transcribe:../private', 'transcribe:missing']:
             await self.controls.callback(self.update(callback=data), self.context)
@@ -599,6 +718,12 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         update = self.update(user=99, callback='watch:12345678:confirm')
         await self.controls.watch_callback(update, self.context)
         update.callback_query.answer.assert_awaited_once_with('Tidak diizinkan.', show_alert=True)
+        for callback, handler in [('mode:transcript', self.controls.mode_callback),
+                                  ('transcriptai:abcdefghijk', self.controls.transcript_ai_callback),
+                                  ('transcriptcancel:abcdefghijk', self.controls.transcript_cancel_callback)]:
+            update = self.update(user=99, callback=callback)
+            await handler(update, self.context)
+            update.callback_query.answer.assert_awaited_once_with('Tidak diizinkan.', show_alert=True)
         self.watch()
         with patch.dict(os.environ, TELEGRAM_ALLOWED_USER_IDS=''), patch.object(tc, 'discover_live') as discover:
             await self.controls.tick(self.sender, 110)
