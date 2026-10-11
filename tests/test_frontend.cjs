@@ -530,6 +530,8 @@ test('Clipper route selects its own navigation while History labels clips clearl
 
 test('Transcript Only route requires AI consent and exposes Reader exports on success',async()=>{
  const f=fixture(undefined,'https://streamfetch.example/transcript-only'),requests=[];f.context.requests=requests;f.context.gate={};
+ const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
+ assert.doesNotMatch(html,/Ambil subtitle YouTube tanpa mengunduh video/);
  f.run("showSection(routeView());api=(path,data)=>{requests.push([path,data]);return new Promise(resolve=>gate.resolve=resolve)};refresh=async()=>{}");
  assert.equal(f.get('transcript-only-room').hidden,false);assert.equal(f.get('control-room').hidden,true);
  assert.equal(f.get('nav-transcript').attributes['aria-current'],'page');assert.equal(f.get('history-panel').hidden,false);
@@ -704,6 +706,9 @@ test('login composition remains minimal with accessible authentication and a qui
   assert.match(css,/grid-template-rows:minmax\(min-content,1fr\) auto/);
   assert.match(css,/#login-error:empty\{display:block;min-height:1.5em/);
   assert.match(css,/\.login-credit\{margin:0;font-size:11px/);
+  assert.match(css,/\.login-brand\{display:flex;align-items:center;gap:12px/);
+  assert.match(css,/\.login-logo\{display:block;overflow:hidden\}/);
+  assert.match(css,/#login-wordmark\{display:inline-block;line-height:1\.1\}/);
 });
 
 test('login submission shows busy state, preserves the API payload, and clears password only on success',async()=>{
