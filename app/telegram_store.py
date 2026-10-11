@@ -39,6 +39,163 @@ def subscribe_web(job_id, role):
 def tables(db):
     db.execute('CREATE TABLE IF NOT EXISTS telegram_watches (id TEXT PRIMARY KEY, data TEXT NOT NULL)')
     db.execute('CREATE TABLE IF NOT EXISTS telegram_tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL)')
+    db.execute('''CREATE TABLE IF NOT EXISTS telegram_workspaces (
+               chat_id TEXT NOT NULL, user_id TEXT NOT NULL,
+               workspace TEXT NOT NULL, generation INTEGER NOT NULL,
+               updated REAL NOT NULL, PRIMARY KEY (chat_id, user_id))''')
+
+
+def _workspace_row(db, chat_id, user_id):
+    db.execute(
+        'INSERT OR IGNORE INTO telegram_workspaces VALUES (?, ?, ?, ?, ?)',
+        (str(chat_id), str(user_id), 'download', 0, time.time()),
+    )
+    row = db.execute(
+        'SELECT workspace, generation FROM telegram_workspaces WHERE chat_id=? AND user_id=?',
+        (str(chat_id), str(user_id)),
+    ).fetchone()
+    return dict(workspace=row['workspace'], generation=row['generation'])
+
+
+def workspace(chat_id, user_id):
+    """Return a durable routing snapshot, creating the Download default."""
+    with storage.connection() as db:
+        tables(db)
+        db.execute('BEGIN IMMEDIATE')
+        return _workspace_row(db, chat_id, user_id)
+
+
+def workspace_matches(chat_id, user_id, snapshot):
+    """Check whether a pending workspace UI still belongs to the active epoch."""
+    with storage.connection() as db:
+        tables(db)
+        current = _workspace_row(db, chat_id, user_id)
+        return (current['workspace'] == snapshot.get('workspace')
+                and current['generation'] == snapshot.get('generation'))
+
+
+def switch_workspace(chat_id, user_id, target, expected_generation=None):
+    """Atomically switch workspace and invalidate pending transcript consent UI."""
+    if target not in {'download', 'transcript'}:
+        raise ValueError('Unknown Telegram workspace')
+    with storage.connection() as db:
+        tables(db)
+        db.execute('BEGIN IMMEDIATE')
+        current = _workspace_row(db, chat_id, user_id)
+        if (expected_generation is not None
+                and current['generation'] != expected_generation):
+            return current, False
+        generation = current['generation'] + 1
+        db.execute(
+            '''UPDATE telegram_workspaces SET workspace=?, generation=?, updated=?
+               WHERE chat_id=? AND user_id=?''',
+            (target, generation, time.time(), str(chat_id), str(user_id)),
+        )
+        # Probes keep running; only consent UI is removed. Marking a probe stale
+        # lets its successful result retain its original owner without allowing
+        # a later AI prompt to cross the workspace boundary.
+        for row in db.execute("SELECT id, data FROM telegram_tasks WHERE id LIKE 'transcript-only:%'").fetchall():
+            task = json.loads(row['data'])
+            if (str(task.get('chat_id')) == str(chat_id)
+                    and str(task.get('user_id')) == str(user_id)):
+                if task.get('state') == 'awaiting_consent':
+                    db.execute('DELETE FROM telegram_tasks WHERE id=?', (row['id'],))
+                elif task.get('state') == 'probing':
+                    task['workspace_stale'] = True
+                    db.execute('UPDATE telegram_tasks SET data=? WHERE id=?',
+                               (json.dumps(task), row['id']))
+        return dict(workspace=target, generation=generation), True
+
+
+def claim_ai_approval(key, chat_id, user_id, generation):
+    """Atomically bind an AI approval to its task and active workspace epoch."""
+    with storage.connection() as db:
+        tables(db)
+        db.execute('BEGIN IMMEDIATE')
+        current = _workspace_row(db, chat_id, user_id)
+        row = db.execute('SELECT data FROM telegram_tasks WHERE id=?', (key,)).fetchone()
+        task = json.loads(row['data']) if row else None
+        if (not task or current != {'workspace': 'transcript', 'generation': generation}
+                or str(task.get('chat_id')) != str(chat_id)
+                or str(task.get('user_id')) != str(user_id)
+                or task.get('workspace_generation') != generation
+                or task.get('state') != 'awaiting_consent'):
+            return None
+        task['state'] = 'ai_preparing'
+        db.execute('UPDATE telegram_tasks SET data=? WHERE id=?', (json.dumps(task), key))
+        return task
+
+
+def cancel_pending_transcript(key, chat_id, user_id, generation):
+    """Delete only the exact, still-current consent request."""
+    with storage.connection() as db:
+        tables(db)
+        db.execute('BEGIN IMMEDIATE')
+        current = _workspace_row(db, chat_id, user_id)
+        row = db.execute('SELECT data FROM telegram_tasks WHERE id=?', (key,)).fetchone()
+        task = json.loads(row['data']) if row else None
+        if (not task or current != {'workspace': 'transcript', 'generation': generation}
+                or str(task.get('chat_id')) != str(chat_id)
+                or str(task.get('user_id')) != str(user_id)
+                or task.get('workspace_generation') != generation
+                or task.get('state') != 'awaiting_consent'):
+            return False
+        db.execute('DELETE FROM telegram_tasks WHERE id=?', (key,))
+        return True
+
+
+def set_transcript_consent(key, task):
+    """Publish consent only if the probe still owns the active transcript epoch."""
+    with storage.connection() as db:
+        tables(db)
+        db.execute('BEGIN IMMEDIATE')
+        current = _workspace_row(db, task['chat_id'], task['user_id'])
+        row = db.execute('SELECT data FROM telegram_tasks WHERE id=?', (key,)).fetchone()
+        stored = json.loads(row['data']) if row else None
+        if (not stored or stored.get('job_id') != task.get('job_id')
+                or stored.get('state') != 'probing'
+                or current != {'workspace': 'transcript',
+                               'generation': task.get('workspace_generation')}):
+            if (stored and stored.get('job_id') == task.get('job_id')
+                    and stored.get('state') == 'probing'):
+                db.execute('DELETE FROM telegram_tasks WHERE id=?', (key,))
+            return False
+        task = dict(task, state='awaiting_consent')
+        db.execute('UPDATE telegram_tasks SET data=? WHERE id=?', (json.dumps(task), key))
+        return True
+
+
+def delete_task_if(key, job_id):
+    """Delete a task only when an older concurrent probe still owns the key."""
+    with storage.connection() as db:
+        tables(db)
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute('SELECT data FROM telegram_tasks WHERE id=?', (key,)).fetchone()
+        value = json.loads(row['data']) if row else None
+        if value and value.get('job_id') == job_id:
+            db.execute('DELETE FROM telegram_tasks WHERE id=?', (key,))
+            return True
+        return False
+
+
+def claim_transcript_task(key, value):
+    """Claim one URL per workspace epoch, replacing only stale pending UI."""
+    with storage.connection() as db:
+        tables(db)
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute('SELECT data FROM telegram_tasks WHERE id=?', (key,)).fetchone()
+        current = json.loads(row['data']) if row else None
+        stale_epoch = (current and current.get('workspace_generation')
+                       != value.get('workspace_generation'))
+        replace = bool(stale_epoch and (
+            current.get('state') == 'awaiting_consent'
+            or (current.get('state') == 'probing'
+                and time.time() - current.get('requested_at', 0) > 120)))
+        if current and not replace:
+            return False
+        db.execute('INSERT INTO telegram_tasks VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data',
+                   (key, json.dumps(value)))
+        return True
 
 
 def watches():

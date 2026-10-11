@@ -173,6 +173,7 @@ def _recording_payload(job, state, detail, previous_data=None):
                                       'owner_type', 'owner_id', 'note', 'origin', 'storage', 'quality',
                                       'output_format', 'compression', 'is_live', 'is_clip', 'clip_start',
                                       'clip_end', 'clip_duration', 'transcript_only', 'live_status', 'was_live',
+                                      'workspace', 'workspace_generation',
                                       'download_attempt', 'download_attempts', 'download_exit_code',
                                       'requested_at', 'started_at', 'elapsed', 'size', 'filename',
                                       'stop_reason', 'original_filename', 'original_size',

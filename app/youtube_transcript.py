@@ -1,4 +1,4 @@
-"""Reusable YouTube subtitle ingestion for Transcript Only requests."""
+"""Shared subtitle-first and AI admission for Transcript Only requests."""
 import html
 import json
 import os
@@ -48,7 +48,7 @@ def video_id_for(row):
         if (identifier := transcript_reader.youtube_id(value))), None)
 
 
-def find_cached(video_id, language, accessible=lambda _row: True):
+def find_cached(video_id, language, accessible=lambda _row: True, source='youtube'):
     """Find a completed, accessible transcript for one canonical video/language."""
     wanted = language_base(language)
     root = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve()
@@ -61,7 +61,10 @@ def find_cached(video_id, language, accessible=lambda _row: True):
             and not (root / transcript[key]).is_symlink()
             and (root / transcript[key]).is_file()
             for key in ('txt_filename', 'srt_filename', 'vtt_filename'))
-        if (video_id_for(row) == video_id and transcript.get('status') == 'completed'
+        identity = (video_id_for(row) if source == 'youtube'
+                    else row.get('source_id') if row.get('source_type', row.get('source')) == source
+                    else None)
+        if (identity == video_id and transcript.get('status') == 'completed'
                 and language_base(transcript.get('language')) == wanted
                 and output_available and accessible(row)):
             return row
@@ -144,11 +147,14 @@ def normalize_subtitle(content):
     return segments
 
 
-def public_metadata(metadata, video_id):
+def public_metadata(metadata, video_id, source='youtube'):
     return {key: value for key, value in {
         'title': metadata.get('title'), 'description': metadata.get('description'),
         'channel': metadata.get('channel'), 'upload_date': metadata.get('upload_date'),
-        'youtube_id': video_id, 'duration': metadata.get('duration'), 'id': video_id,
+        'youtube_id': video_id if source == 'youtube' else None,
+        'uploader': metadata.get('uploader'), 'uploader_id': metadata.get('uploader_id'),
+        'timestamp': metadata.get('timestamp'), 'duration': metadata.get('duration'),
+        'id': metadata.get('id') or video_id,
     }.items() if value is not None}
 
 
@@ -156,31 +162,41 @@ def recording_job(task):
     """Build the shared catalogue entry for Telegram and Web requests."""
     owner_type = task.get('owner_type') or 'telegram'
     owner_id = task.get('owner_id', task.get('user_id'))
-    return dict(job_id=task['job_id'], source='youtube', source_type='youtube',
-                source_id=task['video_id'], source_name='YouTube',
-                owner_type=owner_type, owner_id=str(owner_id),
-                origin=task.get('origin') or owner_type + '_transcript', transcript_only=True,
-                requested_at=task['requested_at'], note=task.get('title') or '',
-                source_metadata=task.get('source_metadata') or {'youtube_id': task['video_id']})
+    source = task.get('source') or 'youtube'
+    source_id = task.get('source_id') or task['video_id']
+    job = dict(job_id=task['job_id'], source=source, source_type=source,
+               source_id=source_id, source_name=task.get('source_name') or source.title(),
+               owner_type=owner_type, owner_id=str(owner_id),
+               origin=task.get('origin') or owner_type + '_transcript', transcript_only=True,
+               requested_at=task['requested_at'], note=task.get('title') or '',
+               source_metadata=task.get('source_metadata') or
+               ({'youtube_id': source_id} if source == 'youtube' else {'id': source_id}))
+    if owner_type == 'telegram':
+        job['workspace'] = 'transcript'
+        if task.get('workspace_generation') is not None:
+            job['workspace_generation'] = task['workspace_generation']
+    return job
 
 
 def resolve(task, accessible):
     """Resolve a cached/subtitle transcript without downloading media or invoking AI."""
-    cached = find_cached(task['video_id'], 'id', accessible)
+    source = task.get('source') or 'youtube'
+    source_id = task.get('source_id') or task['video_id']
+    cached = find_cached(source_id, 'id', accessible, source)
     if cached:
         return cached
     metadata = probe(task['url'])
     choice = select_subtitle(metadata)
     task.update(title=metadata.get('title') or '',
-                source_metadata=public_metadata(metadata, task['video_id']),
+                source_metadata=public_metadata(metadata, source_id, source),
                 language=(choice.language if choice else
                           metadata.get('language') or metadata.get('original_language') or 'id'))
-    cached = find_cached(task['video_id'], task['language'], accessible)
+    cached = find_cached(source_id, task['language'], accessible, source)
     if cached:
         return cached
     if not choice:
         raise SubtitleUnavailable('Subtitle manual maupun otomatis tidak tersedia.')
-    content = download_subtitle(task['url'], task['video_id'], choice)
+    content = download_subtitle(task['url'], str(metadata.get('id') or source_id), choice)
     return publish(recording_job(task), choice, content)
 
 
@@ -194,7 +210,7 @@ def publish(job, choice, content):
     base = f"transcript-{job['source_id']}-{language_base(choice.language)}-{job['job_id'][:8]}"
     outputs = [(root / f'{base}.txt', txt), (root / f'{base}.srt', srt),
                (root / f'{base}.vtt', vtt)]
-    storage.save_recording(job, 'ready', 'Transcript Only · subtitle YouTube')
+    storage.save_recording(job, 'ready', 'Transcript Only · subtitle sumber')
     published = []
 
     def write():
@@ -205,7 +221,7 @@ def publish(job, choice, content):
     try:
         if not storage.save_transcription_state(
                 job['job_id'], 'completed', source=choice.source,
-                language=choice.language, model='youtube-subtitles',
+                language=choice.language, model=job['source'] + '-subtitles',
                 txt_filename=outputs[0][0].name, srt_filename=outputs[1][0].name,
                 vtt_filename=outputs[2][0].name, error='', progress_percent=100,
                 eta_seconds=0, publish=write):

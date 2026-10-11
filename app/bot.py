@@ -55,7 +55,8 @@ log = logging.getLogger(__name__)
 
 BOT_COMMANDS = [
     BotCommand('start', 'Buka menu StreamFetch'),
-    BotCommand('transcript', 'Buat transkrip dari URL YouTube'),
+    BotCommand('download', 'Pindah ke workspace Download'),
+    BotCommand('transcript', 'Pindah ke workspace Transcript Only'),
     BotCommand('record', 'Rekam live Oryx'),
     BotCommand('stop', 'Hentikan capture'),
     BotCommand('watch', 'Jadwalkan pantauan YouTube'),
@@ -77,17 +78,21 @@ def is_youtube_url(text):
 
 @telegram_controls.authorized
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
+    snapshot = telegram_store.workspace(update.effective_chat.id, update.effective_user.id)
+    active = controls.workspace_label(snapshot)
     await update.message.reply_text(
-        "StreamFetch\n\n"
-        "Kirim link YouTube, TikTok video/Live, atau Instagram Reel/post video.\n\n"
+        f"StreamFetch\nWorkspace aktif: {active}\n\n"
+        + ("Kirim link YouTube/Shorts, TikTok, atau Instagram Reels.\n\n"
+           if snapshot['workspace'] == 'transcript' else
+           "Kirim link YouTube, TikTok video/Live, atau Instagram Reel/post video.\n\n") +
         "Perintah:\n"
+        "/download - workspace Download\n"
+        "/transcript - workspace Transcript Only\n"
         "/record - rekam live Oryx yang dikonfigurasi\n"
         "/stop - hentikan capture\n"
         "/watch · /watchlist · /cancelwatch\n"
-        "/transcript - transkrip langsung dari YouTube\n"
         "/transcribe - pilih rekaman",
-        reply_markup=controls.mode_buttons(),
+        reply_markup=controls.mode_buttons(snapshot),
     )
 
 
@@ -146,18 +151,20 @@ async def record(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @telegram_controls.authorized
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    snapshot = telegram_store.workspace(update.effective_chat.id, update.effective_user.id)
+
     if await controls.watch_reply(update, context):
         return
 
     url = update.message.text.strip()
 
-    if getattr(context, 'user_data', {}).get('url_mode') == 'transcript':
+    if snapshot['workspace'] == 'transcript':
         try:
-            url = storage.validate_url(url, youtube=True)
-        except ValueError:
-            await update.message.reply_text('❌ Transcript Only memerlukan URL video YouTube yang valid.')
+            url, source, source_id, source_name = telegram_controls.transcript_url(url)
+        except ValueError as exc:
+            await update.message.reply_text('❌ ' + str(exc))
             return
-        await controls.transcript_only(update, url)
+        await controls.transcript_only(update, url, snapshot, source, source_id, source_name)
         return
 
     source = 'youtube'
@@ -178,9 +185,14 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job = {
         "job_id": uuid.uuid4().hex,
         "chat_id": update.effective_chat.id,
+        "user_id": update.effective_user.id,
         "url": url,
         "source": source,
         "source_name": {'tiktok': 'TikTok', 'instagram': 'Instagram', 'youtube': 'YouTube'}[source],
+        "owner_type": "telegram",
+        "owner_id": str(update.effective_user.id),
+        "workspace": "download",
+        "workspace_generation": snapshot['generation'],
     }
 
     if source in {'tiktok', 'instagram'}:
@@ -238,9 +250,10 @@ def main():
     app.add_handler(CommandHandler('watch', controls.watch))
     app.add_handler(CommandHandler('watchlist', controls.watchlist))
     app.add_handler(CommandHandler('cancelwatch', controls.cancelwatch))
+    app.add_handler(CommandHandler('download', controls.download))
     app.add_handler(CommandHandler('transcript', controls.transcript))
     app.add_handler(CallbackQueryHandler(controls.cancelwatch_callback, pattern=r'^watchcancel:'))
-    app.add_handler(CallbackQueryHandler(controls.mode_callback, pattern=r'^mode:'))
+    app.add_handler(CallbackQueryHandler(controls.mode_callback, pattern=r'^(?:workspace|mode):'))
     app.add_handler(CallbackQueryHandler(controls.transcript_ai_callback, pattern=r'^transcriptai:'))
     app.add_handler(CallbackQueryHandler(controls.transcript_cancel_callback, pattern=r'^transcriptcancel:'))
     app.add_handler(CommandHandler('transcribe', controls.transcribe))

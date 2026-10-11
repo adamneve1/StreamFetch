@@ -604,6 +604,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         audio.assert_not_called()
         row = next(row for row in storage.recordings() if row.get('source_id') == 'abcdefghijk')
         self.assertTrue(row['transcript_only'])
+        self.assertEqual(row['workspace'], 'transcript')
         self.assertNotIn('filename', row)
         self.assertEqual(row['transcript']['source'], 'manual')
         self.assertEqual(self.redis.llen('download_queue'), 0)
@@ -622,24 +623,138 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.redis.llen('transcription_queue'), 0)
         self.assertEqual(len([key for key, _ in store.tasks() if key.startswith('transcript-only:')]), 1)
         buttons = update.message.reply_text.call_args.kwargs['reply_markup'].inline_keyboard[0]
-        self.assertEqual([button.callback_data for button in buttons],
-                         ['transcriptai:abcdefghijk', 'transcriptcancel:abcdefghijk'])
+        self.assertRegex(buttons[0].callback_data, r'^transcriptai:\d+:[a-f0-9]{16}$')
+        self.assertRegex(buttons[1].callback_data, r'^transcriptcancel:\d+:[a-f0-9]{16}$')
 
     async def test_transcript_command_and_start_expose_visible_entry_point(self):
         update = self.update()
         await self.controls.transcript(update, self.context)
-        self.assertEqual(self.context.user_data['url_mode'], 'transcript')
-        self.assertIn('kirim URL YouTube', update.message.reply_text.call_args.args[0])
+        self.assertEqual(store.workspace(77, 7)['workspace'], 'transcript')
+        self.assertIn('Workspace aktif: Transcript Only', update.message.reply_text.call_args.args[0])
         buttons = update.message.reply_text.call_args.kwargs['reply_markup'].inline_keyboard[0]
-        self.assertEqual(buttons[1].text, '📝 Transcript Only')
-        self.assertEqual(buttons[1].callback_data, 'mode:transcript')
+        self.assertEqual(buttons[0].text, '⬇️ Switch to Download')
+        self.assertRegex(buttons[0].callback_data, r'^workspace:\d+:download$')
 
         start_update = self.update()
         with patch.object(bot, 'controls', self.controls):
             await bot.start(start_update, self.context)
-        self.assertIn('/transcript', start_update.message.reply_text.call_args.args[0])
+        self.assertIn('Workspace aktif: Transcript Only', start_update.message.reply_text.call_args.args[0])
         start_buttons = start_update.message.reply_text.call_args.kwargs['reply_markup'].inline_keyboard[0]
-        self.assertEqual(start_buttons[1].text, '📝 Transcript Only')
+        self.assertEqual(start_buttons[0].text, '⬇️ Switch to Download')
+
+        await self.controls.download(self.update(), self.context)
+        self.assertEqual(store.workspace(77, 7)['workspace'], 'download')
+
+    async def test_workspace_defaults_persists_across_controls_and_is_scoped_to_chat_user(self):
+        self.assertEqual(store.workspace(77, 7), {'workspace': 'download', 'generation': 0})
+        with patch.object(bot, 'controls', self.controls), patch.object(bot, 'r', self.redis):
+            await bot.handle_url(self.update('https://youtu.be/abcdefghijk'), self.context)
+        queued = json.loads(self.redis.lpop('download_queue'))
+        self.assertEqual((queued['workspace'], queued['workspace_generation']), ('download', 0))
+        self.assertEqual((queued['owner_type'], queued['owner_id']), ('telegram', '7'))
+        await self.controls.transcript(self.update(), self.context)
+        restarted = tc.Controls(fakeredis.FakeRedis(decode_responses=True))
+        self.assertEqual(store.workspace(77, 7)['workspace'], 'transcript')
+        self.assertEqual(store.workspace(77, 8)['workspace'], 'download')
+        self.assertEqual(store.workspace(88, 7)['workspace'], 'download')
+        self.assertEqual(restarted.workspace_label(store.workspace(77, 7)), 'Transcript Only')
+
+    async def test_rapid_workspace_callbacks_are_compare_and_swap_transitions(self):
+        initial = store.workspace(77, 7)
+        callback = f'workspace:{initial["generation"]}:transcript'
+        first, stale = self.update(callback=callback), self.update(callback=callback)
+        await asyncio.gather(self.controls.mode_callback(first, self.context),
+                             self.controls.mode_callback(stale, self.context))
+        current = store.workspace(77, 7)
+        self.assertEqual(current, {'workspace': 'transcript', 'generation': 1})
+        messages = [first.message.reply_text.call_args.args[0], stale.message.reply_text.call_args.args[0]]
+        self.assertEqual(sum('kedaluwarsa' in message for message in messages), 1)
+        await self.controls.mode_callback(
+            self.update(callback=f'workspace:{current["generation"]}:download'), self.context)
+        self.assertEqual(store.workspace(77, 7)['workspace'], 'download')
+
+    def test_switch_keeps_running_probe_owner_and_deduplicates_same_url_after_round_trip(self):
+        first, _ = store.switch_workspace(77, 7, 'transcript')
+        key = tc.transcript_task_key('abcdefghijk', 7, 77)
+        original = dict(job_id='original-job', source='youtube', source_id='abcdefghijk',
+                        user_id=7, chat_id=77, state='probing', requested_at=1000,
+                        workspace_generation=first['generation'])
+        with patch.object(store.time, 'time', return_value=1001):
+            self.assertTrue(store.claim_transcript_task(key, original))
+            store.switch_workspace(77, 7, 'download')
+            current, _ = store.switch_workspace(77, 7, 'transcript')
+            replacement = dict(original, job_id='replacement-job',
+                               workspace_generation=current['generation'])
+            self.assertFalse(store.claim_transcript_task(key, replacement))
+        self.assertEqual(store.task(key)['job_id'], 'original-job')
+        self.assertTrue(store.task(key)['workspace_stale'])
+
+    async def test_switch_clears_pending_consent_and_rejects_old_ai_callback(self):
+        await self.controls.transcript(self.update(), self.context)
+        update = self.update('https://youtu.be/abcdefghijk')
+        metadata = {'id': 'abcdefghijk', 'subtitles': {}, 'automatic_captions': {}}
+        with patch.object(youtube_transcript, 'probe', return_value=metadata):
+            await self.controls.transcript_only(update, update.message.text,
+                                                store.workspace(77, 7))
+        callback = update.message.reply_text.call_args.kwargs['reply_markup'].inline_keyboard[0][0].callback_data
+        self.context.user_data['watch_draft'] = {'step': 'channel', 'chat_id': 77}
+        await self.controls.download(self.update(), self.context)
+        self.assertNotIn('watch_draft', self.context.user_data)
+        stale = self.update(callback=callback)
+        with patch.object(youtube_transcript, 'download_temporary_audio') as audio:
+            await self.controls.transcript_ai_callback(stale, self.context)
+        audio.assert_not_called()
+        self.assertIn('workspace telah berubah', stale.message.reply_text.call_args.args[0])
+
+    async def test_concurrent_urls_keep_the_workspace_snapshot_from_receipt(self):
+        await self.controls.transcript(self.update(), self.context)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        snapshots = []
+
+        async def route(_update, _url, snapshot, *_identity):
+            snapshots.append(dict(snapshot))
+            if len(snapshots) == 2:
+                entered.set()
+            await release.wait()
+
+        with patch.object(bot, 'controls', self.controls), \
+                patch.object(self.controls, 'transcript_only', side_effect=route):
+            requests = [asyncio.create_task(bot.handle_url(self.update(url), self.context)) for url in (
+                'https://youtu.be/abcdefghijk', 'https://www.tiktok.com/@tester/video/123')]
+            await entered.wait()
+            await self.controls.download(self.update(), self.context)
+            release.set()
+            await asyncio.gather(*requests)
+        self.assertEqual([snapshot['workspace'] for snapshot in snapshots], ['transcript', 'transcript'])
+        self.assertEqual({snapshot['generation'] for snapshot in snapshots}, {1})
+        self.assertEqual(self.redis.llen('download_queue'), 0)
+
+    def test_transcript_workspace_accepts_all_explicit_supported_url_forms(self):
+        cases = {
+            'https://youtube.com/shorts/abcdefghijk': 'youtube',
+            'https://www.tiktok.com/@tester/video/123': 'tiktok',
+            'https://www.instagram.com/reel/ABC_123/': 'instagram',
+        }
+        for url, source in cases.items():
+            self.assertEqual(tc.transcript_url(url)[1], source)
+        for url in ('https://www.tiktok.com/@tester/live',
+                    'https://www.instagram.com/p/ABC_123/'):
+            with self.assertRaises(ValueError):
+                tc.transcript_url(url)
+
+    async def test_social_transcript_urls_enter_the_shared_subtitle_then_ai_pipeline(self):
+        await self.controls.transcript(self.update(), self.context)
+        metadata = {'title': 'Social dialog', 'subtitles': {}, 'automatic_captions': {}}
+        with patch.object(youtube_transcript, 'probe', return_value=metadata), \
+                patch.object(youtube_transcript, 'download_temporary_audio') as audio, \
+                patch.object(bot, 'controls', self.controls):
+            await bot.handle_url(self.update('https://www.tiktok.com/@tester/video/123'), self.context)
+            await bot.handle_url(self.update('https://www.instagram.com/reel/ABC_123/'), self.context)
+        audio.assert_not_called()
+        pending = [task for key, task in store.tasks() if key.startswith('transcript-only:')]
+        self.assertEqual({task['source'] for task in pending}, {'tiktok', 'instagram'})
+        self.assertTrue(all(task['state'] == 'awaiting_consent' for task in pending))
 
     async def test_bot_post_init_registers_transcript_command_menu(self):
         application = SimpleNamespace(bot=SimpleNamespace(set_my_commands=AsyncMock()), bot_data={})
@@ -649,6 +764,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         application.bot.set_my_commands.assert_awaited_once()
         commands = {command.command for command in application.bot.set_my_commands.call_args.args[0]}
         self.assertIn('transcript', commands)
+        self.assertIn('download', commands)
 
     def test_bot_main_registers_transcript_handler(self):
         application = MagicMock()
@@ -662,6 +778,8 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         handlers = [call.args[0] for call in application.add_handler.call_args_list]
         self.assertTrue(any('transcript' in getattr(handler, 'commands', set())
                             for handler in handlers))
+        self.assertTrue(any('download' in getattr(handler, 'commands', set())
+                            for handler in handlers))
         application.run_polling.assert_called_once_with()
 
     async def test_old_ai_button_cannot_bypass_a_fresh_subtitle_probe(self):
@@ -674,7 +792,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
             await self.controls.transcript_ai_callback(update, self.context)
         download.assert_not_called()
         self.assertEqual(self.redis.llen('transcription_queue'), 0)
-        self.assertIn('Subtitle masih diperiksa', update.message.reply_text.call_args.args[0])
+        self.assertIn('kedaluwarsa', update.message.reply_text.call_args.args[0])
 
     async def test_blocked_subtitle_download_falls_back_to_consent_without_media(self):
         metadata = {'id': 'abcdefghijk', 'language': 'id',
@@ -690,16 +808,21 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('tidak tersedia atau diblokir', update.message.reply_text.call_args.args[0])
 
     async def test_ai_consent_uses_existing_queue_and_retries_without_duplicate_audio(self):
+        snapshot, _ = store.switch_workspace(77, 7, 'transcript')
+        key = tc.transcript_task_key('abcdefghijk', 7, 77)
+        digest = key.rsplit(':', 1)[-1]
         task = dict(job_id='ai-job', video_id='abcdefghijk',
+                    source='youtube', source_id='abcdefghijk', source_name='YouTube',
                     url='https://youtu.be/abcdefghijk', user_id=7, chat_id=77,
                     requested_at=100, state='awaiting_consent', language='en', title='Dialog',
+                    workspace_generation=snapshot['generation'], task_digest=digest,
                     source_metadata={'youtube_id': 'abcdefghijk', 'title': 'Dialog'})
-        store.save_task(tc.transcript_task_key('abcdefghijk', 7), task)
+        store.save_task(key, task)
         audio = Path(self.tmp.name) / 'transcript-ai-ai-job.m4a'
         def download(*_args):
             audio.write_bytes(b'audio')
             return audio.name
-        update = self.update(callback='transcriptai:abcdefghijk')
+        update = self.update(callback=f'transcriptai:{snapshot["generation"]}:{digest}')
         with patch.object(youtube_transcript, 'download_temporary_audio', side_effect=download) as fetch:
             await self.controls.transcript_ai_callback(update, self.context)
             await self.controls.transcript_ai_callback(update, self.context)
@@ -710,19 +833,24 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('filename', row)
         self.assertTrue(audio.exists())
         self.assertIn('masuk antrean', update.message.reply_text.call_args_list[0].args[0])
-        self.assertIn('sedang diproses', update.message.reply_text.call_args_list[1].args[0])
+        self.assertIn('kedaluwarsa', update.message.reply_text.call_args_list[1].args[0])
 
     async def test_ai_admission_outage_keeps_audio_for_durable_queue_recovery(self):
+        snapshot, _ = store.switch_workspace(77, 7, 'transcript')
+        key = tc.transcript_task_key('abcdefghijk', 7, 77)
+        digest = key.rsplit(':', 1)[-1]
         task = dict(job_id='durable-ai', video_id='abcdefghijk',
+                    source='youtube', source_id='abcdefghijk', source_name='YouTube',
                     url='https://youtu.be/abcdefghijk', user_id=7, chat_id=77,
                     requested_at=100, state='awaiting_consent', language='en',
+                    workspace_generation=snapshot['generation'], task_digest=digest,
                     source_metadata={'youtube_id': 'abcdefghijk'})
-        store.save_task(tc.transcript_task_key('abcdefghijk', 7), task)
+        store.save_task(key, task)
         audio = Path(self.tmp.name) / 'transcript-ai-durable-ai.m4a'
         def download(*_args):
             audio.write_bytes(b'audio')
             return audio.name
-        update = self.update(callback='transcriptai:abcdefghijk')
+        update = self.update(callback=f'transcriptai:{snapshot["generation"]}:{digest}')
         with patch.object(youtube_transcript, 'download_temporary_audio', side_effect=download), \
                 patch.object(self.redis, 'eval', side_effect=RuntimeError('redis unavailable')):
             await self.controls.transcript_ai_callback(update, self.context)
@@ -746,7 +874,8 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_authorization_for_every_handler_and_callback_and_revoked_watches(self):
         handlers = [bot.start, bot.stop, bot.record, bot.handle_url, self.controls.watch,
-                    self.controls.watchlist, self.controls.cancelwatch, self.controls.transcript,
+                    self.controls.watchlist, self.controls.cancelwatch, self.controls.download,
+                    self.controls.transcript,
                     self.controls.transcribe]
         for handler in handlers:
             update = self.update(user=99)
