@@ -528,6 +528,34 @@ test('Clipper route selects its own navigation while History labels clips clearl
   assert.equal(f.get('results').children[0].children[2].textContent,'YouTube · 12:35–14:05 · 01:30');
 });
 
+test('Transcript Only route requires AI consent and exposes Reader exports on success',async()=>{
+ const f=fixture(undefined,'https://streamfetch.example/transcript-only'),requests=[];f.context.requests=requests;f.context.gate={};
+ f.run("showSection(routeView());api=(path,data)=>{requests.push([path,data]);return new Promise(resolve=>gate.resolve=resolve)};refresh=async()=>{}");
+ assert.equal(f.get('transcript-only-room').hidden,false);assert.equal(f.get('control-room').hidden,true);
+ assert.equal(f.get('nav-transcript').attributes['aria-current'],'page');assert.equal(f.get('history-panel').hidden,false);
+ f.get('transcript-only-url').value='https://youtu.be/abcdefghijk';
+ const checking=f.get('transcript-only-form').onsubmit({preventDefault(){}});
+ assert.equal(f.get('transcript-only-submit').disabled,true);assert.match(f.get('transcript-only-status').textContent,/subtitles/i);
+ f.context.gate.resolve({status:'consent_required',video_id:'abcdefghijk',job_id:'web-transcript'});await checking;
+ assert.equal(f.get('transcript-only-consent').hidden,false);assert.equal(requests.length,1);
+ f.run("api=async(path,data)=>{requests.push([path,data]);return {status:'processing',video_id:'abcdefghijk',job_id:'web-transcript'}}");
+ await f.get('transcript-only-ai').onclick();assert.equal(requests[1][0],'transcript-only/abcdefghijk/ai');
+ assert.equal(f.get('transcript-only-submit').disabled,true);assert.match(f.get('transcript-only-status').textContent,/AI transcription/i);
+ f.run("handleTranscriptOnlyResponse({status:'completed',job_id:'web-transcript',source:'manual',language:'id',view_url:'/api/recordings/web-transcript/transcript/view',exports:['txt','srt','vtt']})");
+ assert.equal(f.get('transcript-only-result').hidden,false);assert.equal(f.get('transcript-only-view').href,'/api/recordings/web-transcript/transcript/view');
+ for(const kind of ['txt','srt','vtt']){assert.equal(f.get('transcript-only-'+kind).hidden,false);assert.match(f.get('transcript-only-'+kind).href,new RegExp('/transcript/'+kind+'$'));}
+});
+
+test('Transcript Only AI admission failure keeps explicit consent retryable',async()=>{
+ const f=fixture(undefined,'https://streamfetch.example/transcript-only'),requests=[];f.context.requests=requests;
+ f.run("showSection(routeView());handleTranscriptOnlyResponse({status:'consent_required',video_id:'abcdefghijk',job_id:'web-transcript'});api=async path=>{requests.push(path);throw Error('queue offline')}");
+ await f.get('transcript-only-ai').onclick();
+ assert.equal(f.get('transcript-only-consent').hidden,false);assert.equal(f.get('transcript-only-ai').disabled,false);assert.match(f.get('transcript-only-status').textContent,/queue offline/);
+ f.run("api=async path=>{requests.push(path);return {status:'processing',video_id:'abcdefghijk',job_id:'web-transcript'}}");
+ await f.get('transcript-only-ai').onclick();
+ assert.equal(requests.length,2);assert.match(f.get('transcript-only-status').textContent,/AI transcription/i);
+});
+
 test('StreamFetch branding retains the existing mark and removes old user-facing names',()=>{
   const root=path.resolve(__dirname,'../app/static');
   for(const file of ['index.html','transcript.html']){
@@ -1320,7 +1348,7 @@ test('unclassified failed capture hides raw diagnostics from its primary message
 });
 function keyEvent(key,target,mods={}){return {key,target,...mods,preventDefault(){this.defaultPrevented=true;}};}
 function paletteFixture(motion){const f=fixture(motion);f.run("csrf='test';$('workspace').hidden=false;$('workspace').dataset.destination='workspace';api=async()=>({watches:[],active_count:0})");return f;}
-test('command palette shortcuts ignore typing, repeats and modal dialogs while Cmd/Ctrl+K opens six commands',()=>{
+test('command palette shortcuts ignore typing, repeats and modal dialogs while Cmd/Ctrl+K opens seven commands',()=>{
  const f=paletteFixture();
  for(const target of [new Element('input'),new Element('textarea'),new Element('select'),{isContentEditable:true},{tagName:'SPAN',closest:()=>({})}]){
   const event=keyEvent('k',target,{ctrlKey:true});f.context.event=event;f.run('paletteShortcut(event)');assert.equal(event.defaultPrevented,undefined);assert.equal(f.get('command-palette').open,false);
@@ -1328,7 +1356,7 @@ test('command palette shortcuts ignore typing, repeats and modal dialogs while C
  const repeat=keyEvent('k',f.document.body,{metaKey:true,repeat:true});f.context.event=repeat;f.run('paletteShortcut(event)');assert.equal(f.get('command-palette').open,false);
  f.get('app-dialog').open=true;f.get('command-open').onclick();assert.equal(f.get('command-palette').open,false);f.get('app-dialog').open=false;
  const event=keyEvent('K',f.document.body,{metaKey:true});f.context.event=event;f.run('paletteShortcut(event)');assert.equal(event.defaultPrevented,true);
- assert.equal(f.get('command-palette').open,true);assert.equal(f.get('command-list').children.length,6);assert.equal(f.document.activeElement,f.get('command-search'));
+ assert.equal(f.get('command-palette').open,true);assert.equal(f.get('command-list').children.length,7);assert.equal(f.document.activeElement,f.get('command-search'));
  assert.equal(f.get('command-list').children[0].attributes['aria-selected'],'true');assert.equal(f.get('command-search').attributes['aria-activedescendant'],'command-workspace');
 });
 test('command palette arrows wrap, Enter runs the existing action, and Escape restores trigger focus',()=>{

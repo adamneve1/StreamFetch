@@ -6,7 +6,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import fakeredis
 
@@ -625,6 +625,45 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([button.callback_data for button in buttons],
                          ['transcriptai:abcdefghijk', 'transcriptcancel:abcdefghijk'])
 
+    async def test_transcript_command_and_start_expose_visible_entry_point(self):
+        update = self.update()
+        await self.controls.transcript(update, self.context)
+        self.assertEqual(self.context.user_data['url_mode'], 'transcript')
+        self.assertIn('kirim URL YouTube', update.message.reply_text.call_args.args[0])
+        buttons = update.message.reply_text.call_args.kwargs['reply_markup'].inline_keyboard[0]
+        self.assertEqual(buttons[1].text, '📝 Transcript Only')
+        self.assertEqual(buttons[1].callback_data, 'mode:transcript')
+
+        start_update = self.update()
+        with patch.object(bot, 'controls', self.controls):
+            await bot.start(start_update, self.context)
+        self.assertIn('/transcript', start_update.message.reply_text.call_args.args[0])
+        start_buttons = start_update.message.reply_text.call_args.kwargs['reply_markup'].inline_keyboard[0]
+        self.assertEqual(start_buttons[1].text, '📝 Transcript Only')
+
+    async def test_bot_post_init_registers_transcript_command_menu(self):
+        application = SimpleNamespace(bot=SimpleNamespace(set_my_commands=AsyncMock()), bot_data={})
+        with patch.object(bot.controls, 'post_init', AsyncMock()) as start_polling:
+            await bot.post_init(application)
+        start_polling.assert_awaited_once_with(application)
+        application.bot.set_my_commands.assert_awaited_once()
+        commands = {command.command for command in application.bot.set_my_commands.call_args.args[0]}
+        self.assertIn('transcript', commands)
+
+    def test_bot_main_registers_transcript_handler(self):
+        application = MagicMock()
+        builder = MagicMock()
+        builder.token.return_value = builder
+        builder.post_init.return_value = builder
+        builder.post_stop.return_value = builder
+        builder.build.return_value = application
+        with patch.object(bot.Application, 'builder', return_value=builder):
+            bot.main()
+        handlers = [call.args[0] for call in application.add_handler.call_args_list]
+        self.assertTrue(any('transcript' in getattr(handler, 'commands', set())
+                            for handler in handlers))
+        application.run_polling.assert_called_once_with()
+
     async def test_old_ai_button_cannot_bypass_a_fresh_subtitle_probe(self):
         task = dict(job_id='probing-job', video_id='abcdefghijk',
                     url='https://youtu.be/abcdefghijk', user_id=7, chat_id=77,
@@ -707,7 +746,8 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_authorization_for_every_handler_and_callback_and_revoked_watches(self):
         handlers = [bot.start, bot.stop, bot.record, bot.handle_url, self.controls.watch,
-                    self.controls.watchlist, self.controls.cancelwatch, self.controls.transcribe]
+                    self.controls.watchlist, self.controls.cancelwatch, self.controls.transcript,
+                    self.controls.transcribe]
         for handler in handlers:
             update = self.update(user=99)
             await handler(update, self.context)

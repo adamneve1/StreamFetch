@@ -9,10 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
-    from . import storage, transcript_reader, transcription_worker
+    from . import storage, transcript_reader, transcription_queue, transcription_worker
 except ImportError:
     import storage
     import transcript_reader
+    import transcription_queue
     import transcription_worker
 
 
@@ -25,6 +26,13 @@ class SubtitleChoice:
     source: str
     language: str
     extension: str
+
+
+@dataclass(frozen=True)
+class AIQueueResult:
+    status: str
+    created: bool = False
+    deferred: bool = False
 
 
 def language_base(value):
@@ -144,6 +152,38 @@ def public_metadata(metadata, video_id):
     }.items() if value is not None}
 
 
+def recording_job(task):
+    """Build the shared catalogue entry for Telegram and Web requests."""
+    owner_type = task.get('owner_type') or 'telegram'
+    owner_id = task.get('owner_id', task.get('user_id'))
+    return dict(job_id=task['job_id'], source='youtube', source_type='youtube',
+                source_id=task['video_id'], source_name='YouTube',
+                owner_type=owner_type, owner_id=str(owner_id),
+                origin=task.get('origin') or owner_type + '_transcript', transcript_only=True,
+                requested_at=task['requested_at'], note=task.get('title') or '',
+                source_metadata=task.get('source_metadata') or {'youtube_id': task['video_id']})
+
+
+def resolve(task, accessible):
+    """Resolve a cached/subtitle transcript without downloading media or invoking AI."""
+    cached = find_cached(task['video_id'], 'id', accessible)
+    if cached:
+        return cached
+    metadata = probe(task['url'])
+    choice = select_subtitle(metadata)
+    task.update(title=metadata.get('title') or '',
+                source_metadata=public_metadata(metadata, task['video_id']),
+                language=(choice.language if choice else
+                          metadata.get('language') or metadata.get('original_language') or 'id'))
+    cached = find_cached(task['video_id'], task['language'], accessible)
+    if cached:
+        return cached
+    if not choice:
+        raise SubtitleUnavailable('Subtitle manual maupun otomatis tidak tersedia.')
+    content = download_subtitle(task['url'], task['video_id'], choice)
+    return publish(recording_job(task), choice, content)
+
+
 def publish(job, choice, content):
     """Publish subtitle sidecars through the same catalogue contract as STT."""
     root = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve()
@@ -203,3 +243,37 @@ def download_temporary_audio(url, job_id):
         if isinstance(exc, SubtitleUnavailable):
             raise
         raise SubtitleUnavailable('Audio sementara tidak dapat disiapkan.') from exc
+
+
+def enqueue_ai(client, task):
+    """Admit an explicitly approved request to the existing STT queue."""
+    row = storage.recording(task['job_id'])
+    status = ((row or {}).get('transcript') or {}).get('status')
+    if status in {'completed', 'queued', 'transcribing'}:
+        return AIQueueResult(status)
+    temporary = None
+    try:
+        temporary = download_temporary_audio(task['url'], task['job_id'])
+        job = recording_job(task)
+        if not row:
+            storage.save_recording(job, 'ready', 'Transcript Only · menunggu transkripsi AI')
+        storage.save_capture_request({**job, 'url': task['url'],
+                                      'temporary_media_filename': temporary})
+        status, created = transcription_queue.enqueue(client, task['job_id'])
+        if not created and status not in {'queued', 'transcribing', 'completed'}:
+            raise ValueError('Transkrip sudah selesai atau tidak dapat diulang.')
+        return AIQueueResult(status, created=created)
+    except Exception:
+        current = storage.recording(task['job_id'])
+        status = ((current or {}).get('transcript') or {}).get('status')
+        if status in {'queued', 'transcribing'}:
+            return AIQueueResult(status, deferred=True)
+        if temporary:
+            root = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve()
+            candidate = root / temporary
+            if Path(temporary).name == temporary and candidate.parent.resolve() == root and not candidate.is_symlink():
+                candidate.unlink(missing_ok=True)
+        if current:
+            storage.save_transcription_state(task['job_id'], 'failed', source='ai',
+                                             error='Audio atau antrean AI belum dapat disiapkan.')
+        raise

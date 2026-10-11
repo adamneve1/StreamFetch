@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, AsyncMock
 from pathlib import Path
 import fakeredis
-from app import web, storage, worker, telegram_store
+from app import web, storage, worker, telegram_store, youtube_transcript
 
 
 class WebTests(unittest.TestCase):
@@ -34,6 +34,89 @@ class WebTests(unittest.TestCase):
         value.update(fields)
         telegram_store.save_watch(value)
         return value
+
+    def test_transcript_only_page_and_subtitle_first_flow_use_shared_pipeline(self):
+        page = self.client.get('/transcript-only')
+        self.assertEqual(page.status_code, 200)
+        self.assertIn('frame-src https://www.youtube-nocookie.com',
+                      page.headers['Content-Security-Policy'])
+        page.close()
+        metadata = {'id': 'abcdefghijk', 'title': 'Dialog', 'language': 'id',
+                    'subtitles': {'id': [{'ext': 'vtt'}]}, 'automatic_captions': {}}
+        subtitle = 'WEBVTT\n\n00:00:01.000 --> 00:00:02.500\nHalo Batam\n'
+        with patch.object(youtube_transcript, 'probe', return_value=metadata), \
+                patch.object(youtube_transcript, 'download_subtitle', return_value=subtitle), \
+                patch.object(youtube_transcript, 'download_temporary_audio') as audio:
+            response = self.post('transcript-only', {'url': 'https://youtu.be/abcdefghijk'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json['status'], 'completed')
+        self.assertEqual(response.json['source'], 'manual')
+        self.assertEqual(response.json['language'], 'id')
+        self.assertEqual(set(response.json['exports']), {'txt', 'srt', 'vtt'})
+        audio.assert_not_called()
+        self.assertEqual(self.redis.llen('download_queue'), 0)
+        self.assertEqual(self.redis.llen('transcription_queue'), 0)
+        row = storage.recording(response.json['job_id'])
+        self.assertEqual((row['owner_type'], row['owner_id']), ('web', 'admin'))
+        self.assertTrue(row['transcript_only'])
+        self.assertNotIn('filename', row)
+
+    def test_transcript_only_requires_consent_deduplicates_and_uses_existing_ai_queue(self):
+        metadata = {'id': 'abcdefghijk', 'title': 'Blocked', 'language': 'en',
+                    'subtitles': {}, 'automatic_captions': {}}
+        with patch.object(youtube_transcript, 'probe', return_value=metadata) as probe, \
+                patch.object(youtube_transcript, 'download_temporary_audio') as audio:
+            first = self.post('transcript-only', {'url': 'https://youtu.be/abcdefghijk'})
+            duplicate = self.post('transcript-only', {'url': 'https://youtu.be/abcdefghijk'})
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(first.json['status'], 'consent_required')
+        self.assertEqual(duplicate.json['job_id'], first.json['job_id'])
+        self.assertEqual(probe.call_count, 1)
+        audio.assert_not_called()
+        self.assertEqual(self.redis.llen('transcription_queue'), 0)
+
+        temporary = Path(self.tmp.name) / ('transcript-ai-' + first.json['job_id'] + '.m4a')
+        def download(*_args):
+            temporary.write_bytes(b'audio')
+            return temporary.name
+        with patch.object(youtube_transcript, 'download_temporary_audio', side_effect=download) as audio:
+            approved = self.post('transcript-only/abcdefghijk/ai', {})
+            repeated = self.post('transcript-only/abcdefghijk/ai', {})
+        self.assertEqual(approved.status_code, 202)
+        self.assertEqual(approved.json['status'], 'processing')
+        self.assertEqual(repeated.json['status'], 'processing')
+        self.assertEqual(audio.call_count, 1)
+        self.assertEqual(self.redis.llen('transcription_queue'), 1)
+        self.assertEqual(storage.recording(first.json['job_id'])['transcript']['source'], 'ai')
+        self.assertTrue(temporary.exists())
+
+    def test_transcript_only_ai_consent_is_scoped_to_web_owner(self):
+        telegram_store.save_task('transcript-only-web:admin:abcdefghijk', {
+            'job_id': 'private-transcript', 'video_id': 'abcdefghijk',
+            'url': 'https://youtu.be/abcdefghijk', 'owner_type': 'web',
+            'owner_id': 'admin', 'state': 'awaiting_consent', 'requested_at': 100,
+        })
+        user = self.app.test_client()
+        token = user.post('/api/login', json={'password': 'test-password'}).json['csrf']
+        response = user.post('/api/transcript-only/abcdefghijk/ai', json={},
+                             headers={'X-CSRF-Token': token})
+        self.assertEqual(response.status_code, 404)
+        self.assertIsNone(storage.recording('private-transcript'))
+        self.assertEqual(self.redis.llen('transcription_queue'), 0)
+
+    def test_transcript_only_ai_lock_failure_is_retryable_without_audio(self):
+        telegram_store.save_task('transcript-only-web:admin:abcdefghijk', {
+            'job_id': 'retry-transcript', 'video_id': 'abcdefghijk',
+            'url': 'https://youtu.be/abcdefghijk', 'owner_type': 'web',
+            'owner_id': 'admin', 'state': 'awaiting_consent', 'requested_at': 100,
+        })
+        with patch.object(self.redis, 'set', side_effect=web.redis.exceptions.ConnectionError), \
+                patch.object(youtube_transcript, 'download_temporary_audio') as audio:
+            response = self.post('transcript-only/abcdefghijk/ai', {})
+        self.assertEqual(response.status_code, 503)
+        audio.assert_not_called()
+        self.assertEqual(telegram_store.task(
+            'transcript-only-web:admin:abcdefghijk')['state'], 'awaiting_consent')
 
     def test_transcription_cancel_queue_restart_auth_and_completed_race(self):
         from app import transcription_queue, transcription_worker

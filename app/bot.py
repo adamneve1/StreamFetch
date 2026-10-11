@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 import re
 import uuid
 import time
@@ -13,7 +14,7 @@ except ImportError:
 import redis
 
 # pyrefly: ignore [missing-import]
-from telegram import Update
+from telegram import BotCommand, Update
 # pyrefly: ignore [missing-import]
 from telegram.ext import (
     Application,
@@ -49,6 +50,19 @@ r = redis.Redis(
     socket_timeout=5,
 )
 controls = telegram_controls.Controls(r)
+log = logging.getLogger(__name__)
+
+
+BOT_COMMANDS = [
+    BotCommand('start', 'Buka menu StreamFetch'),
+    BotCommand('transcript', 'Buat transkrip dari URL YouTube'),
+    BotCommand('record', 'Rekam live Oryx'),
+    BotCommand('stop', 'Hentikan capture'),
+    BotCommand('watch', 'Jadwalkan pantauan YouTube'),
+    BotCommand('watchlist', 'Lihat Watch aktif'),
+    BotCommand('cancelwatch', 'Batalkan Watch'),
+    BotCommand('transcribe', 'Transkrip rekaman yang ada'),
+]
 
 
 def is_youtube_url(text):
@@ -71,6 +85,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/record - rekam live Oryx yang dikonfigurasi\n"
         "/stop - hentikan capture\n"
         "/watch · /watchlist · /cancelwatch\n"
+        "/transcript - transkrip langsung dari YouTube\n"
         "/transcribe - pilih rekaman",
         reply_markup=controls.mode_buttons(),
     )
@@ -194,12 +209,20 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def post_init(application):
+    await controls.post_init(application)
+    try:
+        await application.bot.set_my_commands(BOT_COMMANDS)
+    except Exception:
+        log.warning('telegram command menu update failed', exc_info=True)
+
+
 def main():
 
     app = (
         Application.builder()
         .token(TOKEN)
-        .post_init(controls.post_init)
+        .post_init(post_init)
         .post_stop(controls.post_stop)
         .build()
     )
@@ -215,6 +238,7 @@ def main():
     app.add_handler(CommandHandler('watch', controls.watch))
     app.add_handler(CommandHandler('watchlist', controls.watchlist))
     app.add_handler(CommandHandler('cancelwatch', controls.cancelwatch))
+    app.add_handler(CommandHandler('transcript', controls.transcript))
     app.add_handler(CallbackQueryHandler(controls.cancelwatch_callback, pattern=r'^watchcancel:'))
     app.add_handler(CallbackQueryHandler(controls.mode_callback, pattern=r'^mode:'))
     app.add_handler(CallbackQueryHandler(controls.transcript_ai_callback, pattern=r'^transcriptai:'))

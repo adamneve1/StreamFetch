@@ -3,6 +3,7 @@ import hmac
 import json
 import math
 import os
+import re
 import secrets
 import subprocess
 import time
@@ -17,7 +18,7 @@ from flask.sessions import SecureCookieSessionInterface
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 try:
-    from . import clipper, quality, storage, telegram_store, transcript_reader, transcription_queue, watch_service
+    from . import clipper, quality, storage, telegram_store, transcript_reader, transcription_queue, watch_service, youtube_transcript
 except ImportError:
     import clipper
     import quality
@@ -26,6 +27,7 @@ except ImportError:
     import transcript_reader
     import transcription_queue
     import watch_service
+    import youtube_transcript
 
 ADMIT = """
 if redis.call('EXISTS', 'worker:heartbeat') == 0 then return 'offline' end
@@ -138,6 +140,18 @@ def create_app(client=None):
             return owner_type == 'web' and owner_id == session.get('role', 'user')
         # Legacy rows predate explicit ownership and retain their existing shared visibility.
         return True
+
+    def transcript_only_key(video_id, role=None):
+        return f'transcript-only-web:{role or session.get("role", "user")}:{video_id}'
+
+    def transcript_only_payload(row):
+        transcript = row.get('transcript') or {}
+        return dict(status='completed', job_id=row['job_id'],
+                    source=transcript.get('source'), language=transcript.get('language'),
+                    view_url=f'/api/recordings/{row["job_id"]}/transcript/view',
+                    exports=[kind for kind, key in (
+                        ('txt', 'txt_filename'), ('srt', 'srt_filename'), ('vtt', 'vtt_filename'))
+                             if transcript.get(key)])
 
     def local_media(row):
         filename = row.get('filename')
@@ -294,7 +308,7 @@ def create_app(client=None):
         response.headers['Content-Security-Policy'] = (
             "default-src 'self'; script-src 'self'; style-src 'self'; "
             "img-src 'self' data: https://i.ytimg.com; frame-ancestors 'none'")
-        if request.endpoint in {'index', 'clipper_page'}:
+        if request.endpoint in {'index', 'clipper_page', 'transcript_only_page'}:
             response.headers['Content-Security-Policy'] = (
                 "default-src 'self'; script-src 'self' https://www.youtube.com; style-src 'self'; "
                 "img-src 'self' data: https://i.ytimg.com; frame-src https://www.youtube-nocookie.com; "
@@ -333,6 +347,10 @@ def create_app(client=None):
 
     @app.get('/clipper')
     def clipper_page():
+        return app.send_static_file('index.html')
+
+    @app.get('/transcript-only')
+    def transcript_only_page():
         return app.send_static_file('index.html')
 
     @app.post('/api/login')
@@ -830,6 +848,94 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
             row.pop('owner_type', None)
             row.pop('owner_id', None)
         return jsonify(recordings=rows[:200], total=len(rows))
+
+    @app.post('/api/transcript-only')
+    def create_transcript_only():
+        data = request.get_json() or {}
+        url = storage.validate_url(str(data.get('url', '')).strip(), youtube=True)
+        video_id = storage.youtube_source_id(url)
+        if not video_id:
+            raise ValueError('Masukkan URL video YouTube yang valid.')
+        role = session.get('role', 'user')
+        key = transcript_only_key(video_id, role)
+        accessible = duplicate_visible
+        cached = youtube_transcript.find_cached(video_id, 'id', accessible)
+        if cached:
+            telegram_store.delete_task(key)
+            return jsonify(**transcript_only_payload(cached))
+
+        task = dict(job_id=uuid.uuid4().hex, video_id=video_id, url=url,
+                    owner_type='web', owner_id=role, origin='web_transcript',
+                    requested_at=time.time(), state='probing')
+        if not telegram_store.claim_task(key, task):
+            current = telegram_store.task(key)
+            if (not current or current.get('owner_type') != 'web'
+                    or current.get('owner_id') != role):
+                return jsonify(error='Permintaan Transcript Only tidak ditemukan.'), 404
+            row = storage.recording(current.get('job_id', ''))
+            transcript = (row or {}).get('transcript') or {}
+            if transcript.get('status') == 'completed' and duplicate_visible(row):
+                telegram_store.delete_task(key)
+                return jsonify(**transcript_only_payload(row))
+            if current.get('state') == 'awaiting_consent' or transcript.get('status') in {'failed', 'cancelled'}:
+                return jsonify(status='consent_required', video_id=video_id,
+                               job_id=current['job_id'], title=current.get('title') or ''), 202
+            return jsonify(status='processing', video_id=video_id,
+                           job_id=current['job_id']), 202
+
+        try:
+            row = youtube_transcript.resolve(task, accessible)
+        except Exception as exc:
+            app.logger.warning('web subtitle ingestion unavailable video=%s error_type=%s',
+                               video_id, type(exc).__name__)
+            task['state'] = 'awaiting_consent'
+            telegram_store.save_task(key, task)
+            return jsonify(status='consent_required', video_id=video_id,
+                           job_id=task['job_id'], title=task.get('title') or ''), 202
+        telegram_store.delete_task(key)
+        return jsonify(**transcript_only_payload(row))
+
+    @app.post('/api/transcript-only/<video_id>/ai')
+    def approve_transcript_only_ai(video_id):
+        if not re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id):
+            raise ValueError('Video YouTube tidak valid.')
+        role = session.get('role', 'user')
+        key = transcript_only_key(video_id, role)
+        task = telegram_store.task(key)
+        if (not task or task.get('owner_type') != 'web' or task.get('owner_id') != role
+                or task.get('video_id') != video_id):
+            return jsonify(error='Permintaan Transcript Only tidak ditemukan atau sudah selesai.'), 404
+        if task.get('state') == 'probing':
+            return jsonify(error='Subtitle masih diperiksa. Tunggu hasilnya sebelum memilih AI.'), 409
+        lock_key = 'transcript-only-ai:' + task['job_id']
+        lock_token = uuid.uuid4().hex
+        try:
+            acquired = r.set(lock_key, lock_token, nx=True, ex=330)
+        except redis.exceptions.RedisError:
+            return jsonify(error='Transkripsi AI belum dapat dimulai. Coba lagi nanti.'), 503
+        if not acquired:
+            return jsonify(status='processing', job_id=task['job_id'], video_id=video_id), 202
+        try:
+            result = youtube_transcript.enqueue_ai(r, task)
+            row = storage.recording(task['job_id'])
+            if result.status == 'completed' and row and duplicate_visible(row):
+                telegram_store.delete_task(key)
+                return jsonify(**transcript_only_payload(row))
+            telegram_store.update_task(key, state='ai_queued')
+            telegram_store.subscribe_web(task['job_id'], role)
+            return jsonify(status='processing', job_id=task['job_id'], video_id=video_id,
+                           deferred=result.deferred), 202
+        except Exception as exc:
+            telegram_store.update_task(key, state='awaiting_consent')
+            app.logger.warning('web transcript AI admission unavailable video=%s error_type=%s',
+                               video_id, type(exc).__name__)
+            return jsonify(error='Transkripsi AI belum dapat dimulai. Coba lagi nanti.'), 503
+        finally:
+            try:
+                if r.get(lock_key) == lock_token:
+                    r.delete(lock_key)
+            except redis.exceptions.RedisError:
+                pass
 
     @app.post('/api/recordings/<job_id>/transcript')
     def create_transcript(job_id):
