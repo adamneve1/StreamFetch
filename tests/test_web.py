@@ -1,13 +1,15 @@
 import json
+import io
 import os
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, AsyncMock
 from pathlib import Path
 import fakeredis
-from app import web, storage, worker, telegram_store, youtube_transcript
+from app import media_upload, web, storage, worker, telegram_store, youtube_transcript
 
 
 class WebTests(unittest.TestCase):
@@ -117,6 +119,132 @@ class WebTests(unittest.TestCase):
         audio.assert_not_called()
         self.assertEqual(telegram_store.task(
             'transcript-only-web:admin:abcdefghijk')['state'], 'awaiting_consent')
+
+    def test_transcript_upload_requires_consent_validates_and_uses_shared_queue(self):
+        without_consent = self.client.post(
+            '/api/transcript-only/upload',
+            data={'file': (io.BytesIO(b'media'), 'dialog.mp3')},
+            headers={'X-CSRF-Token': self.csrf})
+        self.assertEqual(without_consent.status_code, 409)
+        self.assertEqual(self.redis.llen('transcription_queue'), 0)
+        with patch.object(media_upload, 'inspect_media', return_value=media_upload.MediaInfo(
+                size=5, duration=12.5, format_name='mp3', has_video=False,
+                sha256='a' * 64)):
+            response = self.client.post(
+                '/api/transcript-only/upload',
+                data={'consent': 'ai', 'file': (io.BytesIO(b'media'), 'dialog.mp3')},
+                headers={'X-CSRF-Token': self.csrf})
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json['status'], 'processing')
+        self.assertEqual(self.redis.llen('transcription_queue'), 1)
+        row = storage.recording(response.json['job_id'])
+        self.assertTrue(row['uploaded_media'])
+        self.assertEqual((row['owner_type'], row['owner_id']), ('web', 'admin'))
+        self.assertEqual(row['upload_name'], 'dialog.mp3')
+        private = storage.capture_request(row['job_id'])
+        self.assertTrue(private['temporary_media_private'])
+        path = media_upload.private_media_path(private['temporary_media_filename'])
+        self.assertTrue(path.is_file())
+        self.assertNotIn(path.name, self.client.get('/api/recordings').text)
+
+    def test_transcript_upload_rejects_invalid_extension_and_deduplicates_content(self):
+        invalid = self.client.post(
+            '/api/transcript-only/upload',
+            data={'consent': 'ai', 'file': (io.BytesIO(b'not media'), 'payload.exe')},
+            headers={'X-CSRF-Token': self.csrf})
+        self.assertEqual(invalid.status_code, 400)
+        self.assertIn('Format file', invalid.json['error'])
+        info = media_upload.MediaInfo(size=5, duration=3, format_name='wav',
+                                      has_video=False, sha256='b' * 64)
+        with patch.object(media_upload, 'inspect_media', return_value=info):
+            first = self.client.post('/api/transcript-only/upload',
+                data={'consent': 'ai', 'file': (io.BytesIO(b'first'), 'one.wav')},
+                headers={'X-CSRF-Token': self.csrf})
+            duplicate = self.client.post('/api/transcript-only/upload',
+                data={'consent': 'ai', 'file': (io.BytesIO(b'first'), 'two.wav')},
+                headers={'X-CSRF-Token': self.csrf})
+        self.assertEqual(duplicate.status_code, 202)
+        self.assertTrue(duplicate.json['duplicate'])
+        self.assertEqual(duplicate.json['job_id'], first.json['job_id'])
+        self.assertEqual(self.redis.llen('transcription_queue'), 1)
+
+    def test_transcript_upload_enforces_server_side_size_limit(self):
+        with patch.dict(os.environ, WEB_TRANSCRIPT_UPLOAD_MAX_BYTES='4'):
+            limited_app = web.create_app(self.redis)
+        limited_app.testing = True
+        client = limited_app.test_client()
+        token = client.post('/api/login', json={'password': 'admin-password'}).json['csrf']
+        with patch.object(media_upload, 'inspect_media') as inspect:
+            response = client.post('/api/transcript-only/upload',
+                data={'consent': 'ai', 'file': (io.BytesIO(b'12345'), 'large.mp3')},
+                headers={'X-CSRF-Token': token})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('terlalu besar', response.json['error'])
+        inspect.assert_not_called()
+
+    def test_transcript_upload_hard_request_limit_is_clear(self):
+        self.app.config['MAX_CONTENT_LENGTH'] = 64
+        response = self.client.post('/api/transcript-only/upload',
+            data={'consent': 'ai', 'file': (io.BytesIO(b'x' * 128), 'large.mp3')},
+            headers={'X-CSRF-Token': self.csrf})
+        self.assertEqual(response.status_code, 413)
+        self.assertIn('File terlalu besar', response.json['error'])
+        self.assertIn('100.0 MB', response.json['error'])
+
+    def test_concurrent_identical_web_uploads_claim_one_canonical_job(self):
+        barrier = threading.Barrier(2)
+        info = media_upload.MediaInfo(size=5, duration=3, format_name='wav',
+                                      has_video=False, sha256='e' * 64)
+        def submit(_):
+            client = self.app.test_client()
+            token = client.post('/api/login', json={'password': 'test-password'}).json['csrf']
+            return client.post('/api/transcript-only/upload',
+                data={'consent': 'ai', 'file': (io.BytesIO(b'first'), 'same.wav')},
+                headers={'X-CSRF-Token': token})
+        def synchronized_miss(*_args, **_kwargs):
+            barrier.wait(timeout=5)
+            return None
+        with patch.object(media_upload, 'inspect_media', return_value=info), \
+                patch.object(media_upload, 'duplicate', side_effect=synchronized_miss), \
+                ThreadPoolExecutor(max_workers=2) as pool:
+            responses = list(pool.map(submit, range(2)))
+        self.assertEqual([response.status_code for response in responses], [202, 202])
+        self.assertEqual(len({response.json['job_id'] for response in responses}), 1)
+        self.assertEqual(self.redis.llen('transcription_queue'), 1)
+        self.assertEqual(sum(row.get('uploaded_media', False) for row in storage.recordings()), 1)
+
+    def test_transcript_upload_ownership_and_cancel_cleanup(self):
+        job_id = 'privateupload'
+        path = media_upload.upload_path(job_id, '.mp3')
+        path.write_bytes(b'private')
+        info = media_upload.MediaInfo(size=7, duration=3, format_name='mp3',
+                                      has_video=False, sha256='c' * 64)
+        media_upload.enqueue(self.redis, job_id=job_id, path=path,
+                             original_name='private.mp3', owner_type='web', owner_id='admin',
+                             origin='web_transcript_upload', info=info)
+        user = self.app.test_client()
+        token = user.post('/api/login', json={'password': 'test-password'}).json['csrf']
+        self.assertNotIn(job_id, user.get('/api/recordings').text)
+        self.assertEqual(user.get(f'/api/recordings/{job_id}/transcript/data').status_code, 404)
+        cancelled = self.client.post(f'/api/recordings/{job_id}/transcript/cancel', json={},
+                                     headers={'X-CSRF-Token': self.csrf})
+        self.assertEqual(cancelled.status_code, 200)
+        self.assertFalse(path.exists())
+
+    def test_transcript_upload_redis_outage_is_durable_and_deferred(self):
+        info = media_upload.MediaInfo(size=5, duration=3, format_name='mp3',
+                                      has_video=False, sha256='9' * 64)
+        with patch.object(media_upload, 'inspect_media', return_value=info), \
+                patch.object(self.redis, 'eval', side_effect=web.redis.exceptions.ConnectionError):
+            response = self.client.post('/api/transcript-only/upload',
+                data={'consent': 'ai', 'file': (io.BytesIO(b'media'), 'dialog.mp3')},
+                headers={'X-CSRF-Token': self.csrf})
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(response.json['deferred'])
+        row = storage.recording(response.json['job_id'])
+        self.assertEqual(row['transcript']['status'], 'queued')
+        request = storage.capture_request(row['job_id'])
+        self.assertTrue(media_upload.private_media_path(request['temporary_media_filename']).exists())
 
     def test_transcription_cancel_queue_restart_auth_and_completed_race(self):
         from app import transcription_queue, transcription_worker

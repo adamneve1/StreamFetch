@@ -2,6 +2,7 @@ import json
 import asyncio
 import os
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -11,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import fakeredis
 
 os.environ.setdefault('TELEGRAM_BOT_TOKEN', '123456:TEST_TOKEN')
-from app import bot, storage, telegram_controls as tc, telegram_store as store, transcription_queue, watch_service, web, worker, youtube_transcript
+from app import bot, media_upload, storage, telegram_controls as tc, telegram_store as store, transcription_queue, watch_service, web, worker, youtube_transcript
 
 
 class TelegramTests(unittest.IsolatedAsyncioTestCase):
@@ -857,6 +858,122 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(storage.recording('durable-ai')['transcript']['status'], 'queued')
         self.assertTrue(audio.exists())
         self.assertIn('akan dilanjutkan', update.message.reply_text.call_args.args[0])
+
+    async def test_transcript_upload_waits_for_consent_then_uses_shared_queue(self):
+        snapshot, _ = store.switch_workspace(77, 7, 'transcript')
+        update = self.update()
+        update.message.audio = SimpleNamespace(
+            file_id='telegram-file-id', file_unique_id='unique-audio',
+            file_name='dialog.mp3', file_size=5, duration=3, mime_type='audio/mpeg')
+        get_file = AsyncMock()
+        context = SimpleNamespace(args=[], user_data={}, bot=SimpleNamespace(get_file=get_file))
+        await self.controls.transcript_upload(update, context)
+        get_file.assert_not_awaited()
+        text = update.message.reply_text.call_args.args[0]
+        self.assertIn('dialog.mp3', text)
+        self.assertIn('Size:', text)
+        button = update.message.reply_text.call_args.kwargs['reply_markup'].inline_keyboard[0][0]
+        self.assertRegex(button.callback_data, r'^uploadai:\d+:[a-f0-9]{16}$')
+
+        async def download(custom_path):
+            Path(custom_path).write_bytes(b'media')
+        telegram_file = SimpleNamespace(download_to_drive=AsyncMock(side_effect=download))
+        context.bot.get_file.return_value = telegram_file
+        consent = self.update(callback=button.callback_data)
+        with patch.object(media_upload, 'inspect_media', return_value=media_upload.MediaInfo(
+                size=5, duration=3, format_name='mp3', has_video=False,
+                sha256='d' * 64)):
+            await self.controls.upload_ai_callback(consent, context)
+        context.bot.get_file.assert_awaited_once_with('telegram-file-id')
+        telegram_file.download_to_drive.assert_awaited_once()
+        self.assertEqual(self.redis.llen('transcription_queue'), 1)
+        row = next(row for row in storage.recordings() if row.get('uploaded_media'))
+        self.assertEqual((row['workspace'], row['workspace_generation']),
+                         ('transcript', snapshot['generation']))
+        self.assertEqual((row['owner_type'], row['owner_id']), ('telegram', '7'))
+
+    async def test_transcript_upload_rejects_unsupported_oversize_and_stale_workspace(self):
+        snapshot, _ = store.switch_workspace(77, 7, 'transcript')
+        for name, size in [('payload.exe', 10), ('huge.mp4', media_upload.telegram_max_bytes() + 1)]:
+            update = self.update()
+            update.message.document = SimpleNamespace(
+                file_id='id-' + name, file_unique_id='unique-' + name,
+                file_name=name, file_size=size, mime_type='application/octet-stream')
+            await self.controls.transcript_upload(update, self.context)
+            self.assertIn('❌', update.message.reply_text.call_args.args[0])
+        valid = self.update()
+        valid.message.video = SimpleNamespace(file_id='video-id', file_unique_id='unique-video',
+                                              file_name='clip.webm', file_size=10, duration=2)
+        await self.controls.transcript_upload(valid, self.context)
+        callback = valid.message.reply_text.call_args.kwargs['reply_markup'].inline_keyboard[0][0].callback_data
+        store.switch_workspace(77, 7, 'download')
+        stale = self.update(callback=callback)
+        context = SimpleNamespace(args=[], user_data={}, bot=SimpleNamespace(get_file=AsyncMock()))
+        await self.controls.upload_ai_callback(stale, context)
+        context.bot.get_file.assert_not_awaited()
+        self.assertIn('workspace telah berubah', stale.message.reply_text.call_args.args[0])
+        self.assertEqual(self.redis.llen('transcription_queue'), 0)
+
+    async def test_download_workspace_does_not_activate_attachment_transcription(self):
+        update = self.update()
+        update.message.voice = SimpleNamespace(file_id='voice', file_unique_id='voice-unique',
+                                               file_size=10, duration=2)
+        await self.controls.transcript_upload(update, self.context)
+        update.message.reply_text.assert_not_awaited()
+        self.assertEqual(store.tasks(), [])
+
+    async def test_transcript_workspace_accepts_audio_video_voice_and_document_attachments(self):
+        store.switch_workspace(77, 7, 'transcript')
+        fixtures = {
+            'audio': dict(file_name='audio.m4a', duration=2),
+            'video': dict(file_name='video.mov', duration=2),
+            'voice': dict(duration=2),
+            'document': dict(file_name='document.wav'),
+        }
+        for index, (kind, fields) in enumerate(fixtures.items()):
+            with self.subTest(kind=kind):
+                update = self.update()
+                attachment = SimpleNamespace(file_id=f'id-{index}', file_unique_id=f'unique-{index}',
+                                             file_size=10, **fields)
+                setattr(update.message, kind, attachment)
+                await self.controls.transcript_upload(update, self.context)
+                markup = update.message.reply_text.call_args.kwargs['reply_markup']
+                self.assertRegex(markup.inline_keyboard[0][0].callback_data,
+                                 r'^uploadai:\d+:[a-f0-9]{16}$')
+        self.assertEqual(len([key for key, _ in store.tasks()
+                              if key.startswith('transcript-upload:')]), 4)
+
+    async def test_expired_upload_consent_is_removed_without_downloading(self):
+        store.switch_workspace(77, 7, 'transcript')
+        update = self.update()
+        update.message.audio = SimpleNamespace(file_id='old', file_unique_id='old-unique',
+                                               file_name='old.mp3', file_size=10, duration=2)
+        await self.controls.transcript_upload(update, self.context)
+        key, task = next((key, task) for key, task in store.tasks()
+                         if key.startswith('transcript-upload:'))
+        store.update_task(key, requested_at=100)
+        with patch.dict(os.environ, TRANSCRIPT_UPLOAD_CONSENT_TTL_SECONDS='60'):
+            await self.controls.tick(None, now=161)
+        self.assertIsNone(store.task(key))
+        self.assertIsNone(storage.recording(task['job_id']))
+
+    async def test_expired_upload_callback_cannot_bypass_periodic_cleanup(self):
+        store.switch_workspace(77, 7, 'transcript')
+        update = self.update()
+        update.message.audio = SimpleNamespace(file_id='old', file_unique_id='old-direct',
+                                               file_name='old.mp3', file_size=10, duration=2)
+        await self.controls.transcript_upload(update, self.context)
+        key, _ = next((key, task) for key, task in store.tasks()
+                      if key.startswith('transcript-upload:'))
+        store.update_task(key, requested_at=time.time() - 61)
+        callback = update.message.reply_text.call_args.kwargs['reply_markup'].inline_keyboard[0][0]
+        consent = self.update(callback=callback.callback_data)
+        context = SimpleNamespace(args=[], user_data={}, bot=SimpleNamespace(get_file=AsyncMock()))
+        with patch.dict(os.environ, TRANSCRIPT_UPLOAD_CONSENT_TTL_SECONDS='60'):
+            await self.controls.upload_ai_callback(consent, context)
+        context.bot.get_file.assert_not_awaited()
+        self.assertIsNone(store.task(key))
+        self.assertIn('kedaluwarsa', consent.message.reply_text.call_args.args[0])
 
     async def test_invalid_callback_and_missing_recording_do_not_enqueue(self):
         for data in ['transcribe:../private', 'transcribe:missing']:

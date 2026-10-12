@@ -83,6 +83,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"StreamFetch\nWorkspace aktif: {active}\n\n"
         + ("Kirim link YouTube/Shorts, TikTok, atau Instagram Reels.\n\n"
+           "Kamu juga bisa mengirim file MP3, MP4, M4A, WAV, MOV, atau WEBM.\n\n"
            if snapshot['workspace'] == 'transcript' else
            "Kirim link YouTube, TikTok video/Live, atau Instagram Reel/post video.\n\n") +
         "Perintah:\n"
@@ -256,6 +257,8 @@ def main():
     app.add_handler(CallbackQueryHandler(controls.mode_callback, pattern=r'^(?:workspace|mode):'))
     app.add_handler(CallbackQueryHandler(controls.transcript_ai_callback, pattern=r'^transcriptai:'))
     app.add_handler(CallbackQueryHandler(controls.transcript_cancel_callback, pattern=r'^transcriptcancel:'))
+    app.add_handler(CallbackQueryHandler(controls.upload_ai_callback, pattern=r'^uploadai:'))
+    app.add_handler(CallbackQueryHandler(controls.upload_cancel_callback, pattern=r'^uploadcancel:'))
     app.add_handler(CommandHandler('transcribe', controls.transcribe))
     app.add_handler(CallbackQueryHandler(controls.callback, pattern=r'^transcribe:'))
     app.add_handler(CallbackQueryHandler(controls.watch_callback, pattern=r'^watch:'))
@@ -266,6 +269,8 @@ def main():
             handle_url,
         )
     )
+    app.add_handler(MessageHandler(filters.ATTACHMENT & ~filters.COMMAND,
+                                   controls.transcript_upload))
 
     print("Bot running...")
 

@@ -104,6 +104,15 @@ test('Transcript Only History reuses the Reader without inventing a media downlo
  assert.equal(row.querySelector('.download-direct'),null);
  assert.equal(row.querySelector('.media-preview-direct'),null);
 });
+test('Transcript Only exposes URL and consented drag-and-drop upload with progress',()=>{
+ const root=path.resolve(__dirname,'..'),html=fs.readFileSync(path.join(root,'app/static/index.html'),'utf8'),source=fs.readFileSync(path.join(root,'app/static/app.js'),'utf8');
+ assert.match(html,/id="transcript-source-upload"[^>]*>Upload File</);
+ assert.match(html,/id="transcript-upload-input"[^>]*accept="[^"]*\.mp3[^"]*\.webm/);
+ assert.match(html,/Use AI transcription &amp; Upload/);
+ assert.match(source,/\['dragenter','dragover'\]/);
+ assert.match(source,/xhr\.upload\.onprogress/);
+ assert.match(source,/form\.append\('consent','ai'\)/);
+});
 test('ETA is rounded, ages from its last update, and handles legacy missing estimates',()=>{
   const f=fixture();
   assert.equal(f.run('transcriptETA({})'),'Estimating time…');

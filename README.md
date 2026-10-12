@@ -88,6 +88,11 @@ YouTube → StreamFetch → yt-dlp → MP4 / MP3
 - Worker dan antrean Redis terpisah dari proses capture/download.
 - Satu transkripsi diproses pada satu waktu untuk membatasi beban CPU.
 - Hasil TXT dan SRT tersimpan di samping file media asli.
+- Transcript Only menerima URL seperti sebelumnya serta upload privat MP3, MP4,
+  M4A, WAV, MOV, dan WEBM dari web. Telegram menerima format yang sama dari
+  audio, video, voice, atau document hanya saat workspace Transcript Only aktif.
+  File baru dikirim/diunduh setelah persetujuan AI, divalidasi dengan ffprobe,
+  lalu dihapus setelah proses terminal.
 - Satu tombol transkripsi mengikuti status Generate Transcript, Waiting,
   Generating, View Transcript, atau Retry Transcript. Saat diproses, progress
   dan perkiraan waktu tersisa ditampilkan tanpa detail provider/model.
@@ -323,6 +328,11 @@ CLOUDFLARE_TRANSCRIPTION_CONCURRENCY=3
 CLOUDFLARE_TRANSCRIPTION_CHUNK_SECONDS=300
 CLOUDFLARE_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS=2
 CLOUDFLARE_TRANSCRIPTION_TIMEOUT=120
+WEB_TRANSCRIPT_UPLOAD_MAX_BYTES=104857600
+TELEGRAM_TRANSCRIPT_UPLOAD_MAX_BYTES=20971520
+TRANSCRIPT_UPLOAD_MAX_DURATION_SECONDS=14400
+TRANSCRIPT_UPLOAD_TEMP_TTL_SECONDS=86400
+TRANSCRIPT_UPLOAD_CONSENT_TTL_SECONDS=86400
 
 # Local transcription fallback
 WHISPER_CPU_THREADS=4
@@ -399,8 +409,15 @@ npm test
 Buat direktori persistent:
 
 ```bash
+export UID="$(id -u)"
+export GID="$(id -g)"
 mkdir -p downloads data
 ```
+
+Ketiga service `web`, `bot`, dan `transcription-worker` harus memakai UID/GID
+yang sama agar `/data/transcript-uploads` dapat dibaca lintas container. Simpan
+nilai numerik tersebut di `.env` bila Compose dijalankan dari service manager
+yang tidak mewarisi environment shell.
 
 Jalankan web control room dan worker:
 
@@ -453,6 +470,11 @@ Untuk deployment melalui reverse proxy HTTPS:
 ```env
 WEB_COOKIE_SECURE=1
 ```
+
+Atur batas request body reverse proxy sekurangnya
+`WEB_TRANSCRIPT_UPLOAD_MAX_BYTES + 1048576` byte untuk overhead multipart, atau
+turunkan batas aplikasi agar tidak melebihi batas proxy/upstream. Repository ini
+tidak menyertakan konfigurasi reverse proxy.
 
 Sesi berakhir setelah 1 jam tanpa aktivitas dan selalu berakhir setelah 24 jam;
 ubah dengan `SESSION_IDLE_HOURS` dan `SESSION_ABSOLUTE_DAYS`. `WEB_SECRET_KEY`

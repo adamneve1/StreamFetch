@@ -13,7 +13,7 @@ const expandedHistoryDetails=new Set();
 const retryingJobs=new Set();
 let watchRefreshId=0,watchLoading=false,watchCreating=false,watchFormClosing=false;
 let dialogRequest=null;
-let transcriptOnlyVideoId='',transcriptOnlyJobId='',transcriptOnlyURL='',transcriptOnlyPhase='idle',transcriptOnlyPolling=false;
+let transcriptOnlyVideoId='',transcriptOnlyJobId='',transcriptOnlyURL='',transcriptOnlyPhase='idle',transcriptOnlyPolling=false,transcriptUploadFile=null,transcriptOnlyMode='url';
 const toastQueue=[];
 let activeToast=null;
 function toast(message,tone='success'){
@@ -197,9 +197,10 @@ async function api(path, data){
  return result;
 }
 function notice(text){$('notice').textContent=text;$('notice').hidden=!text;}
-function showLogin(){const returning=$('login').hidden;closePalette(false);resetToasts();clearSourceDuplicate();if(returning)motion?.reset();$('workspace').hidden=true;$('login').hidden=false;csrf='';isAdmin=false;active=null;lastObservedJob=null;focusedJobId=null;submittedJob=null;focusPending=false;historyRows=[];transcriptOnlyVideoId='';transcriptOnlyJobId='';transcriptOnlyURL='';transcriptOnlyPhase='idle';transcriptOnlyPolling=false;transcriptOnlyBusy(false);$('transcript-only-consent').hidden=true;$('transcript-only-result').hidden=true;collapseSource(false);showSection(routeView());expandedHistoryDetails.clear();if(returning)motion?.loginReveal?.($('login'));$('password').focus({preventScroll:true});}
+function showLogin(){const returning=$('login').hidden;closePalette(false);resetToasts();clearSourceDuplicate();if(returning)motion?.reset();$('workspace').hidden=true;$('login').hidden=false;csrf='';isAdmin=false;active=null;lastObservedJob=null;focusedJobId=null;submittedJob=null;focusPending=false;historyRows=[];transcriptOnlyVideoId='';transcriptOnlyJobId='';transcriptOnlyURL='';transcriptOnlyPhase='idle';transcriptOnlyPolling=false;selectTranscriptUpload(null);transcriptOnlyBusy(false);$('transcript-only-consent').hidden=true;$('transcript-only-result').hidden=true;collapseSource(false);showSection(routeView());expandedHistoryDetails.clear();if(returning)motion?.loginReveal?.($('login'));$('password').focus({preventScroll:true});}
 function controls(){const canMark=!!active&&active.state==='recording'&&active.is_live!==false;$('mark').disabled=pending||!online||!disk?.can_record||!!active||queued>0||(mode==='oryx'&&!$('source').value);$('stop').disabled=pending||!active||['stopping','ready','failed'].includes(active.state);updateClipControls();renderOperationalStatus();}
 function bytes(n=0){return n>=1e9?(n/1e9).toFixed(2)+' GB':(n/1e6).toFixed(1)+' MB';}
+function uploadBytes(n=0){return n>=1024*1024?(n/1024/1024).toFixed(1)+' MB':Math.max(0,n/1024).toFixed(1)+' KB';}
 function clearSourceDuplicate(){sourceDuplicateJob=null;$('source-duplicate').hidden=true;$('source-duplicate-download').removeAttribute('href');}
 function showSourceDuplicate(duplicate,route=false){
  const job=duplicate?.job;if(!job)return clearSourceDuplicate();
@@ -246,7 +247,21 @@ async function generateTranscript(row){try{await api('recordings/'+encodeURIComp
 function transcriptLink(row,kind,label){const link=document.createElement('a');link.href='/api/recordings/'+encodeURIComponent(row.job_id)+'/transcript/'+kind;link.textContent=label;if(kind==='view'){link.target='_blank';link.rel='noopener';}return link;}
 function transcriptOnlyBusy(busy,message){
  $('transcript-only-form').setAttribute('aria-busy',String(busy));$('transcript-only-submit').disabled=busy;$('transcript-only-ai').disabled=busy;
+ $('transcript-upload-form').setAttribute('aria-busy',String(busy));$('transcript-upload-input').disabled=busy;$('transcript-upload-clear').disabled=busy;$('transcript-upload-ai').disabled=busy||!transcriptUploadFile;
  $('transcript-only-submit').textContent=busy?'Checking…':'Get Transcript';if(message)$('transcript-only-status').textContent=message;
+}
+function setTranscriptOnlyMode(mode){
+ transcriptOnlyMode=mode==='upload'?'upload':'url';const upload=transcriptOnlyMode==='upload';
+ $('transcript-only-form').hidden=upload;$('transcript-upload-form').hidden=!upload;
+ $('transcript-source-url').setAttribute('aria-selected',String(!upload));$('transcript-source-upload').setAttribute('aria-selected',String(upload));
+ $('transcript-only-status').textContent=upload?'Select a file, then explicitly consent before it is uploaded.':'Subtitle manual akan dicoba lebih dulu, lalu subtitle otomatis.';
+}
+function selectTranscriptUpload(file){
+ transcriptUploadFile=file||null;$('transcript-upload-selected').hidden=!file;$('transcript-upload-name').textContent=file?.name||'';$('transcript-upload-size').textContent=file?uploadBytes(file.size):'';$('transcript-upload-ai').disabled=!file;$('transcript-upload-progress').hidden=true;$('transcript-upload-progress').removeAttribute('value');
+ if(file)$('transcript-only-status').textContent='Ready to upload after AI consent.';
+}
+function uploadTranscriptFile(file){
+ return new Promise((resolve,reject)=>{const xhr=new XMLHttpRequest(),form=new FormData();form.append('file',file,file.name);form.append('consent','ai');xhr.open('POST','/api/transcript-only/upload');xhr.setRequestHeader('X-CSRF-Token',csrf);if(sessionActivityPending){xhr.setRequestHeader('X-Session-Activity','1');sessionActivityPending=false;}xhr.upload.onprogress=event=>{if(event.lengthComputable){$('transcript-upload-progress').hidden=false;$('transcript-upload-progress').value=event.loaded/event.total*100;$('transcript-only-status').textContent='Uploading… '+Math.round(event.loaded/event.total*100)+'%';}};xhr.onload=()=>{let data={};try{data=JSON.parse(xhr.responseText||'{}');}catch{}if(xhr.status===401){showLogin();return reject(Error('Sesi kamu sudah habis. Masuk lagi, ya.'));}if(xhr.status<200||xhr.status>=300)return reject(Error(data.error||'Upload belum berhasil. Coba lagi, ya.'));resolve(data);};xhr.onerror=()=>reject(Error('Koneksi upload terputus. Coba lagi, ya.'));xhr.send(form);});
 }
 function transcriptOnlySource(source){return ({manual:'manual subtitles',auto:'auto-generated subtitles',ai:'AI transcription'})[source]||'transcript';}
 function showTranscriptOnlyConsent(data){
@@ -275,7 +290,7 @@ async function syncTranscriptOnly(rows){
  if(transcriptOnlyPhase!=='processing'||!transcriptOnlyJobId)return;
  const row=rows.find(item=>item.job_id===transcriptOnlyJobId),state=row?.transcript?.status;
  if(state==='completed')return showTranscriptOnlyResult({status:'completed',job_id:row.job_id,source:row.transcript.source,language:row.transcript.language,view_url:'/api/recordings/'+encodeURIComponent(row.job_id)+'/transcript/view',exports:['txt','srt','vtt'].filter(kind=>row.transcript[kind+'_filename'])});
- if(state==='failed'||state==='cancelled')return transcriptOnlyFailure(Error(row.transcript.error||'AI transcription failed. Try again.'),true);
+ if(state==='failed'||state==='cancelled')return transcriptOnlyFailure(Error(row.transcript.error||(transcriptOnlyMode==='upload'?'AI transcription failed. Upload the file again to retry.':'AI transcription failed. Try again.')),transcriptOnlyMode!=='upload');
  if(state==='queued'||state==='transcribing'){$('transcript-only-status').textContent=state==='queued'?'Waiting for AI transcription…':'AI transcription in progress…';return;}
  if(!row&&transcriptOnlyURL&&!transcriptOnlyPolling){
   transcriptOnlyPolling=true;try{handleTranscriptOnlyResponse(await api('transcript-only',{url:transcriptOnlyURL}));}catch(error){transcriptOnlyFailure(error);}finally{transcriptOnlyPolling=false;}
@@ -294,8 +309,8 @@ function renderTranscript(row,cell){
   const link=transcriptLink(row,'view','View Transcript');link.className='transcript-cta';link.onclick=event=>motion?.followLink?.(link,event,{shell:$('control-room'),origin:cell.querySelector('.recording-heading strong')||link,row:cell.parentElement});box.append(link);
  }else{
   const button=document.createElement('button');button.type='button';button.className='transcript-cta transcript-generate';
-  button.textContent=({queued:'Waiting',transcribing:'Generating',failed:'Retry Transcript',cancelled:'Generate Transcript'})[state]||'Generate Transcript';
-  button.disabled=['queued','transcribing'].includes(state);button.onclick=()=>generateTranscript(row);box.append(button);
+  const reupload=row.uploaded_media&&['failed','cancelled'].includes(state);button.textContent=reupload?'Upload Again':({queued:'Waiting',transcribing:'Generating',failed:'Retry Transcript',cancelled:'Generate Transcript'})[state]||'Generate Transcript';
+  button.disabled=['queued','transcribing'].includes(state);button.onclick=()=>{if(reupload){showSection('transcript');setTranscriptOnlyMode('upload');$('transcript-upload-drop').focus({preventScroll:true});}else generateTranscript(row);};box.append(button);
   if(state==='queued'||state==='transcribing'){
    box.append(transcriptionStop(row));
    const progress=document.createElement('progress');progress.max=100;progress.className='transcript-progress';progress.setAttribute('aria-label','Transcript progress');
@@ -802,6 +817,12 @@ $('transcript-only-ai').onclick=async()=>{
  try{const result=await api('transcript-only/'+encodeURIComponent(transcriptOnlyVideoId)+'/ai',{});handleTranscriptOnlyResponse(result);await refresh();}
  catch(error){transcriptOnlyFailure(error,true);}
 };
+$('transcript-source-url').onclick=()=>setTranscriptOnlyMode('url');$('transcript-source-upload').onclick=()=>setTranscriptOnlyMode('upload');
+$('transcript-upload-input').onchange=event=>selectTranscriptUpload(event.target.files?.[0]);$('transcript-upload-clear').onclick=()=>{selectTranscriptUpload(null);$('transcript-upload-input').value='';};
+for(const eventName of ['dragenter','dragover'])$('transcript-upload-drop').addEventListener(eventName,event=>{event.preventDefault();$('transcript-upload-drop').classList.toggle('is-dragging',true);});
+for(const eventName of ['dragleave','drop'])$('transcript-upload-drop').addEventListener(eventName,event=>{event.preventDefault();$('transcript-upload-drop').classList.toggle('is-dragging',false);if(eventName==='drop')selectTranscriptUpload(event.dataTransfer?.files?.[0]);});
+$('transcript-upload-drop').addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();$('transcript-upload-input').click();}});
+$('transcript-upload-form').onsubmit=async event=>{event.preventDefault();if(!transcriptUploadFile||['checking','processing'].includes(transcriptOnlyPhase))return;transcriptOnlyPhase='checking';transcriptOnlyURL='';$('transcript-only-consent').hidden=true;$('transcript-only-result').hidden=true;transcriptOnlyBusy(true,'Starting private upload…');try{const result=await uploadTranscriptFile(transcriptUploadFile);handleTranscriptOnlyResponse(result);await refresh();}catch(error){transcriptOnlyFailure(error);}finally{$('transcript-upload-progress').hidden=true;}};
 $('record').onclick=async()=>{if(pending)return;pending=true;$('record').textContent='Mengirim…';$('capture-panel').setAttribute('aria-busy','true');controls();notice('');const payload={source:mode,source_id:$('source').value,url:mode==='oryx'?'':sourceInput().value,note:$('note').value,storage:$('storage-target').value,quality:$('quality').value,format:$('media-format').value,compression:$('compression').value};try{const result=await api('record',payload);if(result.duplicate)showSourceDuplicate(result.duplicate,true);else{captureSubmitted(result,payload);await refresh();}}catch(e){collapseSource(false);notice(e.message);}finally{pending=false;updateFormatControls();$('capture-panel').setAttribute('aria-busy','false');controls();}};
 $('source-duplicate-preview').onclick=()=>previewHistoryMedia(sourceDuplicateJob,$('source-duplicate-preview'));
 $('source-duplicate-history').onclick=()=>{if(!sourceDuplicateJob)return;focusedJobId=sourceDuplicateJob.job_id;focusPending=true;clearHistoryFilters(false);showSection('control');renderHistory(historyRows);refresh();};

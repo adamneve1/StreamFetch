@@ -94,7 +94,7 @@ def switch_workspace(chat_id, user_id, target, expected_generation=None):
         # Probes keep running; only consent UI is removed. Marking a probe stale
         # lets its successful result retain its original owner without allowing
         # a later AI prompt to cross the workspace boundary.
-        for row in db.execute("SELECT id, data FROM telegram_tasks WHERE id LIKE 'transcript-only:%'").fetchall():
+        for row in db.execute("SELECT id, data FROM telegram_tasks WHERE id LIKE 'transcript-%:%'").fetchall():
             task = json.loads(row['data'])
             if (str(task.get('chat_id')) == str(chat_id)
                     and str(task.get('user_id')) == str(user_id)):
@@ -115,6 +115,17 @@ def claim_ai_approval(key, chat_id, user_id, generation):
         current = _workspace_row(db, chat_id, user_id)
         row = db.execute('SELECT data FROM telegram_tasks WHERE id=?', (key,)).fetchone()
         task = json.loads(row['data']) if row else None
+        try:
+            consent_ttl = max(60, int(os.getenv(
+                'TRANSCRIPT_UPLOAD_CONSENT_TTL_SECONDS', '86400')))
+        except ValueError:
+            consent_ttl = 86400
+        expired = bool(key.startswith('transcript-upload:') and task
+                       and task.get('state') == 'awaiting_consent'
+                       and time.time() - task.get('requested_at', 0) >= consent_ttl)
+        if expired:
+            db.execute('DELETE FROM telegram_tasks WHERE id=?', (key,))
+            return None
         if (not task or current != {'workspace': 'transcript', 'generation': generation}
                 or str(task.get('chat_id')) != str(chat_id)
                 or str(task.get('user_id')) != str(user_id)
@@ -198,6 +209,28 @@ def claim_transcript_task(key, value):
         return True
 
 
+def claim_upload_task(key, value):
+    """Atomically deduplicate a web upload while allowing terminal retries."""
+    with storage.connection() as db:
+        tables(db)
+        db.execute('BEGIN IMMEDIATE')
+        found = db.execute('SELECT data FROM telegram_tasks WHERE id=?', (key,)).fetchone()
+        current = json.loads(found['data']) if found else None
+        if current:
+            recording = db.execute('SELECT data FROM recordings WHERE id=?',
+                                   (current.get('job_id'),)).fetchone()
+            row = json.loads(recording['data']) if recording else {}
+            status = (row.get('transcript') or {}).get('status')
+            replace = (status in {'failed', 'cancelled'}
+                       or (not recording and time.time() - current.get('requested_at', 0) > 120))
+            if not replace:
+                return current, False
+        db.execute('INSERT INTO telegram_tasks VALUES (?, ?) '
+                   'ON CONFLICT(id) DO UPDATE SET data=excluded.data',
+                   (key, json.dumps(value)))
+        return value, True
+
+
 def watches():
     with storage.connection() as db:
         tables(db)
@@ -248,6 +281,27 @@ def tasks():
     with storage.connection() as db:
         tables(db)
         return [(row['id'], json.loads(row['data'])) for row in db.execute('SELECT * FROM telegram_tasks')]
+
+
+def expire_upload_tasks(now=None):
+    """Expire stale Telegram upload consent records; no media exists before consent."""
+    now = time.time() if now is None else now
+    try:
+        ttl = max(60, int(os.getenv('TRANSCRIPT_UPLOAD_CONSENT_TTL_SECONDS', '86400')))
+    except ValueError:
+        ttl = 86400
+    expired = []
+    with storage.connection() as db:
+        tables(db)
+        db.execute('BEGIN IMMEDIATE')
+        for row in db.execute(
+                "SELECT id, data FROM telegram_tasks WHERE id LIKE 'transcript-upload:%'").fetchall():
+            value = json.loads(row['data'])
+            if (value.get('state') in {'awaiting_consent', 'ai_preparing'}
+                    and now - value.get('requested_at', now) >= ttl):
+                db.execute('DELETE FROM telegram_tasks WHERE id=?', (row['id'],))
+                expired.append(row['id'])
+    return expired
 
 
 def task(key):

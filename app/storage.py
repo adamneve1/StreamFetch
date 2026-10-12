@@ -173,6 +173,8 @@ def _recording_payload(job, state, detail, previous_data=None):
                                       'owner_type', 'owner_id', 'note', 'origin', 'storage', 'quality',
                                       'output_format', 'compression', 'is_live', 'is_clip', 'clip_start',
                                       'clip_end', 'clip_duration', 'transcript_only', 'live_status', 'was_live',
+                                      'uploaded_media', 'upload_digest', 'upload_name', 'upload_size',
+                                      'upload_duration',
                                       'workspace', 'workspace_generation',
                                       'download_attempt', 'download_attempts', 'download_exit_code',
                                       'requested_at', 'started_at', 'elapsed', 'size', 'filename',
@@ -236,6 +238,8 @@ def save_capture_request(job):
                'output_format', 'compression', 'is_live', 'url', 'stream_url',
                'is_clip', 'clip_start', 'clip_end', 'clip_duration',
                'source_duration', 'title', 'temporary_media_filename')
+    allowed += ('temporary_media_private', 'uploaded_media', 'upload_digest',
+                'upload_name', 'upload_size', 'upload_duration')
     data = {key: job[key] for key in allowed if key in job}
     with connection() as db:
         db.execute('INSERT INTO capture_requests VALUES (?, ?, ?) '

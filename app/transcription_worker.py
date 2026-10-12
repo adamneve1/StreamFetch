@@ -19,8 +19,9 @@ from pathlib import Path
 import redis
 
 try:
-    from . import storage
+    from . import media_upload, storage
 except ImportError:
+    import media_upload
     import storage
 
 
@@ -218,9 +219,12 @@ def temporary_media_path(job_id, row=None):
     row = row or storage.recording(job_id) or {}
     if not row.get('transcript_only'):
         return None
-    filename = (storage.capture_request(job_id) or {}).get('temporary_media_filename')
+    request = storage.capture_request(job_id) or {}
+    filename = request.get('temporary_media_filename')
     if not filename or Path(filename).name != filename:
         return None
+    if request.get('temporary_media_private'):
+        return media_upload.private_media_path(filename)
     root = DOWNLOAD_DIR.resolve()
     path = root / filename
     return path if path.parent.resolve() == root and not path.is_symlink() else None
@@ -752,8 +756,12 @@ def transcribe(job, model=None, cancel_event=None):
         if not row or row.get("state") != "ready":
             raise TranscriptionError("Rekaman belum siap untuk ditranskripsi.")
         temporary_media = temporary_media_path(job_id, row)
-        media_filename = temporary_media.name if temporary_media else row.get("filename")
-        media_path = safe_media_path(media_filename)
+        if temporary_media:
+            if not temporary_media.is_file():
+                raise TranscriptionError('File media sementara tidak ditemukan.')
+            media_path = temporary_media
+        else:
+            media_path = safe_media_path(row.get('filename'))
         ensure_audio_stream(media_path)
 
         if provider in {"auto", "cloudflare"}:
@@ -778,11 +786,11 @@ def transcribe(job, model=None, cancel_event=None):
         vtt = render_vtt(segments)
         if not txt.strip():
             raise TranscriptionError("Tidak ada ucapan yang terdeteksi di audio.")
-        outputs = [
-            (media_path.with_suffix(".txt"), txt),
-            (media_path.with_suffix(".srt"), srt),
-            (media_path.with_suffix(".vtt"), vtt),
-        ]
+        output_base = (DOWNLOAD_DIR / f'transcript-upload-{job_id}'
+                       if row.get('uploaded_media') else media_path)
+        outputs = [(output_base.with_suffix('.txt'), txt),
+                   (output_base.with_suffix('.srt'), srt),
+                   (output_base.with_suffix('.vtt'), vtt)]
         def publish():
             for path, content in outputs:
                 if cancel_event and cancel_event.is_set():
@@ -927,6 +935,7 @@ def queued_job_ids():
 
 def recover_jobs():
     """Requeue abandoned processing and durable queued/in-progress records."""
+    media_upload.cleanup_expired()
     while True:
         payload = r.lpop(PROCESSING)
         if payload is None:

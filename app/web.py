@@ -18,9 +18,10 @@ from flask.sessions import SecureCookieSessionInterface
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 try:
-    from . import clipper, quality, storage, telegram_store, transcript_reader, transcription_queue, watch_service, youtube_transcript
+    from . import clipper, media_upload, quality, storage, telegram_store, transcript_reader, transcription_queue, watch_service, youtube_transcript
 except ImportError:
     import clipper
+    import media_upload
     import quality
     import storage
     import telegram_store
@@ -112,7 +113,8 @@ def create_app(client=None):
     absolute_lifetime = timedelta(days=positive_float_env('SESSION_ABSOLUTE_DAYS', 1))
     app.secret_key = session_secret()
     app.session_interface = HTTPSCookieSessionInterface()
-    app.config.update(MAX_CONTENT_LENGTH=16384, SESSION_COOKIE_HTTPONLY=True,
+    upload_limit = media_upload.web_max_bytes()
+    app.config.update(MAX_CONTENT_LENGTH=upload_limit + 1024 * 1024, SESSION_COOKIE_HTTPONLY=True,
                       SESSION_COOKIE_SAMESITE='Lax', SESSION_COOKIE_PATH='/',
                       SESSION_COOKIE_SECURE=os.getenv('WEB_COOKIE_SECURE') == '1',
                       SESSION_REFRESH_EACH_REQUEST=False,
@@ -140,6 +142,18 @@ def create_app(client=None):
             return owner_type == 'web' and owner_id == session.get('role', 'user')
         # Legacy rows predate explicit ownership and retain their existing shared visibility.
         return True
+
+    def upload_visible(row):
+        """Uploaded media is private to its exact web/linked Telegram owner."""
+        if not row or not row.get('uploaded_media'):
+            return True
+        role = session.get('role', 'user')
+        if row.get('owner_type') == 'web':
+            return str(row.get('owner_id')) == role
+        if row.get('owner_type') == 'telegram':
+            destination = telegram_store.web_destination(role)
+            return bool(destination and str(destination.get('user_id')) == str(row.get('owner_id')))
+        return False
 
     def transcript_only_key(video_id, role=None):
         return f'transcript-only-web:{role or session.get("role", "user")}:{video_id}'
@@ -274,6 +288,9 @@ def create_app(client=None):
             return
         if request.path != '/api/login' and not session.get('operator'):
             return unauthorized('Masuk dulu untuk lanjut, ya.')
+        if (request.endpoint != 'upload_transcript_only'
+                and request.content_length is not None and request.content_length > 16384):
+            return jsonify(error='Permintaan terlalu besar.'), 413
         if request.path != '/api/login':
             now = time.time()
             created = session.get('session_created_at')
@@ -331,6 +348,9 @@ def create_app(client=None):
     @app.errorhandler(HTTPException)
     def http_error(exc):
         if request.path.startswith('/api/'):
+            if exc.code == 413 and request.endpoint == 'upload_transcript_only':
+                return jsonify(error=(
+                    f'File terlalu besar. Batasnya {media_upload.human_size(upload_limit)}.')), 413
             return jsonify(error=exc.description), exc.code
         return exc
 
@@ -813,7 +833,7 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
 
     @app.get('/api/recordings')
     def history():
-        rows = storage.recordings()
+        rows = [row for row in storage.recordings() if upload_visible(row)]
         owner = r.get('capture:owner')
         queued_ids = set()
         for payload in r.lrange('download_queue', 0, -1):
@@ -847,6 +867,9 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
         for row in rows:
             row.pop('owner_type', None)
             row.pop('owner_id', None)
+            if row.get('uploaded_media'):
+                row.pop('upload_digest', None)
+                row.pop('source_id', None)
         return jsonify(recordings=rows[:200], total=len(rows))
 
     @app.post('/api/transcript-only')
@@ -937,9 +960,67 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
             except redis.exceptions.RedisError:
                 pass
 
+    @app.post('/api/transcript-only/upload')
+    def upload_transcript_only():
+        """Accept one consented private upload and use the canonical AI queue."""
+        if request.form.get('consent') != 'ai':
+            return jsonify(error='Persetujuan AI diperlukan sebelum file diunggah.'), 409
+        incoming = request.files.get('file')
+        if not incoming or not incoming.filename:
+            raise ValueError('Pilih file audio atau video terlebih dulu.')
+        name = media_upload.display_name(incoming.filename)
+        suffix = media_upload.supported_suffix(name)
+        declared = request.content_length
+        if declared is not None and declared > upload_limit + 1024 * 1024:
+            return jsonify(error=f'File terlalu besar. Batasnya {media_upload.human_size(upload_limit)}.'), 413
+        job_id = uuid.uuid4().hex
+        path = None
+        try:
+            path, digest = media_upload.save_stream(incoming.stream, job_id, name, upload_limit)
+            info = media_upload.inspect_media(path, suffix, upload_limit, digest)
+            role = session.get('role', 'user')
+            existing = media_upload.duplicate('web', role, digest=info.sha256)
+            if existing:
+                path.unlink(missing_ok=True)
+                transcript = existing.get('transcript') or {}
+                if transcript.get('status') == 'completed':
+                    return jsonify(**transcript_only_payload(existing))
+                return jsonify(status='processing', job_id=existing['job_id'], duplicate=True), 202
+            upload_key = f'transcript-upload-web:{role}:{info.sha256}'
+            claimed, created_claim = telegram_store.claim_upload_task(
+                upload_key, dict(job_id=job_id, owner_type='web', owner_id=role,
+                                 upload_digest=info.sha256, requested_at=time.time()))
+            if not created_claim:
+                path.unlink(missing_ok=True)
+                current = storage.recording(claimed.get('job_id', ''))
+                transcript = (current or {}).get('transcript') or {}
+                if current and transcript.get('status') == 'completed' and upload_visible(current):
+                    return jsonify(**transcript_only_payload(current))
+                return jsonify(status='processing', job_id=claimed['job_id'], duplicate=True), 202
+            status, created, deferred = media_upload.enqueue(
+                r, job_id=job_id, path=path, original_name=name,
+                owner_type='web', owner_id=role, origin='web_transcript_upload',
+                info=info)
+            telegram_store.subscribe_web(job_id, role)
+            return jsonify(status='processing', job_id=job_id, created=created,
+                           deferred=deferred, file_name=name, size=info.size,
+                           duration=info.duration), 202
+        except media_upload.UploadError:
+            if path:
+                path.unlink(missing_ok=True)
+            raise
+        except Exception:
+            if path and not storage.recording(job_id):
+                path.unlink(missing_ok=True)
+                if 'upload_key' in locals():
+                    telegram_store.delete_task_if(upload_key, job_id)
+            raise
+
     @app.post('/api/recordings/<job_id>/transcript')
     def create_transcript(job_id):
         row = storage.recording(job_id)
+        if row and not upload_visible(row):
+            return jsonify(error='Rekaman tidak ditemukan atau belum siap.'), 404
         if (not row or row.get('state') != 'ready' or not row.get('filename')
                 or Path(row['filename']).suffix.lower() != '.mp4'):
             return jsonify(error='Rekaman tidak ditemukan atau belum siap.'), 404
@@ -950,6 +1031,9 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
 
     @app.post('/api/recordings/<job_id>/transcript/cancel')
     def cancel_transcript(job_id):
+        row = storage.recording(job_id)
+        if row and not upload_visible(row):
+            return jsonify(error='Rekaman tidak ditemukan.'), 404
         try:
             status, cancelled = transcription_queue.cancel(r, job_id, (request.get_json() or {}).get('request_id'))
         except ValueError as exc:
@@ -960,6 +1044,8 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
 
     def transcript_file(job_id, kind, attachment):
         row = storage.recording(job_id)
+        if row and not upload_visible(row):
+            return jsonify(error='Transkrip tidak ditemukan.'), 404
         transcript = (row or {}).get('transcript') or {}
         if transcript.get('status') != 'completed':
             return jsonify(error='Transkrip belum selesai atau tidak ditemukan.'), 404
@@ -981,6 +1067,8 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
     @app.get('/api/recordings/<job_id>/transcript/view')
     def view_transcript(job_id):
         row = storage.recording(job_id)
+        if row and not upload_visible(row):
+            return jsonify(error='Transkrip tidak ditemukan.'), 404
         if not row or (row.get('transcript') or {}).get('status') != 'completed':
             return jsonify(error='Transkrip belum selesai atau tidak ditemukan.'), 404
         return app.send_static_file('transcript.html')
@@ -988,6 +1076,8 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
     @app.get('/api/recordings/<job_id>/transcript/data')
     def transcript_data(job_id):
         row = storage.recording(job_id)
+        if row and not upload_visible(row):
+            return jsonify(error='Transkrip tidak ditemukan.'), 404
         if not row or (row.get('transcript') or {}).get('status') != 'completed':
             return jsonify(error='Transkrip belum selesai atau tidak ditemukan.'), 404
         data = transcript_reader.reader_data(row, os.getenv('DOWNLOAD_DIR', '/downloads'))

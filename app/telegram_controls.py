@@ -14,8 +14,9 @@ from urllib.parse import urlsplit
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 try:
-    from . import storage, telegram_store, transcription_queue, watch_service, youtube_transcript
+    from . import media_upload, storage, telegram_store, transcription_queue, watch_service, youtube_transcript
 except ImportError:
+    import media_upload
     import storage
     import telegram_store
     import transcription_queue
@@ -153,6 +154,15 @@ def transcript_task_key(source_id, user_id, chat_id=None, source='youtube'):
 
 def transcript_callback_key(chat_id, user_id, digest):
     return f'transcript-only:{chat_id}:{user_id}:{digest}'
+
+
+def upload_task_key(file_unique_id, user_id, chat_id):
+    digest = hashlib.sha256(str(file_unique_id).encode()).hexdigest()[:16]
+    return f'transcript-upload:{chat_id}:{user_id}:{digest}'
+
+
+def upload_callback_key(chat_id, user_id, digest):
+    return f'transcript-upload:{chat_id}:{user_id}:{digest}'
 
 
 def transcript_url(value):
@@ -453,6 +463,16 @@ class Controls:
             InlineKeyboardButton('Cancel', callback_data=f'transcriptcancel:{generation}:{digest}'),
         ]])
 
+    @staticmethod
+    def upload_buttons(task):
+        generation = task['workspace_generation']
+        digest = task['task_digest']
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton('Use AI transcription',
+                                 callback_data=f'uploadai:{generation}:{digest}'),
+            InlineKeyboardButton('Cancel', callback_data=f'uploadcancel:{generation}:{digest}'),
+        ]])
+
     @authorized
     async def mode_callback(self, update, context):
         query = update.callback_query
@@ -539,6 +559,167 @@ class Controls:
             log.warning('transcript subtitle ingestion unavailable source=%s id=%s error_type=%s',
                         source, source_id, type(exc).__name__)
         await self._request_ai_consent(message, key, task)
+
+    @authorized
+    async def transcript_upload(self, update, context):
+        """Describe an attachment and defer every download until consent."""
+        message = update.effective_message
+        snapshot = telegram_store.workspace(update.effective_chat.id, update.effective_user.id)
+        if snapshot['workspace'] != 'transcript':
+            return
+        attachment = None
+        kind = ''
+        for attribute in ('audio', 'video', 'voice', 'document'):
+            value = getattr(message, attribute, None)
+            if value is not None:
+                attachment, kind = value, attribute
+                break
+        if not attachment:
+            await message.reply_text('❌ Lampiran audio/video tidak ditemukan.')
+            return
+        unique_id = getattr(attachment, 'file_unique_id', None)
+        file_id = getattr(attachment, 'file_id', None)
+        if not unique_id or not file_id:
+            await message.reply_text('❌ Metadata file Telegram tidak lengkap.')
+            return
+        fallback = ('voice-' + str(unique_id) + '.ogg' if kind == 'voice'
+                    else kind + '-' + str(unique_id) + ('.mp4' if kind == 'video' else '.m4a'))
+        name = media_upload.display_name(getattr(attachment, 'file_name', None), fallback)
+        try:
+            suffix = media_upload.supported_suffix(name, voice=kind == 'voice')
+            size = media_upload.validate_declared_size(
+                getattr(attachment, 'file_size', None), media_upload.telegram_max_bytes())
+            duration = getattr(attachment, 'duration', None)
+            if duration is not None and float(duration) > media_upload.max_duration_seconds():
+                raise media_upload.UploadError('Durasi media terlalu panjang.')
+        except (media_upload.UploadError, TypeError, ValueError) as exc:
+            await message.reply_text('❌ ' + str(exc))
+            return
+        key = upload_task_key(unique_id, update.effective_user.id, update.effective_chat.id)
+        digest = key.rsplit(':', 1)[-1]
+        task = dict(job_id=uuid.uuid4().hex, telegram_file_id=file_id,
+                    telegram_file_unique_id=unique_id, source_id='telegram-file:' + str(unique_id),
+                    upload_name=name, upload_size=size, upload_suffix=suffix,
+                    upload_kind=kind, user_id=update.effective_user.id,
+                    chat_id=update.effective_chat.id, owner_type='telegram',
+                    owner_id=str(update.effective_user.id), origin='telegram_transcript_upload',
+                    requested_at=time.time(), state='awaiting_consent',
+                    workspace_generation=snapshot['generation'], task_digest=digest)
+        if not telegram_store.claim_transcript_task(key, task):
+            current = telegram_store.task(key) or {}
+            row = storage.recording(current.get('job_id', ''))
+            transcript = (row or {}).get('transcript') or {}
+            if transcript.get('status') == 'completed':
+                await message.reply_text('Transkrip file ini sudah tersedia.',
+                                         reply_markup=self.view_button(row['job_id']))
+            elif current.get('state') == 'awaiting_consent':
+                await message.reply_text(
+                    f'File: {current.get("upload_name", name)}\n'
+                    f'Size: {media_upload.human_size(current.get("upload_size", size))}\n'
+                    'Permintaan ini menunggu persetujuan AI.',
+                    reply_markup=self.upload_buttons(current))
+            else:
+                await message.reply_text('File ini sedang diproses untuk transkripsi.')
+            return
+        await message.reply_text(
+            f'File: {name}\nSize: {media_upload.human_size(size)}\n'
+            'Gunakan AI transcription? File baru akan diunduh setelah kamu menyetujui.',
+            reply_markup=self.upload_buttons(task))
+
+    @authorized
+    async def upload_ai_callback(self, update, context):
+        query = update.callback_query
+        await query.answer()
+        match = re.fullmatch(r'uploadai:(\d+):([a-f0-9]{16})', query.data or '')
+        if not match:
+            await query.message.reply_text('Persetujuan upload sudah kedaluwarsa.')
+            return
+        generation = int(match[1])
+        key = upload_callback_key(update.effective_chat.id, update.effective_user.id, match[2])
+        task = telegram_store.claim_ai_approval(
+            key, update.effective_chat.id, update.effective_user.id, generation)
+        if not task:
+            await query.message.reply_text('Persetujuan upload sudah kedaluwarsa atau workspace telah berubah.')
+            return
+        existing = media_upload.duplicate('telegram', str(task['user_id']),
+                                          source_id=task['source_id'])
+        if existing:
+            telegram_store.delete_task_if(key, task['job_id'])
+            transcript = existing.get('transcript') or {}
+            if transcript.get('status') == 'completed':
+                await query.message.reply_text('Transkrip file ini sudah tersedia.',
+                                               reply_markup=self.view_button(existing['job_id']))
+            else:
+                try:
+                    telegram_store.subscribe(existing['job_id'], task['chat_id'], task['user_id'],
+                                             owner_type='telegram', owner_id=str(task['user_id']),
+                                             monitor_transcript=True)
+                except Exception:
+                    log.warning('telegram duplicate upload subscription unavailable job=%s',
+                                existing['job_id'])
+                await query.message.reply_text('Transkripsi file ini sedang diproses.')
+            return
+        path = media_upload.upload_path(task['job_id'], task['upload_suffix'])
+        partial = path.with_suffix(path.suffix + '.part')
+        try:
+            partial.unlink(missing_ok=True)
+            telegram_file = await context.bot.get_file(task['telegram_file_id'])
+            await telegram_file.download_to_drive(custom_path=partial)
+            os.chmod(partial, 0o600)
+            partial.replace(path)
+            info = await asyncio.to_thread(
+                media_upload.inspect_media, path, task['upload_suffix'],
+                media_upload.telegram_max_bytes())
+            status, created, deferred = await asyncio.to_thread(
+                media_upload.enqueue, self.client, job_id=task['job_id'], path=path,
+                original_name=task['upload_name'], owner_type='telegram',
+                owner_id=str(task['user_id']), origin='telegram_transcript_upload',
+                info=info, source_id=task['source_id'],
+                workspace_generation=generation)
+            try:
+                telegram_store.subscribe(task['job_id'], task['chat_id'], task['user_id'],
+                                         owner_type='telegram', owner_id=str(task['user_id']),
+                                         monitor_transcript=True)
+            except Exception:
+                log.warning('telegram upload notification subscription unavailable job=%s',
+                            task['job_id'])
+            try:
+                telegram_store.delete_task_if(key, task['job_id'])
+            except Exception:
+                log.warning('telegram upload consent cleanup unavailable job=%s', task['job_id'])
+            await query.message.reply_text(
+                'Transkripsi AI tersimpan dan akan dilanjutkan saat antrean tersedia.'
+                if deferred else
+                ('Transkripsi AI masuk antrean. File sementara akan dihapus otomatis.'
+                 if created else f'Transkripsi AI sedang diproses ({status}).'))
+        except media_upload.UploadError as exc:
+            partial.unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
+            telegram_store.delete_task_if(key, task['job_id'])
+            await query.message.reply_text('❌ ' + str(exc))
+        except Exception:
+            partial.unlink(missing_ok=True)
+            if not storage.recording(task['job_id']):
+                path.unlink(missing_ok=True)
+                current = telegram_store.workspace(task['chat_id'], task['user_id'])
+                if current == {'workspace': 'transcript', 'generation': generation}:
+                    telegram_store.update_task(key, state='awaiting_consent')
+            log.warning('telegram upload transcription admission unavailable', exc_info=True)
+            await query.message.reply_text('Upload atau antrean AI sementara tidak tersedia. Coba lagi nanti.',
+                                           reply_markup=self.upload_buttons(task))
+
+    @authorized
+    async def upload_cancel_callback(self, update, context):
+        query = update.callback_query
+        await query.answer()
+        match = re.fullmatch(r'uploadcancel:(\d+):([a-f0-9]{16})', query.data or '')
+        key = (upload_callback_key(update.effective_chat.id, update.effective_user.id, match[2])
+               if match else '')
+        cancelled = bool(match and telegram_store.cancel_pending_transcript(
+            key, update.effective_chat.id, update.effective_user.id, int(match[1])))
+        await query.message.reply_text(
+            'Upload dibatalkan. File tidak diunduh.' if cancelled else
+            'Permintaan tidak ditemukan, sudah diproses, atau workspace telah berubah.')
 
     @authorized
     async def transcript_ai_callback(self, update, context):
@@ -756,6 +937,7 @@ class Controls:
 
     async def tick(self, bot, now=None):
         now = time.time() if now is None else now
+        telegram_store.expire_upload_tasks(now)
         clock_started = time.monotonic()
         if bot is not None:
             await self.notify_watches(bot)
@@ -870,17 +1052,23 @@ class Controls:
             elif status == 'failed':
                 retry = (self.ai_buttons(youtube_transcript.video_id_for(row))
                          if row.get('transcript_only') and youtube_transcript.video_id_for(row) else None)
+                failure_text = ('Transkripsi gagal. Kirim ulang file di workspace Transcript Only untuk mencoba lagi.'
+                                if row.get('uploaded_media') else
+                                ('Transkripsi gagal. Gunakan tombol untuk mencoba AI lagi.'
+                                 if retry else 'Transkripsi gagal. Coba /transcribe untuk retry.'))
                 await bot.send_message(task['chat_id'],
-                                       ('Transkripsi gagal. Gunakan tombol untuk mencoba AI lagi.'
-                                        if retry else 'Transkripsi gagal. Coba /transcribe untuk retry.')
+                                       failure_text
                                        + ('\n' + safe_notice(transcript['error']) if transcript.get('error') else ''),
                                        reply_markup=retry)
             elif status == 'cancelled':
                 retry = (self.ai_buttons(youtube_transcript.video_id_for(row))
                          if row.get('transcript_only') and youtube_transcript.video_id_for(row) else None)
+                cancelled_text = ('Transkripsi dibatalkan. Kirim ulang file untuk mulai lagi.'
+                                  if row.get('uploaded_media') else
+                                  ('Transkripsi dibatalkan. Gunakan tombol untuk mulai lagi.'
+                                   if retry else 'Transkripsi dibatalkan. Gunakan /transcribe untuk mulai lagi.'))
                 await bot.send_message(task['chat_id'],
-                                       ('Transkripsi dibatalkan. Gunakan tombol untuk mulai lagi.'
-                                        if retry else 'Transkripsi dibatalkan. Gunakan /transcribe untuk mulai lagi.'),
+                                       cancelled_text,
                                        reply_markup=retry)
             telegram_store.checkpoint_subscription(key, transcript_notice=status,
                                                   transcript_request_notice=request_id)

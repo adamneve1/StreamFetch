@@ -32,7 +32,8 @@ def enqueue(client, job_id):
             filename = (json.loads(request['data']).get('temporary_media_filename')
                         if request else None)
         supported = {'.mp4'} if not row.get('transcript_only') else {
-            '.m4a', '.mp3', '.aac', '.wav', '.ogg', '.opus', '.flac', '.webm'}
+            '.m4a', '.mp3', '.mp4', '.mov', '.aac', '.wav', '.ogg', '.oga',
+            '.opus', '.flac', '.webm'}
         if row.get('state') != 'ready' or Path(filename or '').suffix.lower() not in supported:
             raise ValueError('Rekaman tidak ditemukan atau belum siap.')
         previous = (row.get('transcript') or {}).get('status')
@@ -69,4 +70,10 @@ def cancel(client, job_id, request_id=None):
         row['transcript'] = transcript
         db.execute('UPDATE recordings SET updated=?, data=? WHERE id=?', (time.time(), json.dumps(row), job_id))
     # Durable cancellation is already visible to the worker even during a Redis outage.
+    if row.get('uploaded_media'):
+        try:
+            from . import media_upload
+        except ImportError:
+            import media_upload
+        media_upload.cleanup_job(job_id)
     return 'cancelled', True
