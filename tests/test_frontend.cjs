@@ -435,13 +435,13 @@ test('workspace markup keeps Source and Clipper separate while sharing History b
 test('Clipper layout centers bounded desktop blocks while retaining fluid narrow widths',()=>{
   const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8');
   const clipper=css.slice(css.indexOf('/* Clipper is a separate workspace view'));
-  assert.match(clipper,/#clipper-panel\{width:100%;max-width:1180px;margin-inline:auto/);
-  assert.match(clipper,/\.clip-url-field\{width:100%;max-width:1000px;margin-inline:auto/);
-  assert.match(clipper,/\.clip-metadata\{[^}]*width:100%;max-width:1000px;margin:14px auto/);
-  assert.match(clipper,/\.clip-preview\{width:100%;max-width:900px;margin:14px auto/);
-  assert.match(clipper,/#clip-helpers\{width:100%;max-width:900px;margin-inline:auto/);
+  assert.match(clipper,/#clipper-panel\{width:100%;max-width:860px;margin-inline:auto/);
+  assert.match(clipper,/\.clip-url-field\{width:100%;max-width:780px;margin-inline:auto/);
+  assert.match(clipper,/\.clip-metadata\{[^}]*width:100%;max-width:780px;margin:12px auto/);
+  assert.match(clipper,/\.clip-preview\{width:100%;max-width:780px;margin:12px auto/);
+  assert.match(clipper,/#clip-helpers\{width:100%;max-width:780px;margin-inline:auto/);
   assert.match(clipper,/\.clip-preview-toolbar\{[^}]*width:100%/);
-  assert.match(clipper,/@media\(min-width:1100px\)\{[^}]*max-width:1260px/);
+  assert.match(clipper,/@media\(min-width:1100px\)\{[^}]*max-width:920px/);
   assert.match(clipper,/@media\(max-width:760px\)\{\.clip-time-grid\{grid-template-columns:1fr\}/);
   assert.match(clipper,/@media\(max-width:600px\)\{[\s\S]*?#clipper-panel\{padding:16px\}/);
 });
