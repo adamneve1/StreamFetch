@@ -6,6 +6,7 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock
 from pathlib import Path
 import fakeredis
@@ -230,6 +231,35 @@ class WebTests(unittest.TestCase):
                                      headers={'X-CSRF-Token': self.csrf})
         self.assertEqual(cancelled.status_code, 200)
         self.assertFalse(path.exists())
+
+    def test_admin_history_includes_all_transcript_origins_and_job_type_filter(self):
+        rows = [
+            dict(job_id='download', source='youtube', filename='video.mp4'),
+            dict(job_id='web-url', source='youtube', transcript_only=True,
+                 owner_type='web', owner_id='user'),
+            dict(job_id='telegram-url', source='youtube', transcript_only=True,
+                 owner_type='telegram', owner_id='7'),
+            dict(job_id='web-upload', source='upload', transcript_only=True,
+                 uploaded_media=True, owner_type='web', owner_id='user'),
+            dict(job_id='telegram-upload', source='upload', transcript_only=True,
+                 uploaded_media=True, owner_type='telegram', owner_id='7'),
+        ]
+        for row in rows:
+            storage.save_recording(row, 'ready')
+
+        response = self.client.get('/api/recordings')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual({row['job_id'] for row in response.json['recordings']},
+                         {row['job_id'] for row in rows})
+        self.assertNotIn('owner_id', response.text)
+        self.assertNotIn('upload_digest', response.text)
+
+        transcripts = self.client.get('/api/recordings?job_type=transcript')
+        self.assertEqual({row['job_id'] for row in transcripts.json['recordings']},
+                         {'web-url', 'telegram-url', 'web-upload', 'telegram-upload'})
+        downloads = self.client.get('/api/recordings?job_type=download')
+        self.assertEqual([row['job_id'] for row in downloads.json['recordings']], ['download'])
+        self.assertEqual(self.client.get('/api/recordings?job_type=unknown').status_code, 400)
 
     def test_transcript_upload_redis_outage_is_durable_and_deferred(self):
         info = media_upload.MediaInfo(size=5, duration=3, format_name='mp3',
@@ -933,39 +963,44 @@ class WebTests(unittest.TestCase):
         self.assertEqual(json.loads(self.redis.lindex('download_queue', 0))['source_id'],
                          'xyzDEF_1234')
 
-    def test_ready_canonical_file_is_reused_but_missing_failed_and_other_output_are_not(self):
+    def test_historical_canonical_file_is_preserved_and_same_url_can_be_downloaded_again(self):
         video_id = 'abcDEF_1234'
-        media = Path(self.tmp.name) / 'Dialog Batam.mp4'
+        media = Path(self.tmp.name) / f"{datetime.now().strftime('%d%m%y')}01 - Dialog Batam.mp4"
         media.write_bytes(b'canonical-media')
         storage.save_recording(dict(job_id='ready-canonical', source='youtube', output_format='mp4',
                                     filename=media.name, requested_at=1_700_000_000,
                                     source_metadata={'youtube_id': video_id,
                                                      'title': 'Dialog Batam'}), 'ready')
         self.redis.set('worker:heartbeat', 1)
-        with patch.object(web.subprocess, 'run') as extractor:
+        metadata = {'id': video_id, 'title': 'Dialog Batam', 'duration': 60,
+                    'filesize': 1200, 'height': 720, 'tbr': 160}
+        with patch.object(web.subprocess, 'run', return_value=SimpleNamespace(
+                returncode=0, stdout=json.dumps(metadata).encode())) as extractor:
             resolved = self.post('estimate', dict(source='youtube',
                                  url=f'https://youtu.be/{video_id}?t=22', format='mp4'))
         self.assertEqual(resolved.status_code, 200)
-        self.assertEqual(resolved.json['duplicate']['job']['job_id'], 'ready-canonical')
-        extractor.assert_not_called()
+        self.assertNotIn('duplicate', resolved.json)
+        extractor.assert_called_once()
         response = self.post('record', dict(source='youtube',
                                              url=f'https://www.youtube.com/watch?v={video_id}&t=22&list=PL1&index=2',
                                              format='mp4'))
-        self.assertEqual(response.status_code, 200)
-        duplicate = response.json['duplicate']
-        self.assertEqual(duplicate['status'], 'ready')
-        self.assertEqual(duplicate['job']['job_id'], 'ready-canonical')
-        self.assertEqual(duplicate['job']['title'], 'Dialog Batam')
-        self.assertEqual(duplicate['job']['size'], len(b'canonical-media'))
-        self.assertNotIn(self.tmp.name, response.get_data(as_text=True))
-        self.assertEqual(self.redis.llen('download_queue'), 0)
+        self.assertEqual(response.status_code, 202)
+        self.assertNotEqual(response.json['job_id'], 'ready-canonical')
+        queued = json.loads(self.redis.lindex('download_queue', 0))
+        self.assertEqual(queued['job_id'], response.json['job_id'])
+        self.assertEqual(queued['source_id'], video_id)
+        self.assertEqual(self.redis.llen('download_queue'), 1)
+        self.assertEqual(media.read_bytes(), b'canonical-media')
+        self.assertEqual(storage.recording('ready-canonical')['filename'], media.name)
+        with patch.object(worker, 'DOWNLOAD_DIR', Path(self.tmp.name)):
+            self.assertNotEqual(worker.generate_final_filename('Dialog Batam').name, media.name)
 
-        # An incompatible output does not reuse the MP4.
+        # A different output remains an independent request as before.
         audio = self.post('record', dict(source='youtube', url=f'https://youtu.be/{video_id}', format='mp3'))
-        self.assertEqual(audio.status_code, 202)
-        self.assertEqual(json.loads(self.redis.lindex('download_queue', 0))['output_format'], 'mp3')
+        # The shared worker queue still accepts one capture at a time.
+        self.assertEqual(audio.status_code, 409)
 
-        # A ready catalogue row whose physical file was deleted permits a new job.
+        # Ready history rows remain non-blocking even when their file is gone.
         self.redis.flushall();self.redis.set('worker:heartbeat', 1)
         missing_id = 'missing_123'
         storage.save_recording(dict(job_id='missing-file', source='youtube', source_type='youtube',
@@ -1110,6 +1145,73 @@ class WebTests(unittest.TestCase):
         self.assertEqual(set(response.json['deleted']), {'failed-job', 'missing-job'})
         self.assertEqual(response.json['skipped'], [])
         self.assertFalse(storage.recordings())
+
+    def test_admin_delete_transcript_cleans_owned_files_tasks_and_preserves_shared_data(self):
+        private = media_upload.upload_path('deleteupload', '.wav')
+        private.write_bytes(b'private input')
+        shared = Path(self.tmp.name) / 'shared.txt'
+        unique_srt = Path(self.tmp.name) / 'deleteupload.srt'
+        unique_vtt = Path(self.tmp.name) / 'deleteupload.vtt'
+        for path in (shared, unique_srt, unique_vtt):
+            path.write_text('transcript')
+        row = dict(job_id='deleteupload', source='upload', transcript_only=True,
+                   uploaded_media=True, owner_type='telegram', owner_id='7')
+        storage.save_recording(row, 'ready')
+        storage.save_capture_request({**row, 'temporary_media_filename': private.name,
+                                      'temporary_media_private': True})
+        storage.save_transcription_state(
+            row['job_id'], 'completed', replace=True, txt_filename=shared.name,
+            srt_filename=unique_srt.name, vtt_filename=unique_vtt.name)
+        storage.save_recording(dict(job_id='shared-owner', source='youtube'), 'ready')
+        storage.save_transcription_state('shared-owner', 'completed', replace=True,
+                                         txt_filename=shared.name)
+        telegram_store.save_task('transcript-upload:delete',
+                                 {'job_id': row['job_id'], 'state': 'ai_queued'})
+        telegram_store.subscribe(row['job_id'], 77, 7, monitor_transcript=True)
+
+        response = self.post('recordings/delete', {'job_ids': [row['job_id']]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json, {'deleted': [row['job_id']], 'skipped': []})
+        self.assertIsNone(storage.recording(row['job_id']))
+        self.assertFalse(private.exists())
+        self.assertFalse(unique_srt.exists())
+        self.assertFalse(unique_vtt.exists())
+        self.assertTrue(shared.exists())
+        self.assertFalse(any(task.get('job_id') == row['job_id']
+                             for _, task in telegram_store.tasks()))
+
+    def test_admin_delete_refuses_active_transcript_and_deleted_retry_cannot_recover(self):
+        from app import transcription_worker
+        active_audio = Path(self.tmp.name) / 'transcript-ai-active.m4a'
+        retry_audio = Path(self.tmp.name) / 'transcript-ai-retry.m4a'
+        active_audio.write_bytes(b'active')
+        retry_audio.write_bytes(b'retry')
+        for job_id, audio in [('active-transcript', active_audio),
+                              ('failed-retry', retry_audio)]:
+            row = dict(job_id=job_id, source='youtube', transcript_only=True)
+            storage.save_recording(row, 'ready')
+            storage.save_capture_request({**row, 'temporary_media_filename': audio.name})
+            storage.save_transcription_state(job_id, 'queued' if job_id == 'active-transcript' else 'failed',
+                                             replace=True, request_id=job_id)
+        telegram_store.save_task('transcript-only:retry',
+                                 {'job_id': 'failed-retry', 'state': 'awaiting_consent'})
+
+        response = self.post('recordings/delete',
+                             {'job_ids': ['active-transcript', 'failed-retry']})
+        self.assertEqual(response.json['deleted'], ['failed-retry'])
+        self.assertEqual(response.json['skipped'], [
+            {'job_id': 'active-transcript', 'reason': 'Transkripsi masih berjalan.'}])
+        self.assertTrue(active_audio.exists())
+        self.assertFalse(retry_audio.exists())
+        self.assertIsNotNone(storage.recording('active-transcript'))
+        self.assertIsNone(storage.recording('failed-retry'))
+
+        self.redis.flushall()
+        with patch.object(transcription_worker, 'r', self.redis):
+            transcription_worker.recover_jobs()
+        recovered = [json.loads(value)['job_id']
+                     for value in self.redis.lrange('transcription_queue', 0, -1)]
+        self.assertEqual(recovered, ['active-transcript'])
 
     def test_rename_download_preserves_extension_and_catalogue(self):
         path = Path(self.tmp.name) / 'old name.mp4'

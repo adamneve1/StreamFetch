@@ -176,7 +176,7 @@ function captureSubmitted(result,payload){
  if(payload.source==='tiktok')$('tiktok-url').value='';
  if(payload.source==='instagram')$('instagram-url').value='';
  if(!payload.is_clip){clearTimeout(estimateTimer);estimateId++;$('size-estimate').textContent='Pilih sumber dulu untuk melihat perkiraan ukurannya.';}
- for(const id of ['filter-q','filter-source','filter-state','filter-date'])$(id).value='';
+ for(const id of ['filter-q','filter-type','filter-source','filter-state','filter-date'])$(id).value='';
  $('empty').hidden=true;
 }
 async function api(path, data){
@@ -454,17 +454,18 @@ function historyDetails(row){
  details.addEventListener('toggle',()=>{if(!details.isConnected)return;if(details.open)expandedHistoryDetails.add(row.job_id);else expandedHistoryDetails.delete(row.job_id);});
  return details;
 }
-function historyFilters(){return {query:$('filter-q').value.trim().toLocaleLowerCase(),source:$('filter-source').value,state:$('filter-state').value,date:$('filter-date').value};}
+function historyFilters(){return {query:$('filter-q').value.trim().toLocaleLowerCase(),type:$('filter-type').value,source:$('filter-source').value,state:$('filter-state').value,date:$('filter-date').value};}
 function matchingHistory(rows,filters=historyFilters()){
  return rows.filter(row=>{
   const text=[row.filename,row.title,row.note,row.source_metadata?.title,row.source,sourceDisplayName(row)].filter(Boolean).join(' ').toLocaleLowerCase();
   const stateMatches=filters.state==='transcribing'?['queued','transcribing'].includes(row.transcript?.status):!filters.state||row.state===filters.state;
   const date=row.requested_at?new Date(row.requested_at*1000):null;
   const dateLabel=date&&!Number.isNaN(date.getTime())?[date.getFullYear(),String(date.getMonth()+1).padStart(2,'0'),String(date.getDate()).padStart(2,'0')].join('-'):'';
-  return (!filters.query||text.includes(filters.query))&&(!filters.source||row.source===filters.source)&&stateMatches&&(!filters.date||dateLabel===filters.date);
+  const typeMatches=!filters.type||(filters.type==='transcript'?!!row.transcript_only:!row.transcript_only);
+  return (!filters.query||text.includes(filters.query))&&typeMatches&&(!filters.source||row.source===filters.source)&&stateMatches&&(!filters.date||dateLabel===filters.date);
  });
 }
-function clearHistoryFilters(render=true){for(const id of ['filter-q','filter-source','filter-state','filter-date'])$(id).value='';if(render)applyHistoryFilters();}
+function clearHistoryFilters(render=true){for(const id of ['filter-q','filter-type','filter-source','filter-state','filter-date'])$(id).value='';if(render)applyHistoryFilters();}
 function applyHistoryFilters(){closeActionMenu();renderHistory(historyRows);motion?.historyFilter?.($('results'));}
 function captureFailureMessage(row){return row.error_title?(row.error_title+(row.error_message?' — '+row.error_message:'')):(sourceDisplayName(row)||'Sumber')+' gagal memberikan media. Buka detail untuk melihat penyebab.';}
 function renderHistory(rows){
@@ -861,7 +862,7 @@ async function poll(){await refresh();if(!$('admin-view').hidden)loadWatches();s
 
 $('mark').onclick=async()=>{pending=true;controls();try{await api('markers',{job_id:active.job_id,note:$('marker-note').value});$('marker-note').value='';await refresh();}catch(e){notice(e.message);}finally{pending=false;controls();}};
 $('filter-q').oninput=applyHistoryFilters;
-for(const id of ['filter-source','filter-state','filter-date'])$(id).onchange=applyHistoryFilters;
+for(const id of ['filter-type','filter-source','filter-state','filter-date'])$(id).onchange=applyHistoryFilters;
 $('filter-reset').onclick=()=>clearHistoryFilters();
 
 function selectedJobs(){return [...$('results').querySelectorAll('.history-select:checked')].map(input=>input.value);}

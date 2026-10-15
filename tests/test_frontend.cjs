@@ -1336,6 +1336,13 @@ test('History status/source filters combine and Transcribing includes queued wor
  f.get('filter-reset').onclick();f.run('isAdmin=false;renderHistory(historyRows)');assert.equal(f.get('results').querySelector('.download-stat'),null);
  f.get('filter-state').value='recording';f.get('filter-state').onchange();assert.equal(f.get('results').children[0].dataset.jobId,'five');
 });
+test('History type filter separates downloads and Transcript Only without hiding either by default',()=>{
+ const f=fixture();f.context.rows=[...polishRows,{job_id:'transcript',source:'youtube',state:'ready',transcript_only:true}];f.run('renderHistory(rows)');
+ assert.equal(f.get('results').children.length,6);
+ f.get('filter-type').value='transcript';f.get('filter-type').onchange();assert.deepEqual(f.get('results').children.map(row=>row.dataset.jobId),['transcript']);
+ f.get('filter-type').value='download';f.get('filter-type').onchange();assert.equal(f.get('results').children.length,5);
+ f.get('filter-reset').onclick();assert.equal(f.get('results').children.length,6);
+});
 test('empty filtered History explains how to recover and remains distinct from no recordings',()=>{
  const f=fixture();f.context.rows=polishRows;f.run('renderHistory(rows)');f.get('filter-q').value='missing';f.get('filter-q').oninput();
  assert.equal(f.get('empty').hidden,false);assert.match(f.get('empty').textContent,/Tidak ada rekaman yang cocok.*bersihkan filter/);

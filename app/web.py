@@ -148,6 +148,8 @@ def create_app(client=None):
         if not row or not row.get('uploaded_media'):
             return True
         role = session.get('role', 'user')
+        if role == 'admin':
+            return True
         if row.get('owner_type') == 'web':
             return str(row.get('owner_id')) == role
         if row.get('owner_type') == 'telegram':
@@ -167,19 +169,6 @@ def create_app(client=None):
                         ('txt', 'txt_filename'), ('srt', 'srt_filename'), ('vtt', 'vtt_filename'))
                              if transcript.get(key)])
 
-    def local_media(row):
-        filename = row.get('filename')
-        if not filename or Path(filename).name != filename:
-            return None
-        root = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve()
-        path = root / filename
-        try:
-            if path.parent.resolve() != root or path.is_symlink() or not path.is_file():
-                return None
-            return path.stat()
-        except OSError:
-            return None
-
     def row_identity(row):
         source_type = row.get('source_type') or row.get('source')
         source_id = row.get('source_id')
@@ -194,7 +183,7 @@ def create_app(client=None):
         suffix = Path(row.get('filename') or '').suffix.lower().lstrip('.')
         return suffix if suffix in {'mp4', 'mp3'} else 'mp4'
 
-    def duplicate_payload(row, status, stat=None):
+    def duplicate_payload(row, status):
         metadata = row.get('source_metadata') or {}
         title = metadata.get('title') or row.get('note') or row.get('filename') or 'Video YouTube'
         public = {key: row[key] for key in (
@@ -204,9 +193,6 @@ def create_app(client=None):
         public['title'] = title
         if metadata.get('title'):
             public['source_metadata'] = {'title': metadata['title']}
-        if stat:
-            public['size'] = stat.st_size
-            public['file_date'] = stat.st_mtime
         return {'status': status, 'job': public}
 
     def find_duplicate(rows, identity, output_format):
@@ -219,11 +205,6 @@ def create_app(client=None):
             if row_identity(row) != (identity['source_type'], identity['source_id']):
                 continue
             if row_output(row) != output_format:
-                continue
-            if row.get('state') == 'ready':
-                stat = local_media(row)
-                if stat:
-                    return duplicate_payload(row, 'ready', stat)
                 continue
             if row.get('state') in {'queued', 'starting', 'recording', 'waiting', 'stopping', 'finalizing'}:
                 active_ids = active_ids if active_ids is not None else active_job_ids()
@@ -848,7 +829,10 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
         query = request.args.get('q', '').casefold().strip()
         source = request.args.get('source', '')
         state = request.args.get('state', '')
+        job_type = request.args.get('job_type', '')
         date = request.args.get('date', '')
+        if job_type not in {'', 'download', 'transcript'}:
+            raise ValueError('Jenis riwayat tidak valid.')
         if date:
             from datetime import datetime
             try:
@@ -859,6 +843,7 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
                 if (not query or query in ' '.join(str(row.get(k, '')) for k in ('filename', 'note', 'source_name')).casefold())
                 and (not source or row.get('source') == source)
                 and (not state or row.get('state') == state)
+                and (not job_type or bool(row.get('transcript_only')) == (job_type == 'transcript'))
                 and (not date or time.strftime('%Y-%m-%d', time.localtime(row.get('requested_at', 0))) == date)]
         if session.get('role') != 'admin':
             for row in rows:
@@ -1121,32 +1106,63 @@ return redis.call('GET', 'web:job:' .. ARGV[1])
         """Delete a local final file and its catalogue row, never its archive."""
         if (row.get('transcript') or {}).get('status') in {'queued', 'transcribing'}:
             return False, 'Transkripsi masih berjalan.'
+        root = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve()
         filename = row.get('filename')
-        path = None
-        if filename:
-            root = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve()
-            path = root / filename
-            if Path(filename).name != filename or path.parent.resolve() != root or path.is_symlink():
-                raise ValueError('Nama file tidak valid.')
+        path = root / filename if filename else None
+        if path and (Path(filename).name != filename or path.parent.resolve() != root or path.is_symlink()):
+            raise ValueError('Nama file tidak valid.')
         file_exists = bool(path and path.is_file())
         if (file_exists and row.get('storage') == 'archive'
                 and row.get('archive_status') != 'archived'):
             return False, 'File belum berhasil diarsipkan.'
-        if path:
-            path.unlink(missing_ok=True)
+
+        # A legacy/imported catalogue can contain multiple rows referencing the
+        # same local artifact. Deleting one row must not remove another row's data.
+        referenced = set()
+        private_referenced = set()
+        for other in storage.recordings():
+            if other.get('job_id') == row['job_id']:
+                continue
+            referenced.update(name for name in (
+                other.get('filename'), other.get('original_filename'),
+                *((other.get('transcript') or {}).get(key) for key in
+                  ('txt_filename', 'srt_filename', 'vtt_filename'))
+            ) if name)
+            request_data = storage.capture_request(other['job_id']) or {}
+            temporary_name = request_data.get('temporary_media_filename')
+            if temporary_name:
+                if request_data.get('temporary_media_private'):
+                    private_referenced.add(temporary_name)
+                else:
+                    referenced.add(temporary_name)
+
+        def unlink_public(name):
+            if not name or name in referenced:
+                return
+            candidate = root / name
+            if (Path(name).name != name or candidate.parent.resolve() != root
+                    or candidate.is_symlink()):
+                raise ValueError('Nama file tidak valid.')
+            candidate.unlink(missing_ok=True)
+
+        unlink_public(filename)
         transcript = row.get('transcript') or {}
-        root = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve()
         for key in ('txt_filename', 'srt_filename', 'vtt_filename'):
-            sidecar = transcript.get(key)
-            if sidecar and Path(sidecar).name == sidecar:
-                candidate = root / sidecar
-                if candidate.parent.resolve() == root and not candidate.is_symlink():
-                    candidate.unlink(missing_ok=True)
+            unlink_public(transcript.get(key))
+        request_data = storage.capture_request(row['job_id']) or {}
+        temporary = request_data.get('temporary_media_filename')
+        if (request_data.get('temporary_media_private')
+                and temporary not in private_referenced):
+            media_upload.cleanup_job(row['job_id'])
+        elif row.get('transcript_only'):
+            unlink_public(temporary)
         storage.delete_recording(row['job_id'])
+        telegram_store.delete_tasks_for_job(row['job_id'])
         r.delete('state:' + row['job_id'], 'web:job:' + row['job_id'],
                  'archive:state:' + row['job_id'],
                  'transcription:state:' + row['job_id'],
-                 'transcription:guard:' + row['job_id'])
+                 'transcription:guard:' + row['job_id'],
+                 'transcript-only-ai:' + row['job_id'])
         return True, ''
 
     @app.post('/api/recordings/delete')

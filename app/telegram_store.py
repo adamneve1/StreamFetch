@@ -345,6 +345,23 @@ def delete_task(key):
         db.execute('DELETE FROM telegram_tasks WHERE id=?', (key,))
 
 
+def delete_tasks_for_job(job_id):
+    """Remove workflow/subscription rows owned by one deleted catalogue job."""
+    with storage.connection() as db:
+        tables(db)
+        db.execute('BEGIN IMMEDIATE')
+        deleted = 0
+        for row in db.execute('SELECT id, data FROM telegram_tasks').fetchall():
+            try:
+                task = json.loads(row['data'])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if task.get('job_id') == job_id:
+                deleted += db.execute('DELETE FROM telegram_tasks WHERE id=?',
+                                      (row['id'],)).rowcount
+        return deleted
+
+
 def update_task(key, **fields):
     with storage.connection() as db:
         tables(db)
