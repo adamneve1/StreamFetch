@@ -102,7 +102,7 @@ function showSection(section){
  const admin=section==='admin',clip=section==='clipper',transcript=section==='transcript';
  $('workspace').dataset.destination=admin?'settings':clip?'clipper':transcript?'transcript':'workspace';
  $('control-room').hidden=admin||clip||transcript;$('clipper-room').hidden=admin||!clip;
- $('transcript-only-room').hidden=admin||!transcript;$('history-panel').hidden=admin;$('admin-view').hidden=!admin;
+ $('transcript-only-room').hidden=admin||!transcript;$('history-panel').hidden=admin||transcript;$('admin-view').hidden=!admin;
  $('page-title').textContent=admin?i18n('Settings'):clip?i18n('Clipper'):transcript?i18n('Transcript Only'):i18n('StreamFetch');
  for(const [id,current] of [['nav-control',!admin&&!clip&&!transcript],['nav-clipper',clip],['nav-transcript',transcript],['nav-admin',admin]]){
   if(current)$(id).setAttribute('aria-current','page');else $(id).removeAttribute('aria-current');

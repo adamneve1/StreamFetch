@@ -539,7 +539,7 @@ test('Transcript Only route requires AI consent and exposes Reader exports on su
  assert.doesNotMatch(html,/Ambil subtitle YouTube tanpa mengunduh video/);
  f.run("showSection(routeView());api=(path,data)=>{requests.push([path,data]);return new Promise(resolve=>gate.resolve=resolve)};refresh=async()=>{}");
  assert.equal(f.get('transcript-only-room').hidden,false);assert.equal(f.get('control-room').hidden,true);
- assert.equal(f.get('nav-transcript').attributes['aria-current'],'page');assert.equal(f.get('history-panel').hidden,false);
+ assert.equal(f.get('nav-transcript').attributes['aria-current'],'page');assert.equal(f.get('history-panel').hidden,true);
  f.get('transcript-only-url').value='https://youtu.be/abcdefghijk';
  const checking=f.get('transcript-only-form').onsubmit({preventDefault(){}});
  assert.equal(f.get('transcript-only-submit').disabled,true);assert.match(f.get('transcript-only-status').textContent,/subtitles/i);
@@ -1347,6 +1347,18 @@ test('Workspace History holds video jobs while Transcript Only keeps its own lis
  f.get('transcript-filter-q').value='missing';f.run("renderHistory(transcriptRows,'transcript')");
  assert.equal(f.get('transcript-results').children.length,0);
  assert.equal(f.get('transcript-empty').hidden,false);
+});
+test('room switching hides the video History panel while the Transcript Only room is open',()=>{
+ const f=fixture();
+ f.run("showSection('transcript')");
+ assert.equal(f.get('transcript-only-room').hidden,false);
+ assert.equal(f.get('history-panel').hidden,true);
+ assert.equal(f.get('control-room').hidden,true);
+ f.run("showSection('control')");
+ assert.equal(f.get('transcript-only-room').hidden,true);
+ assert.equal(f.get('history-panel').hidden,false);
+ f.run("showSection('admin')");
+ assert.equal(f.get('history-panel').hidden,true);
 });
 test('empty filtered History explains how to recover and remains distinct from no recordings',()=>{
  const f=fixture();f.context.rows=polishRows;f.run('renderHistory(rows)');f.get('filter-q').value='missing';f.get('filter-q').oninput();
