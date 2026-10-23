@@ -1,5 +1,8 @@
 const assert=require('node:assert/strict');
 const {test}=require('node:test');
+const i18nModule=require('../app/static/i18n.js');
+for (const [key,value] of Object.entries(i18nModule)) { if (!(key in global)) global[key]=value; }
+if (!global.window) global.window = {};
 const reader=require('../app/static/transcript.js');
 const fs=require('node:fs');
 const vm=require('node:vm');
@@ -115,6 +118,7 @@ test('touch/mobile Reader stays native and keeps quick centered jumps',()=>{
   assert.equal(creates.length,0);assert.deepEqual(target.scrolled,{behavior:'smooth',block:'center'});scroller.destroy();
 });
 async function fixture(data,window={},video={},hash=''){
+  if(!window.addEventListener)window.addEventListener=()=>{};
   const html=fs.readFileSync(require.resolve('../app/static/transcript.html'),'utf8');
   const nodes=new Map([...html.matchAll(/id="([^"]+)"/g)].map(match=>[match[1],new Node()]));
   nodes.get('timestamp-mode').value='segment';
@@ -133,7 +137,7 @@ async function fixture(data,window={},video={},hash=''){
   Object.defineProperty(tools,'offsetHeight',{get:()=>nodes.get('reader-content').hidden?0:146});
   Object.defineProperty(panel,'offsetWidth',{get:()=>nodes.get('reader-content').hidden?0:700});
   window.document=document;
-  const context=vm.createContext({window,document,location:{origin:'https://streamfetch.example',pathname:'/api/recordings/old/transcript/view',hash},navigator:{clipboard:{writeText:async text=>copies.push(text)}},fetch:async url=>{requests.push(url);return {ok:true,json:async()=>data};}});
+  const context=vm.createContext({window,document,location:{origin:'https://streamfetch.example',pathname:'/api/recordings/old/transcript/view',hash},navigator:{clipboard:{writeText:async text=>copies.push(text)}},fetch:async url=>{requests.push(url);return {ok:true,json:async()=>data};},i18n:i18nModule.i18n});
   vm.runInContext(fs.readFileSync(require.resolve('../app/static/transcript.js'),'utf8'),context);
   await init();
   return {get:id=>nodes.get(id),copies,requests,head,back,shell,tools,toolbar,actions};
@@ -338,7 +342,7 @@ test('Reader uses one page-level scroll surface while preserving sticky chrome a
   assert.match(js,/seek\(segment\.start\);readerScroll\.jumpTo\(row,true,'center center'\)/);
   assert.match(js,/matchNodes\[current\]\)readerScroll\.jumpTo\(matchNodes\[current\],true,'center center'\)/);
   assert.match(js,/readerScroll\.jumpTo\(\$\(id\),smooth,'top top\+=24'\)/);
-  assert.match(html,/<summary>More<\/summary>.*id="raw-view"/);
+  assert.match(html,/<summary(?: data-i18n="[^"]*")?>More<\/summary>.*id="raw-view"/);
 });
 test('non-YouTube timestamps remain readable, exports omit absent files, and display changes make no requests',async()=>{
   const f=await fixture({info:{program:'Radio',guests:[]},segments:[{start:3665,end:3669,text:'Siaran panjang'}],raw:'TXT',exports:[]});
@@ -357,7 +361,7 @@ test('reader shares compact shell and narrow toolbar gives search its own row',(
   const css=fs.readFileSync(require.resolve('../app/static/transcript.css'),'utf8');
   assert.match(html,/<body class="reader-page">/);
   assert.match(html,/<header class="app-header reader-header">/);
-  assert.match(html,/<a class="reader-back" href="\/">← Workspace<\/a>/);
+  assert.match(html,/<a class="reader-back" href="\/"(?: data-i18n="[^"]*")?>← Workspace<\/a>/);
   const responsive=css.slice(css.indexOf('/* Keep the reader shell'));
   assert.match(responsive,/\.reader-tools \.reader-toolbar\{display:grid;grid-template-columns:minmax\(0,1fr\)/);
   assert.match(responsive,/\.reader-tools \.reader-search-controls button\{min-width:44px/);

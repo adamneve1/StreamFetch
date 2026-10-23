@@ -11,50 +11,52 @@
   <script src="/static/vendor/Flip.min.js" defer></script>
   <script src="/static/vendor/ScrollTrigger.min.js" defer></script>
   <script src="/static/vendor/ScrollSmoother.min.js" defer></script>
+  <script>window.SF_SOURCE_LANG='en';</script>
+  <script src="/static/i18n.js" defer></script>
   <script src="/static/motion.js" defer></script>
   <script src="/static/transcript.js" defer></script>
 </head>
 <body class="reader-page">
-  <header class="app-header reader-header"><a class="brand" href="/"><img class="brand-logo" src="/static/favicon.svg" alt=""><strong>StreamFetch</strong></a><a class="reader-back" href="/">← Workspace</a></header>
+  <header class="app-header reader-header"><a class="brand" href="/"><img class="brand-logo" src="/static/favicon.svg" alt=""><strong>StreamFetch</strong></a><a class="reader-back" href="/" data-i18n="← Workspace">← Workspace</a><button type="button" class="quiet lang-toggle">EN</button></header>
   <div id="reader-smooth-wrapper">
   <div id="reader-smooth-content">
   <main class="reader-shell">
     <p class="eyebrow">TRANSCRIPT READER</p>
-    <p id="reader-status" role="status" aria-live="polite">Memuat transkrip…</p>
+    <p id="reader-status" role="status" aria-live="polite" data-i18n="Memuat transkrip…">Memuat transkrip…</p>
     <div id="reader-content" class="reader-workspace" hidden>
-      <aside class="reader-sidebar" aria-label="Video and program">
-      <section id="reader-player" class="reader-player" aria-label="YouTube video" hidden>
+      <aside class="reader-sidebar" aria-label="Video and program" data-i18n-aria="Video and program">
+      <section id="reader-player" class="reader-player" aria-label="YouTube video" data-i18n-aria="YouTube video" hidden>
         <div id="youtube-player"></div>
-        <video id="local-player" controls playsinline preload="metadata" aria-label="Recording video" hidden></video><iframe id="embed-player" hidden title="Embedded source video" allowfullscreen allow="fullscreen; encrypted-media; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin"></iframe>
+        <video id="local-player" controls playsinline preload="metadata" aria-label="Recording video" data-i18n-aria="Recording video" hidden></video><iframe id="embed-player" hidden title="Embedded source video" allowfullscreen allow="fullscreen; encrypted-media; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin"></iframe>
       </section>
       <p id="player-status" class="muted" role="status" aria-live="polite" hidden></p>
-      <section class="panel reader-info" aria-label="Program information">
+      <section class="panel reader-info" aria-label="Program information" data-i18n-aria="Program information">
         <h1 id="reader-title">Transcript</h1>
         <dl id="program-info"></dl>
-        <details id="full-description"><summary>Full Description</summary><p id="reader-source" class="muted"></p><pre id="source-description"></pre></details>
+        <details id="full-description"><summary data-i18n="Full Description">Full Description</summary><p id="reader-source" class="muted"></p><pre id="source-description"></pre></details>
       </section>
       </aside>
-      <section class="panel reader-document" aria-label="Transcript">
+      <section class="panel reader-document" aria-label="Transcript" data-i18n-aria="Transcript">
         <div class="reader-tools">
         <div class="reader-toolbar">
           <div class="reader-search">
-            <label for="transcript-search">Search transcript</label>
-            <div class="reader-search-controls"><input id="transcript-search" type="search" placeholder="Cari kata atau frasa…" autocomplete="off"><button id="search-previous" class="secondary" type="button" aria-label="Previous match">↑</button><button id="search-next" class="secondary" type="button" aria-label="Next match">↓</button></div>
+            <label for="transcript-search" data-i18n="Search transcript">Search transcript</label>
+            <div class="reader-search-controls"><input id="transcript-search" type="search" placeholder="Cari kata atau frasa…" data-i18n-placeholder="Cari kata atau frasa…" autocomplete="off"><button id="search-previous" class="secondary" type="button" aria-label="Previous match" data-i18n-aria="Previous match">↑</button><button id="search-next" class="secondary" type="button" aria-label="Next match" data-i18n-aria="Next match">↓</button></div>
             <span id="search-count" role="status" aria-live="polite"></span>
           </div>
-          <div class="reader-display"><label for="timestamp-mode">Timestamps</label><select id="timestamp-mode"><option value="none">None</option><option value="segment" selected>Segment</option><option value="subtitle">Subtitle</option></select></div>
+          <div class="reader-display"><label for="timestamp-mode" data-i18n="Timestamps">Timestamps</label><select id="timestamp-mode"><option value="none" data-i18n="None">None</option><option value="segment" selected data-i18n="Segment">Segment</option><option value="subtitle" data-i18n="Subtitle">Subtitle</option></select></div>
         </div>
         <div class="reader-actions">
-          <details class="reader-menu"><summary>Copy</summary><div class="reader-menu-content">
-            <button id="copy-transcript" class="secondary" type="button">Copy Transcript</button>
-            <button id="copy-info" class="secondary" type="button">Copy Info</button>
-            <button id="copy-all" class="secondary" type="button">Copy All</button>
+          <details class="reader-menu"><summary data-i18n="Copy">Copy</summary><div class="reader-menu-content">
+            <button id="copy-transcript" class="secondary" type="button" data-i18n="Copy Transcript">Copy Transcript</button>
+            <button id="copy-info" class="secondary" type="button" data-i18n="Copy Info">Copy Info</button>
+            <button id="copy-all" class="secondary" type="button" data-i18n="Copy All">Copy All</button>
           </div></details>
-          <details id="reader-export-menu" class="reader-menu" hidden><summary>Export</summary><nav id="transcript-exports" class="reader-menu-content" aria-label="Export transcript"></nav></details>
-          <details class="reader-menu reader-more"><summary>More</summary><div class="reader-menu-content"><label class="reader-raw-toggle"><input id="raw-view" type="checkbox"> Raw view</label></div></details>
+          <details id="reader-export-menu" class="reader-menu" hidden><summary data-i18n="Export">Export</summary><nav id="transcript-exports" class="reader-menu-content" aria-label="Export transcript" data-i18n-aria="Export transcript"></nav></details>
+          <details class="reader-menu reader-more"><summary data-i18n="More">More</summary><div class="reader-menu-content"><label class="reader-raw-toggle"><input id="raw-view" type="checkbox"> <span data-i18n="Raw view">Raw view</span></label></div></details>
         </div>
         </div>
-        <article id="transcript-text" class="reader-prose" aria-label="Transcript text"></article>
+        <article id="transcript-text" class="reader-prose" aria-label="Transcript text" data-i18n-aria="Transcript text"></article>
       </section>
     </div>
   </main>

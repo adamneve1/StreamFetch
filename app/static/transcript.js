@@ -19,7 +19,7 @@ function timestampLabel(segment,mode,compact=false){
 }
 function formatInfo(info){
   const guests=(info.guests||[]).map(guest=>guest.role?guest.name+' — '+guest.role:guest.name).join('\n');
-  return [['Program',info.program], [info.date_time_label||'Date/Time',info.date_time],['Theme',info.theme],['Guests / Narasumber',guests],['Presenter',info.presenter],['Source',info.source]]
+  return [[i18n('Program'),info.program], [info.date_time_label||i18n('Date/Time'),info.date_time],[i18n('Theme'),info.theme],[i18n('Guests / Narasumber'),guests],[i18n('Presenter'),info.presenter],[i18n('Source'),info.source]]
     .filter(([,value])=>value).map(([label,value])=>label+': '+value).join('\n');
 }
 function formatTranscript(segments,mode='none'){
@@ -124,11 +124,12 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
   const status=$('reader-status'),content=$('reader-content'),article=$('transcript-text');
   const base=location.pathname.replace(/\/(?:view)?$/,'');
   let data,matchNodes=[],current=-1,player=null,playerReady=false,pendingSeek=null,hasPlayer=false;
+  window.addEventListener('sf-lang-change',()=>{try{if(!data)return;render(true);showInfo(data.info);updateReaderSource();updateExports();}catch{}});
   function notify(message){status.textContent=message;}
   function seek(seconds){
     if(!hasPlayer||!Number.isFinite(seconds)||seconds<0)return;
     if(playerReady){try{seekTranscript(player,seconds);}catch{playerFailed();}return;}
-    pendingSeek=seconds;$('player-status').hidden=false;$('player-status').textContent='Video masih dimuat. Posisi akan dibuka saat siap.';
+    pendingSeek=seconds;$('player-status').hidden=false;$('player-status').textContent=i18n('Video masih dimuat. Posisi akan dibuka saat siap.');
   }
   function playerLoaded(){
     playerReady=true;$('player-status').hidden=true;
@@ -137,7 +138,7 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
   function playerFailed(){
     hasPlayer=false;playerReady=false;pendingSeek=null;player=null;
     $('reader-player').hidden=true;$('player-status').hidden=false;
-    $('player-status').textContent='Video tidak dapat diputar di sini. Transkrip tetap tersedia.';
+    $('player-status').textContent=i18n('Video tidak dapat diputar di sini. Transkrip tetap tersedia.');
     if($('local-player').pause)$('local-player').pause();
     render();
   }
@@ -148,10 +149,10 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
     if(!allowed)return false;
     const frame=$('embed-player');frame.src=embed;frame.hidden=false;
     $('reader-player').classList.toggle('embed',true);$('reader-player').hidden=false;
-    const status=$('player-status');status.hidden=false;status.textContent='Video melekat dari sumbernya (embed).';
+    const status=$('player-status');status.hidden=false;status.textContent=i18n('Video melekat dari sumbernya (embed).');
     if(/^https:\/\/(?:www\.)?(?:tiktok|instagram)\.com\//.test(openUrl||'')){
       const link=document.createElement('a');link.href=openUrl;link.target='_blank';
-      link.rel='noopener noreferrer';link.textContent='Buka video di sumbernya ↗';
+      link.rel='noopener noreferrer';link.textContent=i18n('Buka video di sumbernya ↗');
       status.append(document.createTextNode(' '),link);
     }
     render();
@@ -187,6 +188,14 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
     const script=document.createElement('script');script.src='https://www.youtube.com/iframe_api';
     script.addEventListener('error',playerFailed);document.head.append(script);
   }
+  function updateReaderSource(){
+    const transcriptSource=({manual:i18n('Manual subtitles'),auto:i18n('Auto-generated subtitles'),ai:i18n('AI transcription')})[data.transcript_source]||data.transcript_source;
+    $('reader-source').textContent=[data.info.source,data.language,transcriptSource,data.info.date_time_label==='Source upload date'?i18n('Source upload date: {d}',{d:data.info.date_time}):''].filter(Boolean).join(' · ');
+  }
+  function updateExports(){
+    $('transcript-exports').replaceChildren();
+    for(const kind of data.exports){const link=document.createElement('a');link.href=base+'/'+kind;link.textContent=i18n('Export {k}',{k:kind.toUpperCase()});$('transcript-exports').append(link);}
+  }
   function highlightedText(parent,text,query){
     let last=0;
     for(const match of findMatches(text,query)){
@@ -197,7 +206,7 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
   }
   function updateMatch(scroll=false){
     matchNodes.forEach((node,index)=>node.classList.toggle('current-match',index===current));
-    $('search-count').textContent=$('transcript-search').value.trim()?(matchNodes.length?(current+1)+' / '+matchNodes.length+' matches':'No matches'):'';
+    $('search-count').textContent=$('transcript-search').value.trim()?(matchNodes.length?i18n('{a} / {b} matches',{a:current+1,b:matchNodes.length}):i18n('No matches')):'';
     $('search-previous').disabled=$('search-next').disabled=!matchNodes.length;
     if(scroll&&matchNodes[current])readerScroll.jumpTo(matchNodes[current],true,'center center');
   }
@@ -213,43 +222,42 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
         const label=timestampLabel(segment,mode,true);
         if(label){
           const timestamp=document.createElement(hasPlayer?'button':'time');timestamp.textContent=label;
-          if(hasPlayer){timestamp.type='button';timestamp.className='reader-timestamp';timestamp.setAttribute('aria-label','Seek to '+label);timestamp.addEventListener('click',()=>{seek(segment.start);readerScroll.jumpTo(row,true,'center center');});}
+          if(hasPlayer){timestamp.type='button';timestamp.className='reader-timestamp';timestamp.setAttribute('aria-label',i18n('Seek to {t}',{t:label}));timestamp.addEventListener('click',()=>{seek(segment.start);readerScroll.jumpTo(row,true,'center center');});}
           row.append(timestamp);
         }
         else if(mode!=='none'){const empty=document.createElement('span');row.append(empty);}
         const paragraph=document.createElement('p');highlightedText(paragraph,segment.text,query);row.append(paragraph);article.append(row);
       }
     }
-    if(!data.segments.length&&!$('raw-view').checked){article.textContent='Transkrip kosong.';}
+    if(!data.segments.length&&!$('raw-view').checked){article.textContent=i18n('Transkrip kosong.');}
     current=matchNodes.length?(reset?0:Math.max(0,Math.min(current,matchNodes.length-1))):-1;updateMatch();
     if(!content.hidden)readerScroll.refresh();
   }
   function showInfo(info){
     const dl=$('program-info');
-    for(const [label,value] of [['Date/Time',info.date_time_label==='Source upload date'?'':info.date_time],['Theme',info.theme],['Narasumber',info.guests],['Presenter',info.presenter]]){
+    for(const [label,value] of [[i18n('Date/Time'),info.date_time_label==='Source upload date'?'':info.date_time],[i18n('Theme'),info.theme],[i18n('Narasumber'),info.guests],[i18n('Presenter'),info.presenter]]){
       const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;
       if(Array.isArray(value)&&value.length){
         const list=document.createElement('ul');
         for(const guest of value){const li=document.createElement('li');li.textContent=guest.name;if(guest.role){const role=document.createElement('span');role.className='guest-role';role.textContent=' — '+guest.role;li.append(role);}list.append(li);}dd.append(list);
-      }else{dd.textContent=Array.isArray(value)||!value?'Tidak tersedia':value;}
+      }else{dd.textContent=Array.isArray(value)||!value?i18n('Tidak tersedia'):value;}
       dl.append(dt,dd);
     }
-    $('source-description').textContent=info.description||'Deskripsi sumber tidak tersedia untuk rekaman ini.';
+    $('source-description').textContent=info.description||i18n('Deskripsi sumber tidak tersedia untuk rekaman ini.');
   }
   async function copy(text){
-    try{await navigator.clipboard.writeText(text);notify('Disalin ke clipboard.');}
-    catch{notify('Clipboard tidak tersedia. Pilih teks dan salin secara manual.');}
+    try{await navigator.clipboard.writeText(text);notify(i18n('Disalin ke clipboard.'));}
+    catch{notify(i18n('Clipboard tidak tersedia. Pilih teks dan salin secara manual.'));}
   }
   try{
     const response=await fetch(base+'/data');
-    if(!response.ok){const error=await response.json();throw Error(error.error||'Transkrip tidak dapat dibuka.');}
+    if(!response.ok){const error=await response.json();throw Error(error.error||i18n('Transkrip tidak dapat dibuka.'));}
     data=await response.json();document.title=data.info.program+' · StreamFetch';
     $('reader-title').textContent=data.info.program;
-    const transcriptSource=({manual:'Manual subtitles',auto:'Auto-generated subtitles',ai:'AI transcription'})[data.transcript_source]||data.transcript_source;
-    $('reader-source').textContent=[data.info.source,data.language,transcriptSource,data.info.date_time_label==='Source upload date'?'Source upload date: '+data.info.date_time:''].filter(Boolean).join(' · ');
+    updateReaderSource();
     initPlayer(data.youtube_id,data.media_url,data.embed_url,data.open_url);
     showInfo(data.info);
-    for(const kind of data.exports){const link=document.createElement('a');link.href=base+'/'+kind;link.textContent='Export '+kind.toUpperCase();$('transcript-exports').append(link);}
+    updateExports();
     $('reader-export-menu').hidden=!data.exports.length;
     if(!data.segments.some(segment=>Number.isFinite(segment.start))){$('timestamp-mode').value='none';$('timestamp-mode').disabled=true;}
     $('timestamp-mode').addEventListener('change',()=>render());

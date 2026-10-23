@@ -69,14 +69,19 @@ function fixture(motion, href = 'https://streamfetch.example/') {
     createElement:tag=>{const element=new Element(tag);element.ownerDocument=document;return element;},
     createElementNS:(_,tag)=>document.createElement(tag),
     addEventListener(type,callback){(listeners[type]||=[]).push(callback);} };
+  document.documentElement={lang:'',dataset:{}};
   for(const element of ids.values())element.ownerDocument=document;
   const context = vm.createContext({
     document,
-    window: { addEventListener(type,callback){(windowListeners[type]||=[]).push(callback);}, StreamFetchMotion:motion, location }, URL, URLSearchParams, Intl,
+    window: { addEventListener(type,callback){(windowListeners[type]||=[]).push(callback);}, StreamFetchMotion:motion, location, dispatchEvent(){}, currentScript:null, SF_SOURCE_LANG:'id' }, URL, URLSearchParams, Intl,
     setInterval(callback,delay){intervals.set(++intervalId,{callback,delay});return intervalId;},clearInterval(id){intervals.delete(id);},setTimeout(callback,delay){timers.set(++timerId,{callback,delay});return timerId;},clearTimeout(id){timers.delete(id);},
+    documentElement:document.documentElement,
+    CustomEvent: class { constructor(type){this.type=type;} },
+    localStorage: { getItem:()=>null, setItem:()=>{} },
     // Keep auto-login pending; each test drives the state itself.
     fetch: () => new Promise(() => {}),
   });
+  vm.runInContext(fs.readFileSync(path.join(root, 'app/static/i18n.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(root, 'app/static/app.js'), 'utf8'), context);
   return { context,document,listeners,windowListeners,timers,intervals,fireTimer(id){const timer=timers.get(id);timers.delete(id);timer?.callback();},get: id => ids.get(id), run: code => vm.runInContext(code, context) };
 }
@@ -131,7 +136,7 @@ test('island progress omits track helpers and attempts, and resets when unknown'
 
 test('Original is the Source default and watch recording uses the canonical Merekam island',()=>{
  const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
- assert.match(html,/<option value="original" selected>/);assert.doesNotMatch(html,/<option value="balanced" selected>/);
+ assert.match(html,/<option value="original" selected(?: data-i18n="[^"]*")?>/);assert.doesNotMatch(html,/<option value="balanced" selected>/);
  const f=fixture();
  f.run("active=null;submittedJob=null;lastObservedJob=null;queued=0;renderOperationalStatus()");
  assert.equal(f.get('status-monitor').hidden,true);
@@ -230,8 +235,8 @@ test('one accessible native dialog replaces every user-facing prompt and confirm
   const html=fs.readFileSync(path.join(root,'index.html'),'utf8');
   assert.match(html,/<dialog id="app-dialog" class="stream-dialog" aria-labelledby="app-dialog-title" aria-describedby="app-dialog-message">/);
   assert.match(html,/id="app-dialog-input"[^>]*autocomplete="off"/);
-  assert.match(html,/id="app-dialog-cancel"[^>]*type="button">Batal<\/button>/);
-  assert.match(html,/id="app-dialog-confirm"[^>]*type="submit">Simpan<\/button>/);
+  assert.match(html,/id="app-dialog-cancel"[^>]*type="button"[^>]*>Batal<\/button>/);
+  assert.match(html,/id="app-dialog-confirm"[^>]*type="submit"[^>]*>Simpan<\/button>/);
   for(const file of ['app.js','motion.js','transcript.js']){
     const source=fs.readFileSync(path.join(root,file),'utf8');
     assert.doesNotMatch(source,/\b(?:window\.)?(?:prompt|confirm|alert)\s*\(/,file);
@@ -571,7 +576,7 @@ test('StreamFetch branding retains the existing mark and removes old user-facing
 test('segmented sources preserve mode behavior and expose the selected state accessibly',()=>{
   const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
   const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8');
-  assert.match(html,/id="source-tabs" class="tabs" role="group" aria-label="Source"><span id="source-tab-indicator" class="source-tab-indicator" aria-hidden="true"><\/span>/);
+  assert.match(html,/id="source-tabs" class="tabs" role="group" aria-label="Source"(?: data-i18n-aria="Source")?><span id="source-tab-indicator" class="source-tab-indicator" aria-hidden="true"><\/span>/);
   assert.match(css,/\.source-tab-indicator\{position:absolute;z-index:0/);assert.match(css,/\.tabs\[data-motion-ready=true\] \.tab\.selected\{background:transparent;box-shadow:none\}/);
   assert.ok(html.indexOf('id="tab-youtube"')<html.indexOf('id="tab-tiktok"'));
   assert.ok(html.indexOf('id="tab-tiktok"')<html.indexOf('id="tab-instagram"'));
@@ -624,11 +629,11 @@ test('compact jobs retain every state, title, full diagnostics, metadata and sec
 test('shell groups labelled destinations separately from secondary utilities and keeps navigation state',()=>{
   const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
   const header=html.match(/<header class="app-header">.*?<\/header>/)[0];
-  assert.match(header,/<nav class="workspace-nav" aria-label="Primary navigation">/);
+  assert.match(header,/<nav class="workspace-nav" aria-label="Primary navigation"(?: data-i18n-aria="Primary navigation")?>/);
   for(const [id,label,target] of [['nav-control','Workspace','control-room'],['nav-admin','Settings','admin-view']]){
     const button=header.match(new RegExp('<button id="'+id+'".*?</button>'))[0];
     assert.match(button,new RegExp('aria-label="'+label+'"'));assert.match(button,new RegExp('aria-controls="'+target+'"'));
-    assert.match(button,new RegExp('<span class="nav-label">'+label+'</span>'));
+    assert.match(button,new RegExp('<span class="nav-label"(?: data-i18n="[^"]*")?>'+label+'</span>'));
     assert.match(button,/<svg.*aria-hidden="true"/);
   }
   assert.ok(header.indexOf('</nav>')<header.indexOf('id="logout"'));
@@ -683,19 +688,19 @@ test('Settings ends with a minimal product footer and preserves the existing saf
   assert.match(footer,/href="https:\/\/github.com\/adamneve1"/);
   assert.match(footer,/target="_blank" rel="noopener noreferrer"/);
   assert.match(footer,/aria-label="GitHub \(opens in a new tab\)"/);
-  assert.match(footer,/>GitHub <svg/);
+  assert.match(footer,/>GitHub<\/span> <svg/);
   assert.doesNotMatch(footer,/@adamneve1|Built by|About|credit-link/);
 });
 test('login composition remains minimal with accessible authentication and a quiet safe developer credit',()=>{
   const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
   const login=html.slice(html.indexOf('<div id="login"'),html.indexOf('<div id="workspace"'));
-  assert.match(login,/aria-label="Masuk StreamFetch" aria-busy="false"/);
-  assert.match(login,/<label for="password">Password<\/label>/);
+  assert.match(login,/aria-label="Masuk StreamFetch"(?: data-i18n-aria="Masuk StreamFetch")? aria-busy="false"/);
+  assert.match(login,/<label for="password"(?: data-i18n="Password")?>Password<\/label>/);
   assert.match(login,/name="password" type="password" autocomplete="current-password" aria-describedby="login-error" autofocus required/);
-  assert.match(login,/<button id="login-submit" class="primary" type="submit">Masuk<\/button>/);
+  assert.match(login,/<button id="login-submit" class="primary" type="submit"(?: data-i18n="Masuk")?>Masuk<\/button>/);
   assert.match(login,/id="login-error" role="alert"/);
   assert.doesNotMatch(login,/<h1|class="muted"|Welcome|<footer|feature|slogan/);
-  assert.match(login,/<\/form><p id="login-credit" class="login-credit">Built with 💖 by /);
+  assert.match(login,/<\/form><p id="login-credit" class="login-credit"><span data-i18n="Built with 💖 by">Built with 💖 by<\/span> /);
   assert.match(login,/href="https:\/\/github.com\/adamneve1" target="_blank" rel="noopener noreferrer"/);
   assert.match(login,/>@adamneve1<\/a>/);
   const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8').split('/* Compact authentication composition')[1];
@@ -1162,7 +1167,7 @@ test('active island fills History while compact states and single-line title hie
 test('island Stop retains its accessible square icon across polls and immediately requests cancellation',async()=>{
  const html=fs.readFileSync(path.resolve(__dirname,'../app/static/index.html'),'utf8');
  const stop=html.match(/<button id="stop".*?<\/button>/)[0];
- assert.match(stop,/aria-label="Hentikan proses" title="Hentikan proses"/);
+ assert.match(stop,/aria-label="Hentikan proses"(?: data-i18n-aria="Hentikan proses")? title="Hentikan proses"/);
  assert.match(stop,/<svg[^>]*aria-hidden="true"[^>]*><rect[^>]*width="12" height="12"/);
  assert.doesNotMatch(stop,/>Hentikan|<path|>×|>X/);
  const css=fs.readFileSync(path.resolve(__dirname,'../app/static/style.css'),'utf8').split('/* The island is a two-row signal')[1];
@@ -1187,10 +1192,10 @@ test('transcription started from History is observed by the same island without 
 test('workspace and reader load the same local GSAP motion system',()=>{
  const root=path.resolve(__dirname,'..'),html=fs.readFileSync(path.join(root,'app/static/index.html'),'utf8');
  const scripts=[...html.matchAll(/<script defer src="([^"]+)"/g)].map(match=>match[1]);
- assert.deepEqual(scripts,['/static/vendor/gsap.min.js','/static/vendor/Flip.min.js','/static/vendor/MorphSVGPlugin.min.js','/static/motion.js','/static/app.js']);
+ assert.deepEqual(scripts,['/static/vendor/gsap.min.js','/static/vendor/Flip.min.js','/static/vendor/MorphSVGPlugin.min.js','/static/i18n.js','/static/motion.js','/static/app.js']);
  assert.equal(fs.readFileSync(path.join(root,'package.json'),'utf8').includes('"gsap": "3.15.0"'),true);
  const reader=fs.readFileSync(path.join(root,'app/static/transcript.html'),'utf8');
- assert.deepEqual([...reader.matchAll(/<script src="([^"]+)" defer/g)].map(match=>match[1]),['/static/vendor/gsap.min.js','/static/vendor/Flip.min.js','/static/vendor/ScrollTrigger.min.js','/static/vendor/ScrollSmoother.min.js','/static/motion.js','/static/transcript.js']);
+ assert.deepEqual([...reader.matchAll(/<script src="([^"]+)" defer/g)].map(match=>match[1]),['/static/vendor/gsap.min.js','/static/vendor/Flip.min.js','/static/vendor/ScrollTrigger.min.js','/static/vendor/ScrollSmoother.min.js','/static/i18n.js','/static/motion.js','/static/transcript.js']);
  const build=fs.readFileSync(path.join(root,'scripts/build-frontend.mjs'),'utf8');
  assert.match(build,/ScrollTrigger\.min\.js/);assert.match(build,/ScrollSmoother\.min\.js/);
 });
@@ -1266,8 +1271,8 @@ test('History bulk download reuses the accessible row icon without initial admin
  assert.match(button,/class="download-direct"/);assert.match(button,/type="button"/);
  assert.match(button,/aria-label="Unduh pilihan"/);assert.match(button,/title="Unduh pilihan"/);assert.match(button,/ disabled/);
  assert.match(html,/<button id="download-selected"[^>]*><\/button>/);
- assert.match(html,/<button id="delete-selected"[^>]* hidden disabled>/);
- assert.match(html,/<button id="filter-reset"[^>]* hidden disabled>/);
+ assert.match(html,/<button id="delete-selected"[^>]* hidden disabled[^>]*>/);
+ assert.match(html,/<button id="filter-reset"[^>]* hidden disabled[^>]*>/);
  const f=fixture();f.context.rows=polishRows;f.run('renderHistory(rows)');
  const bulk=f.get('download-selected'),row=f.get('results').querySelector('.download-direct');
  assert.equal(bulk.querySelectorAll('svg').length,1);assert.equal(bulk.querySelector('svg').attributes['aria-hidden'],'true');
