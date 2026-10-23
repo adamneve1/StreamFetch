@@ -197,7 +197,7 @@ async function api(path, data){
  return result;
 }
 function notice(text){$('notice').textContent=text;$('notice').hidden=!text;}
-function showLogin(){const returning=$('login').hidden;closePalette(false);resetToasts();clearSourceDuplicate();if(returning)motion?.reset();$('workspace').hidden=true;$('login').hidden=false;csrf='';isAdmin=false;active=null;lastObservedJob=null;focusedJobId=null;submittedJob=null;focusPending=false;historyRows=[];transcriptRows=[];transcriptOnlyVideoId='';transcriptOnlyJobId='';transcriptOnlyURL='';transcriptOnlyPhase='idle';transcriptOnlyPolling=false;selectTranscriptUpload(null);transcriptOnlyBusy(false);$('transcript-only-consent').hidden=true;$('transcript-only-result').hidden=true;collapseSource(false);showSection(routeView());expandedHistoryDetails.clear();if(returning)motion?.loginReveal?.($('login'));$('password').focus({preventScroll:true});}
+function showLogin(){const returning=$('login').hidden;closePalette(false);resetToasts();clearSourceDuplicate();if(returning)motion?.reset();$('workspace').hidden=true;$('login').hidden=false;csrf='';isAdmin=false;active=null;lastObservedJob=null;focusedJobId=null;submittedJob=null;focusPending=false;historyRows=[];transcriptOnlyVideoId='';transcriptOnlyJobId='';transcriptOnlyURL='';transcriptOnlyPhase='idle';transcriptOnlyPolling=false;selectTranscriptUpload(null);transcriptOnlyBusy(false);$('transcript-only-consent').hidden=true;$('transcript-only-result').hidden=true;collapseSource(false);showSection(routeView());expandedHistoryDetails.clear();if(returning)motion?.loginReveal?.($('login'));$('password').focus({preventScroll:true});}
 function controls(){const canMark=!!active&&active.state==='recording'&&active.is_live!==false;$('mark').disabled=pending||!online||!disk?.can_record||!!active||queued>0||(mode==='oryx'&&!$('source').value);$('stop').disabled=pending||!active||['stopping','ready','failed'].includes(active.state);updateClipControls();renderOperationalStatus();}
 function bytes(n=0){return n>=1e9?(n/1e9).toFixed(2)+' GB':(n/1e6).toFixed(1)+' MB';}
 function uploadBytes(n=0){return n>=1024*1024?(n/1024/1024).toFixed(1)+' MB':Math.max(0,n/1024).toFixed(1)+' KB';}
@@ -464,38 +464,33 @@ function matchingHistory(rows,filters=historyFilters()){
   return (!filters.query||text.includes(filters.query))&&(!filters.source||row.source===filters.source)&&stateMatches&&(!filters.date||dateLabel===filters.date);
  });
 }
-function historyTargets(mode){return mode==='transcript'?{results:'transcript-results',count:'transcript-result-count',empty:'transcript-empty'}:{results:'results',count:'result-count',empty:'empty'};}
 function clearHistoryFilters(render=true){for(const id of ['filter-q','filter-source','filter-state','filter-date'])$(id).value='';if(render)applyHistoryFilters();}
 function applyHistoryFilters(){closeActionMenu();renderHistory(historyRows);motion?.historyFilter?.($('results'));}
 function captureFailureMessage(row){return row.error_title?(row.error_title+(row.error_message?' — '+row.error_message:'')):(sourceDisplayName(row)||'Sumber')+' gagal memberikan media. Buka detail untuk melihat penyebab.';}
-function renderHistory(rows,mode='video'){
- const transcript=mode==='transcript',targets=historyTargets(mode);
- if(!transcript)historyRows=rows;
- const filters=transcript?{query:($('transcript-filter-q')?.value||'').trim().toLocaleLowerCase()}:historyFilters();
- const visible=matchingHistory(rows,filters).filter(row=>transcript?!!row.transcript_only:!row.transcript_only),filtered=Object.values(filters).some(Boolean);
+function renderHistory(rows){
+ historyRows=rows;
+ const filters=historyFilters();
+ const visible=matchingHistory(rows,filters).filter(row=>!row.transcript_only),filtered=Object.values(filters).some(Boolean);
  const total=Math.max(historyTotal,rows.length);
- $(targets.count).textContent=filtered?visible.length+' / '+rows.length+' hasil':rows.length?(total>rows.length?rows.length+' / '+total:rows.length)+' hasil':'Belum ada hasil';
- $(targets.count).title=total>rows.length?'Filter berlaku pada '+rows.length+' rekaman yang dimuat.':'Hasil riwayat';
- $(targets.empty).hidden=!!visible.length;
- $(targets.empty).querySelector('strong').textContent=filtered?'Tidak ada rekaman yang cocok.':(transcript?'Belum ada riwayat transkrip.':'Belum ada rekaman.');
- $(targets.empty).querySelector('p').textContent=filtered?'Ubah pencarian atau bersihkan filter untuk melihat rekaman lainnya.':(transcript?'Transkrip dari URL YouTube atau upload akan muncul di sini.':'Mulai capture dari Source. Rekaman dan download akan muncul di sini.');
- if(!transcript){$('filter-reset').hidden=!filtered;$('filter-reset').disabled=!filtered;}
+ $('result-count').textContent=filtered?visible.length+' / '+rows.length+' hasil':rows.length?(total>rows.length?rows.length+' / '+total:rows.length)+' hasil':'Belum ada hasil';
+ $('result-count').title=total>rows.length?'Filter berlaku pada '+rows.length+' rekaman yang dimuat.':'Hasil riwayat';
+ $('empty').hidden=!!visible.length;
+ $('empty').querySelector('strong').textContent=filtered?'Tidak ada rekaman yang cocok.':'Belum ada rekaman.';
+ $('empty').querySelector('p').textContent=filtered?'Ubah pencarian atau bersihkan filter untuk melihat rekaman lainnya.':'Mulai capture dari Source. Rekaman dan download akan muncul di sini.';
+ $('filter-reset').hidden=!filtered;$('filter-reset').disabled=!filtered;
  const selection=new Set(selectedJobs());
- for(const details of $(targets.results).querySelectorAll('.recording-details')){
+ for(const details of $('results').querySelectorAll('.recording-details')){
   if(details.open)expandedHistoryDetails.add(details.dataset.jobId);else expandedHistoryDetails.delete(details.dataset.jobId);
  }
- $(targets.results).replaceChildren();
+ $('results').replaceChildren();
  for(const row of visible){
-  const tr=document.createElement('tr');
+  const tr=document.createElement('tr'),selectCell=document.createElement('td'),checkbox=document.createElement('input');
   tr.dataset.jobId=row.job_id;
-  if(!transcript&&row.job_id===focusedJobId){tr.className='focused-job';tr.tabIndex=-1;tr.setAttribute('aria-label','Capture terbaru');}
+  if(row.job_id===focusedJobId){tr.className='focused-job';tr.tabIndex=-1;tr.setAttribute('aria-label','Capture terbaru');}
+  selectCell.className='select-cell';checkbox.type='checkbox';checkbox.className='history-select';checkbox.value=row.job_id;
   const rowTitle=row.filename||row.source_metadata?.title||row.note||'Rekaman '+row.job_id.slice(0,8);
-  if(!transcript){
-   const selectCell=document.createElement('td'),checkbox=document.createElement('input');
-   selectCell.className='select-cell';checkbox.type='checkbox';checkbox.className='history-select';checkbox.value=row.job_id;
-   checkbox.checked=selection.has(row.job_id);checkbox.setAttribute('aria-label','Pilih '+rowTitle);checkbox.onchange=updateDeleteControls;
-   const selectionLabel=document.createElement('label');selectionLabel.className='history-selection';selectionLabel.append(checkbox);selectCell.append(selectionLabel);tr.append(selectCell);
-  }
+  checkbox.checked=selection.has(row.job_id);checkbox.setAttribute('aria-label','Pilih '+rowTitle);checkbox.onchange=updateDeleteControls;
+  const selectionLabel=document.createElement('label');selectionLabel.className='history-selection';selectionLabel.append(checkbox);selectCell.append(selectionLabel);tr.append(selectCell);
   const file=document.createElement('td'),strong=document.createElement('strong'),small=document.createElement('small');
   strong.textContent=rowTitle;strong.title=strong.textContent;
   small.className=row.state==='failed'?'capture-failure-message':'';
@@ -530,7 +525,7 @@ function renderHistory(rows,mode='video'){
    trigger.setAttribute('aria-label','Aksi lainnya untuk '+(row.filename||'riwayat'));trigger.setAttribute('aria-haspopup','menu');trigger.setAttribute('aria-expanded','false');
    trigger.title='Aksi lainnya';trigger.onclick=()=>toggleActionMenu(trigger,row);action.append(trigger);
   }
-  tr.append(action);$(targets.results).append(tr);
+  tr.append(action);$('results').append(tr);
   if(row.job_id===focusedJobId&&focusPending){tr.focus({preventScroll:true});tr.scrollIntoView({behavior:motion?.reduced()?'auto':'smooth',block:'center'});focusPending=false;}
  }
  updateDeleteControls();
@@ -566,14 +561,13 @@ async function refresh(){
   active=data.active;online=data.online;queued=data.queued;if(active)lastObservedJob=active;controls();
   $('live-markers').replaceChildren();
   for(const marker of active?.markers||[]){const li=document.createElement('li');li.textContent=duration(marker.seconds)+' — '+marker.note;$('live-markers').append(li);}
-  // Each room owns its record type: Workspace shows video jobs, Transcript Only lists transcripts.
-  const scope=$('workspace').dataset.destination==='transcript'||transcriptOnlyPhase==='processing'?'transcript':'download';
-  const history=await api('recordings?job_type='+scope);if(revision!==refreshId)return;
+  // Workspace history stays download-only; transcript-only jobs are fetched only
+  // while one is running (or its room is open) so the progress UI keeps polling.
+  const transcriptScope=transcriptOnlyPhase==='processing'||$('workspace').dataset.destination==='transcript';
+  const history=await api('recordings?job_type=download');if(revision!==refreshId)return;
   const rows=history.recordings;
   historyTotal=Number.isFinite(history.total)?history.total:rows.length;
-  if(scope==='transcript'){
-   transcriptRows=rows;closeActionMenu();renderHistory(rows,'transcript');renderOperationalStatus();await syncTranscriptOnly(rows);return;
-  }
+  let transcriptRows=transcriptScope?(await api('recordings?job_type=transcript')).recordings:[];
   // Admission can precede catalogue publication. Keep the accepted capture
   // visible until the worker supplies its durable row, without retaining URLs.
   if(submittedJob){
@@ -870,7 +864,7 @@ motion?.loginReveal?.($('login'));
 async function poll(){await refresh();if(!$('admin-view').hidden)loadWatches();setTimeout(poll,2500);}setTimeout(poll,2500);
 
 $('mark').onclick=async()=>{pending=true;controls();try{await api('markers',{job_id:active.job_id,note:$('marker-note').value});$('marker-note').value='';await refresh();}catch(e){notice(e.message);}finally{pending=false;controls();}};
-$('filter-q').oninput=applyHistoryFilters;$('transcript-filter-q').oninput=()=>{closeActionMenu();renderHistory(transcriptRows,'transcript');motion?.historyFilter?.($('transcript-results'));};
+$('filter-q').oninput=applyHistoryFilters;
 for(const id of ['filter-source','filter-state','filter-date'])$(id).onchange=applyHistoryFilters;
 $('filter-reset').onclick=()=>clearHistoryFilters();
 
