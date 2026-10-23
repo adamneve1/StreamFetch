@@ -45,21 +45,31 @@ def instagram_post(value):
     return 'https://www.instagram.com/' + match[1].replace('reels/', 'reel/', 1) + '/'
 
 
-def social_embeds(source_name, candidates):
-    """Scriptless iframe embed plus canonical page link for TikTok/Instagram values."""
+def social_embeds(source_name, source_id, candidates):
+    """Scriptless iframe embed plus page link, from a canonical URL or the stored source_id.
+
+    Catalogue rows never carry playback URLs, so TikTok embeds by numeric video id and
+    Instagram by shortcode stay possible even without a URL.
+    """
     candidates = [str(value or '').strip() for value in candidates if value]
-    if source_name == 'tiktok':
-        canonical = next((url for url in map(tiktok_video, candidates) if url), None)
-        if not canonical:
-            return None, None
+    if not candidates:
+        # URL-less rows (catalogue contract): embed strictly from the stored source id.
+        if source_name == 'tiktok' and isinstance(source_id, str) and source_id.isdigit():
+            return f'https://www.tiktok.com/embed/v2/{source_id}', None
+        if source_name == 'instagram' and isinstance(source_id, str) and re.fullmatch(r'[A-Za-z0-9_-]{5,}', source_id):
+            return (f'https://www.instagram.com/p/{source_id}/embed/captioned/',
+                    f'https://www.instagram.com/p/{source_id}/')
+        return None, None
+    trusted = (tiktok_video if source_name == 'tiktok' else instagram_post if source_name == 'instagram' else None)
+    if trusted is None:
+        return None, None
+    # A present URL is authoritative: embed only what it canonically identifies.
+    canonical = next((url for url in map(trusted, candidates) if url), None)
+    if source_name == 'tiktok' and canonical:
         video_id = re.fullmatch(r'https://www\.tiktok\.com/@[\w.]+/(?:video|photo)/(\d+)', canonical)[1]
         return f'https://www.tiktok.com/embed/v2/{video_id}', canonical
-    if source_name == 'instagram':
-        canonical = next((url for url in map(instagram_post, candidates) if url), None)
-        if not canonical:
-            return None, None
-        return canonical.replace('https://www.instagram.com/',
-                                 'https://www.instagram.com/') + 'embed/captioned/', canonical
+    if source_name == 'instagram' and canonical:
+        return canonical + 'embed/captioned/', canonical
     return None, None
 
 
@@ -228,9 +238,10 @@ def reader_data(row, root):
             media_url = '/api/files/' + quote(filename, safe='') + '?inline=1'
     # No local media (transcript-only or cleaned-up capture): embed the TikTok/Instagram
     # post itself from its validated URL so timestamps still have a reference visual.
+    derived_id = row.get('source_id') if row.get('transcript_only') else None
     embed_url, open_url = (None, None) if media_url else social_embeds(
-        row.get('source'), (row.get('url'),
-                            (source.get('webpage_url') if isinstance(source, dict) else None)))
+        row.get('source'), derived_id,
+        (row.get('url'), (source.get('webpage_url') if isinstance(source, dict) else None)))
     return {'job_id': row['job_id'], 'info': recording_info(row), 'youtube_id': video_id,
             'media_url': media_url, 'embed_url': embed_url, 'open_url': open_url,
             'segments': segments, 'raw': files['txt'] if files['txt'] is not None

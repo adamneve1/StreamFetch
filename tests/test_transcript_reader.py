@@ -64,20 +64,28 @@ class ReaderTests(unittest.TestCase):
         self.row['source'] = 'oryx'
         self.assertIsNone(transcript_reader.reader_data(self.row, self.root)['youtube_id'])
 
-    def test_tiktok_and_instagram_get_scriptless_embeds_only_without_local_media(self):
-        tiktok = dict(self.row, source='tiktok', filename=None, state='ready', source_metadata={},
-                      url='https://www.tiktok.com/@akun/video/74123')
+    def test_tiktok_and_instagram_get_scriptless_embeds_from_source_id_without_local_media(self):
+        # Catalogue rows never store playback URLs: transcript-only embeds derive from source_id.
+        tiktok = dict(self.row, source='tiktok', filename=None, state='ready',
+                      source_metadata={}, transcript_only=True, source_id='74123')
         data = transcript_reader.reader_data(tiktok, self.root)
         self.assertIsNone(data['media_url'])
         self.assertEqual(data['embed_url'], 'https://www.tiktok.com/embed/v2/74123')
-        self.assertEqual(data['open_url'], 'https://www.tiktok.com/@akun/video/74123')
-        reel = dict(tiktok, source='instagram', url='https://www.instagram.com/reels/AbCdEf_1/')
+        self.assertIsNone(data['open_url'])
+        reel = dict(tiktok, source='instagram', source_id='AbCdEf_1')
         data = transcript_reader.reader_data(reel, self.root)
-        self.assertEqual(data['embed_url'], 'https://www.instagram.com/reel/AbCdEf_1/embed/captioned/')
-        self.assertEqual(data['open_url'], 'https://www.instagram.com/reel/AbCdEf_1/')
+        self.assertEqual(data['embed_url'], 'https://www.instagram.com/p/AbCdEf_1/embed/captioned/')
+        self.assertEqual(data['open_url'], 'https://www.instagram.com/p/AbCdEf_1/')
+        canonical = transcript_reader.reader_data(
+            dict(reel, url='https://www.instagram.com/reels/AbCdEf_1/'), self.root)
+        self.assertEqual(canonical['embed_url'], 'https://www.instagram.com/reel/AbCdEf_1/embed/captioned/')
+        self.assertEqual(canonical['open_url'], 'https://www.instagram.com/reel/AbCdEf_1/')
         self.assertIsNone(transcript_reader.reader_data(
-            dict(reel, url='https://www.tiktok.com/@akun/live'), self.root)['embed_url'])
-        self.assertIsNone(transcript_reader.reader_data(dict(reel, url='javascript:alert(1)'), self.root)['embed_url'])
+            dict(tiktok, url='https://www.tiktok.com/@akun/live'), self.root)['embed_url'])
+        self.assertIsNone(transcript_reader.reader_data(
+            dict(tiktok, url='javascript:alert(1)'), self.root)['embed_url'])
+        captured = transcript_reader.reader_data(dict(tiktok, transcript_only=False), self.root)
+        self.assertIsNone(captured['embed_url'])
         reader = transcript_reader.reader_data(self.row, self.root)
         self.assertIsNone(reader['embed_url'])
         self.assertIsNone(reader['open_url'])
