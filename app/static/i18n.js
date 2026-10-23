@@ -308,7 +308,14 @@ const SF_I18N_EN = {
   'Disalin ke clipboard.':'Copied to the clipboard.',
   'Clipboard tidak tersedia. Pilih teks dan salin secara manual.':'Clipboard unavailable. Select the text and copy it manually.',
   'Transkrip tidak dapat dibuka.':'The transcript cannot be opened.',
-  'Deskripsi sumber tidak tersedia untuk rekaman ini.':'No source description available for this recording.'
+  'Deskripsi sumber tidak tersedia untuk rekaman ini.':'No source description available for this recording.',
+'FILE': 'FILE',
+'Riwayat Transkrip': 'Transcript History',
+'Cari judul atau sumber…': 'Search titles or sources…',
+'Belum ada riwayat transkrip.': 'No transcript history yet.',
+'Transkrip dari URL YouTube atau upload akan muncul di sini.': 'Transcripts from YouTube URLs or uploads will appear here.',
+'Filter riwayat transkrip': 'Transcript history filters',
+'Cari riwayat transkrip': 'Search transcript history',
 };
 // Reader overlay: keys are the exact English strings from transcript.html and
 // transcript.js; values are the Indonesian UI translations.
