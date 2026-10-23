@@ -42,6 +42,8 @@ ARCHIVE_PATH = Path(os.getenv("ARCHIVE_PATH", "/archive"))
 ARCHIVE_MAX_RETRIES = max(0, int(os.getenv("ARCHIVE_MAX_RETRIES", "3")))
 ARCHIVE_RETRY_BASE_SECONDS = max(1, int(os.getenv("ARCHIVE_RETRY_BASE_SECONDS", "60")))
 ARCHIVE_LOCAL_RETENTION_HOURS = max(0, float(os.getenv("ARCHIVE_LOCAL_RETENTION_HOURS", "24")))
+TEMP_CLEANUP_MAX_AGE_HOURS = max(0, float(os.getenv("TEMP_CLEANUP_MAX_AGE_HOURS", "72")))
+TEMP_CLEANUP_INTERVAL_SECONDS = max(300, float(os.getenv("TEMP_CLEANUP_INTERVAL_SECONDS", "3600")))
 ORYX_STREAM_URL = os.getenv("ORYX_STREAM_URL", "").strip()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -269,6 +271,56 @@ class ProcessingError(RuntimeError):
     def __init__(self, code):
         self.code = code
         super().__init__(code)
+
+
+def temp_artifact(path):
+    """Identify capture-time artifacts only; final named media never matches."""
+    name = path.name
+    if '.finalize_tmp.' in name or name.endswith(('.part', '.ytdl')):
+        return True
+    # Job ids are uuid4 hex; short date-numbered finals (DDMMYYNN…) never fit.
+    return bool(re.fullmatch(r'[0-9a-f]{32}-.+', name))
+
+
+def cleanup_temporary_files(now=None):
+    """Delete stale capture artifacts from DOWNLOAD_DIR.
+
+    Failed jobs retain partial media on purpose, but nothing re-checked them.
+    This janitor removes job-prefixed capture files, .part/.ytdl remnants, and
+    abandoned finalize temps older than TEMP_CLEANUP_MAX_AGE_HOURS. Final media
+    with generated names never matches the artifact patterns.
+    """
+    age_hours = TEMP_CLEANUP_MAX_AGE_HOURS
+    if age_hours <= 0:
+        return 0
+    cutoff = (time.time() if now is None else now) - age_hours * 3600
+    removed = 0
+    try:
+        candidates = list(DOWNLOAD_DIR.iterdir())
+    except OSError:
+        return 0
+    for path in candidates:
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            if path.stat().st_mtime > cutoff or not temp_artifact(path):
+                continue
+            path.unlink()
+            removed += 1
+        except FileNotFoundError:
+            continue
+        except OSError:
+            log.warning('temp_cleanup skipped file=%s', getattr(path, 'name', '?'))
+    if removed:
+        log.info('temp_cleanup removed=%s max_age_hours=%s', removed, age_hours)
+    return removed
+
+
+async def cleanup_loop():
+    """Hourly janitor pass plus one shortly after worker startup."""
+    while True:
+        await asyncio.to_thread(cleanup_temporary_files)
+        await asyncio.sleep(TEMP_CLEANUP_INTERVAL_SECONDS)
 
 
 def processing_timeout(info):
@@ -1525,6 +1577,7 @@ async def main():
     log.info('Worker running')
     await asyncio.to_thread(recover_processing)
     archival = asyncio.create_task(archive_worker())
+    cleanup = asyncio.create_task(cleanup_loop())
     async def watch_loop():
         controls = telegram_controls.Controls(r)
         interval = max(10, int(os.getenv('TELEGRAM_WATCH_POLL_SECONDS', '30')))
@@ -1552,7 +1605,8 @@ async def main():
     finally:
         archival.cancel()
         watching.cancel()
-        await asyncio.gather(archival, watching, return_exceptions=True)
+        cleanup.cancel()
+        await asyncio.gather(archival, watching, cleanup, return_exceptions=True)
 
 
 if __name__ == '__main__':

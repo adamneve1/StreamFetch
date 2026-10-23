@@ -346,6 +346,11 @@ ARCHIVE_PATH=/archive
 ARCHIVE_LOCAL_RETENTION_HOURS=24
 ARCHIVE_MAX_RETRIES=3
 ARCHIVE_RETRY_BASE_SECONDS=60
+
+# Pembersihan sisa capture lama (.part/.ytdl, finalize temp, file berawalan job id).
+# 0 menonaktifkan pembersihan.
+TEMP_CLEANUP_MAX_AGE_HOURS=72
+TEMP_CLEANUP_INTERVAL_SECONDS=3600
 ```
 
 Jangan commit `.env`, token, password, URL bertoken, atau credential lainnya ke repository.
@@ -723,6 +728,16 @@ MIN_FREE_DISK_GB=2
 
 Batas tersebut hanya mencegah recording dimulai dalam kondisi disk hampir penuh. Recording yang sedang berjalan tidak otomatis dihentikan ketika kapasitas melewati batas.
 
+## Pembersihan file temporary
+
+Sisa capture (file berawalan job id seperti `{job-id}-capture.ts` dan hasil
+yt-dlp, sisa `.part`/`.ytdl`, dan file `.finalize_tmp.*`) dibiarkan tersimpan
+setelah job gagal agar media parsial masih bisa diselamatkan. Janitor worker
+memeriksa folder downloads setiap `TEMP_CLEANUP_INTERVAL_SECONDS` (default
+1 jam) dan menghapus artifact yang lebih tua dari `TEMP_CLEANUP_MAX_AGE_HOURS`
+(default 72 jam). File final hasil generate final filename tidak pernah ikut
+terhapus, dan `TEMP_CLEANUP_MAX_AGE_HOURS=0` menonaktifkan janitor.
+
 ## Struktur Project
 
 ```text
@@ -845,8 +860,8 @@ Beberapa batasan:
 - Tidak ada user/role management terpisah.
 - Tidak ada automatic recovery setelah worker crash.
 - Redis tidak menggunakan persistence.
-- Telegram belum memiliki allowlist operator.
-- Temporary files tidak dibersihkan otomatis.
+- File parsial dari job gagal atau terputus tetap disimpan, lalu dihapus
+  otomatis oleh janitor setelah `TEMP_CLEANUP_MAX_AGE_HOURS` (default 72 jam).
 
 Untuk deployment produksi, batasi akses Web Control Room dan Telegram serta gunakan reverse proxy HTTPS.
 

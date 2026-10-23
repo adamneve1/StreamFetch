@@ -38,6 +38,9 @@ def authorized(handler):
     async def wrapped(*args):
         update, context = args[-2:]
         if not allowed(getattr(update.effective_user, 'id', None)):
+            log.warning('telegram unauthorized user=%s chat=%s',
+                        getattr(update.effective_user, 'id', None),
+                        getattr(update.effective_chat, 'id', None))
             if update.callback_query:
                 await update.callback_query.answer('Tidak diizinkan.', show_alert=True)
             elif update.effective_message:
