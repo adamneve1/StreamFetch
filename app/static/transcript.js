@@ -141,7 +141,24 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
     if($('local-player').pause)$('local-player').pause();
     render();
   }
-  function initPlayer(videoId,mediaUrl){
+  function embedPlayer(embedUrl,openUrl){
+    const embed=embedUrl||'';
+    const allowed=/^https:\/\/(?:www\.)?tiktok\.com\/embed\/v2\/\d+$/.test(embed)
+      ||/^https:\/\/(?:www\.)?instagram\.com\/(?:reel|p|tv)\/[A-Za-z0-9_-]+\/embed\/captioned\/$/.test(embed);
+    if(!allowed)return false;
+    const frame=$('embed-player');frame.src=embed;frame.hidden=false;
+    $('reader-player').classList.toggle('embed',true);$('reader-player').hidden=false;
+    const status=$('player-status');status.hidden=false;status.textContent='Video melekat dari sumbernya (embed).';
+    if(/^https:\/\/(?:www\.)?(?:tiktok|instagram)\.com\//.test(openUrl||'')){
+      const link=document.createElement('a');link.href=openUrl;link.target='_blank';
+      link.rel='noopener noreferrer';link.textContent='Buka video di sumbernya ↗';
+      status.append(document.createTextNode(' '),link);
+    }
+    render();
+    return true;
+  }
+  function initPlayer(videoId,mediaUrl,embedUrl,openUrl){
+    if(embedPlayer(embedUrl,openUrl))return;
     if(!/^[A-Za-z0-9_-]{11}$/.test(videoId||'')){
       if(typeof mediaUrl!=='string'||!/^\/api\/files\/[^/?#]+\?inline=1$/.test(mediaUrl))return;
       const video=$('local-player');hasPlayer=true;
@@ -230,7 +247,7 @@ if(typeof document!=='undefined')document.addEventListener('DOMContentLoaded',as
     $('reader-title').textContent=data.info.program;
     const transcriptSource=({manual:'Manual subtitles',auto:'Auto-generated subtitles',ai:'AI transcription'})[data.transcript_source]||data.transcript_source;
     $('reader-source').textContent=[data.info.source,data.language,transcriptSource,data.info.date_time_label==='Source upload date'?'Source upload date: '+data.info.date_time:''].filter(Boolean).join(' · ');
-    initPlayer(data.youtube_id,data.media_url);
+    initPlayer(data.youtube_id,data.media_url,data.embed_url,data.open_url);
     showInfo(data.info);
     for(const kind of data.exports){const link=document.createElement('a');link.href=base+'/'+kind;link.textContent='Export '+kind.toUpperCase();$('transcript-exports').append(link);}
     $('reader-export-menu').hidden=!data.exports.length;

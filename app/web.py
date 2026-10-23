@@ -314,7 +314,8 @@ def create_app(client=None):
         if request.endpoint == 'view_transcript':
             response.headers['Content-Security-Policy'] = (
                 "default-src 'self'; script-src 'self' https://www.youtube.com; "
-                "frame-src https://www.youtube.com; style-src 'self'; frame-ancestors 'none'")
+                "frame-src https://www.youtube.com https://www.tiktok.com https://www.instagram.com; "
+                "style-src 'self'; frame-ancestors 'none'")
             response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
         return response
 

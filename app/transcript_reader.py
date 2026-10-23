@@ -29,6 +29,40 @@ def youtube_id(value):
         return None
 
 
+def tiktok_video(value):
+    """Canonical TikTok video/post URL for values in the accepted source shapes only."""
+    match = re.fullmatch(r'https://(?:www\.|m\.)?tiktok\.com/(@[\w.]+/(?:video|photo)/\d+)/?',
+                         str(value or '').strip())
+    return 'https://www.tiktok.com/' + match[1] if match else None
+
+
+def instagram_post(value):
+    """Canonical Instagram reel/post URL; accepts only the ingest pipeline's shapes."""
+    match = re.fullmatch(r'https://(?:www\.)?instagram\.com/((?:reels?|p|tv)/[A-Za-z0-9_-]+)/?',
+                         str(value or '').strip())
+    if not match:
+        return None
+    return 'https://www.instagram.com/' + match[1].replace('reels/', 'reel/', 1) + '/'
+
+
+def social_embeds(source_name, candidates):
+    """Scriptless iframe embed plus canonical page link for TikTok/Instagram values."""
+    candidates = [str(value or '').strip() for value in candidates if value]
+    if source_name == 'tiktok':
+        canonical = next((url for url in map(tiktok_video, candidates) if url), None)
+        if not canonical:
+            return None, None
+        video_id = re.fullmatch(r'https://www\.tiktok\.com/@[\w.]+/(?:video|photo)/(\d+)', canonical)[1]
+        return f'https://www.tiktok.com/embed/v2/{video_id}', canonical
+    if source_name == 'instagram':
+        canonical = next((url for url in map(instagram_post, candidates) if url), None)
+        if not canonical:
+            return None, None
+        return canonical.replace('https://www.instagram.com/',
+                                 'https://www.instagram.com/') + 'embed/captioned/', canonical
+    return None, None
+
+
 LABELS = {
     'program': 'program', 'acara': 'program', 'nama program': 'program',
     'tanggal': 'date', 'date/time': 'date', 'date': 'date',
@@ -192,8 +226,13 @@ def reader_data(row, root):
         media = root / filename
         if media.parent.resolve() == root and not media.is_symlink() and media.is_file():
             media_url = '/api/files/' + quote(filename, safe='') + '?inline=1'
+    # No local media (transcript-only or cleaned-up capture): embed the TikTok/Instagram
+    # post itself from its validated URL so timestamps still have a reference visual.
+    embed_url, open_url = (None, None) if media_url else social_embeds(
+        row.get('source'), (row.get('url'),
+                            (source.get('webpage_url') if isinstance(source, dict) else None)))
     return {'job_id': row['job_id'], 'info': recording_info(row), 'youtube_id': video_id,
-            'media_url': media_url,
+            'media_url': media_url, 'embed_url': embed_url, 'open_url': open_url,
             'segments': segments, 'raw': files['txt'] if files['txt'] is not None
             else '\n'.join(segment['text'] for segment in segments),
             'exports': [kind for kind, content in files.items() if content is not None],

@@ -37,3 +37,6 @@
  .reader-tools{top:76px}
  .reader-smoothing .reader-tools{position:relative;top:auto}
 }
+.reader-shell .reader-player.embed{width:fit-content;max-width:min(100%,400px);aspect-ratio:auto;height:auto;margin-left:auto;margin-right:auto}
+.reader-player.embed{display:flex;justify-content:center}
+.reader-player.embed iframe{width:100%;height:min(620px,64dvh);border:0;background:#111}
