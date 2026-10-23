@@ -1,6 +1,6 @@
 const $ = id => document.getElementById(id);
 const motion=window.StreamFetchMotion;
-let csrf='', isAdmin=false, mode='oryx', sources=[], editing='', active=null, online=false, queued=0, pending=false, disk=null, archiveEnabled=false, historyRows=[], refreshId=0, estimateId=0, estimateTimer, lastObservedJob=null;
+let csrf='', isAdmin=false, mode='oryx', sources=[], editing='', active=null, online=false, queued=0, pending=false, disk=null, archiveEnabled=false, historyRows=[], historyType='download', refreshId=0, estimateId=0, estimateTimer, lastObservedJob=null;
 let focusedJobId=null, submittedJob=null, focusPending=false, sourceDuplicateJob=null;
 let historyTotal=0;
 let sessionActivityPending=false;
@@ -176,7 +176,7 @@ function captureSubmitted(result,payload){
  if(payload.source==='tiktok')$('tiktok-url').value='';
  if(payload.source==='instagram')$('instagram-url').value='';
  if(!payload.is_clip){clearTimeout(estimateTimer);estimateId++;$('size-estimate').textContent='Pilih sumber dulu untuk melihat perkiraan ukurannya.';}
- for(const id of ['filter-q','filter-type','filter-source','filter-state','filter-date'])$(id).value='';
+ for(const id of ['filter-q','filter-source','filter-state','filter-date'])$(id).value='';
  $('empty').hidden=true;
 }
 async function api(path, data){
@@ -402,6 +402,11 @@ async function showIslandDetails(){
  const job=active||submittedJob||lastObservedJob;if(!job)return;
  if(!historyRows.some(row=>row.job_id===job.job_id))await refresh();
  clearHistoryFilters();
+ const focusedRow=historyRows.find(row=>row.job_id===job.job_id);
+ if(focusedRow&&!!focusedRow.transcript_only!==(historyType==='transcript')){
+  setHistoryType(focusedRow.transcript_only?'transcript':'download',false);
+  renderHistory(historyRows);
+ }
  const row=[...$('results').children].find(row=>row.dataset.jobId===job.job_id);
  const details=row?.querySelector('.recording-details');
  if(details){expandedHistoryDetails.add(job.job_id);details.open=true;row.tabIndex=-1;row.focus({preventScroll:true});row.scrollIntoView({behavior:motion?.reduced()?'auto':'smooth',block:'center'});}
@@ -454,29 +459,38 @@ function historyDetails(row){
  details.addEventListener('toggle',()=>{if(!details.isConnected)return;if(details.open)expandedHistoryDetails.add(row.job_id);else expandedHistoryDetails.delete(row.job_id);});
  return details;
 }
-function historyFilters(){return {query:$('filter-q').value.trim().toLocaleLowerCase(),type:$('filter-type').value,source:$('filter-source').value,state:$('filter-state').value,date:$('filter-date').value};}
+function historyFilters(){return {query:$('filter-q').value.trim().toLocaleLowerCase(),source:$('filter-source').value,state:$('filter-state').value,date:$('filter-date').value};}
 function matchingHistory(rows,filters=historyFilters()){
  return rows.filter(row=>{
   const text=[row.filename,row.title,row.note,row.source_metadata?.title,row.source,sourceDisplayName(row)].filter(Boolean).join(' ').toLocaleLowerCase();
   const stateMatches=filters.state==='transcribing'?['queued','transcribing'].includes(row.transcript?.status):!filters.state||row.state===filters.state;
   const date=row.requested_at?new Date(row.requested_at*1000):null;
   const dateLabel=date&&!Number.isNaN(date.getTime())?[date.getFullYear(),String(date.getMonth()+1).padStart(2,'0'),String(date.getDate()).padStart(2,'0')].join('-'):'';
-  const typeMatches=!filters.type||(filters.type==='transcript'?!!row.transcript_only:!row.transcript_only);
-  return (!filters.query||text.includes(filters.query))&&typeMatches&&(!filters.source||row.source===filters.source)&&stateMatches&&(!filters.date||dateLabel===filters.date);
+  return (!filters.query||text.includes(filters.query))&&(!filters.source||row.source===filters.source)&&stateMatches&&(!filters.date||dateLabel===filters.date);
  });
 }
-function clearHistoryFilters(render=true){for(const id of ['filter-q','filter-type','filter-source','filter-state','filter-date'])$(id).value='';if(render)applyHistoryFilters();}
+function setHistoryType(type,render=true){
+ historyType=type;
+ const video=$('type-video'),transcript=$('type-transcript');
+ if(video&&transcript){video.setAttribute('aria-pressed',String(type==='download'));transcript.setAttribute('aria-pressed',String(type==='transcript'));}
+ if(render)applyHistoryFilters();
+}
+function clearHistoryFilters(render=true){for(const id of ['filter-q','filter-source','filter-state','filter-date'])$(id).value='';if(render)applyHistoryFilters();}
 function applyHistoryFilters(){closeActionMenu();renderHistory(historyRows);motion?.historyFilter?.($('results'));}
 function captureFailureMessage(row){return row.error_title?(row.error_title+(row.error_message?' — '+row.error_message:'')):(sourceDisplayName(row)||'Sumber')+' gagal memberikan media. Buka detail untuk melihat penyebab.';}
+function historyView(rows,filters){
+ const visible=matchingHistory(rows,filters);
+ return historyType==='transcript'?visible.filter(row=>!!row.transcript_only):visible.filter(row=>!row.transcript_only);
+}
 function renderHistory(rows){
  historyRows=rows;
- const filters=historyFilters(),visible=matchingHistory(rows,filters),filtered=Object.values(filters).some(Boolean);
+ const filters=historyFilters(),visible=historyView(rows,filters),filtered=Object.values(filters).some(Boolean);
  const total=Math.max(historyTotal,rows.length);
  $('result-count').textContent=filtered?visible.length+' / '+rows.length+' hasil':rows.length?(total>rows.length?rows.length+' / '+total:rows.length)+' hasil':'Belum ada hasil';
  $('result-count').title=total>rows.length?'Filter berlaku pada '+rows.length+' rekaman yang dimuat.':'Hasil riwayat';
  $('empty').hidden=!!visible.length;
- $('empty').querySelector('strong').textContent=filtered?'Tidak ada rekaman yang cocok.':'Belum ada rekaman.';
- $('empty').querySelector('p').textContent=filtered?'Ubah pencarian atau bersihkan filter untuk melihat rekaman lainnya.':'Mulai capture dari Source. Rekaman dan download akan muncul di sini.';
+ $('empty').querySelector('strong').textContent=filtered?'Tidak ada rekaman yang cocok.':(historyType==='transcript'?'Belum ada riwayat transkrip.':'Belum ada rekaman.');
+ $('empty').querySelector('p').textContent=filtered?'Ubah pencarian atau bersihkan filter untuk melihat rekaman lainnya.':(historyType==='transcript'?'Transkrip dari URL YouTube atau upload akan muncul di sini.':'Mulai capture dari Source. Rekaman dan download akan muncul di sini.');
  $('filter-reset').hidden=!filtered;
  $('filter-reset').disabled=!filtered;
  const selection=new Set(selectedJobs());
@@ -562,7 +576,9 @@ async function refresh(){
   active=data.active;online=data.online;queued=data.queued;if(active)lastObservedJob=active;controls();
   $('live-markers').replaceChildren();
   for(const marker of active?.markers||[]){const li=document.createElement('li');li.textContent=duration(marker.seconds)+' — '+marker.note;$('live-markers').append(li);}
-  const history=await api('recordings?');if(revision!==refreshId)return;
+  // Transcript-only processes poll the merged list; otherwise each tab owns its scope.
+  const scope=transcriptOnlyPhase==='processing'?'':(historyType==='transcript'?'transcript':'download');
+  const history=await api('recordings'+(scope?'?job_type='+scope:''));if(revision!==refreshId)return;
   const rows=history.recordings;
   historyTotal=Number.isFinite(history.total)?history.total:rows.length;
   // Admission can precede catalogue publication. Keep the accepted capture
@@ -826,6 +842,9 @@ $('transcript-upload-drop').addEventListener('keydown',event=>{if(event.key==='E
 $('transcript-upload-form').onsubmit=async event=>{event.preventDefault();if(!transcriptUploadFile||['checking','processing'].includes(transcriptOnlyPhase))return;transcriptOnlyPhase='checking';transcriptOnlyURL='';$('transcript-only-consent').hidden=true;$('transcript-only-result').hidden=true;transcriptOnlyBusy(true,'Starting private upload…');try{const result=await uploadTranscriptFile(transcriptUploadFile);handleTranscriptOnlyResponse(result);await refresh();}catch(error){transcriptOnlyFailure(error);}finally{$('transcript-upload-progress').hidden=true;}};
 $('record').onclick=async()=>{if(pending)return;pending=true;$('record').textContent='Mengirim…';$('capture-panel').setAttribute('aria-busy','true');controls();notice('');const payload={source:mode,source_id:$('source').value,url:mode==='oryx'?'':sourceInput().value,note:$('note').value,storage:$('storage-target').value,quality:$('quality').value,format:$('media-format').value,compression:$('compression').value};try{const result=await api('record',payload);if(result.duplicate)showSourceDuplicate(result.duplicate,true);else{captureSubmitted(result,payload);await refresh();}}catch(e){collapseSource(false);notice(e.message);}finally{pending=false;updateFormatControls();$('capture-panel').setAttribute('aria-busy','false');controls();}};
 $('source-duplicate-preview').onclick=()=>previewHistoryMedia(sourceDuplicateJob,$('source-duplicate-preview'));
+for(const tab of [['type-video','download'],['type-transcript','transcript']]){
+ const button=$(tab[0]);if(button)button.onclick=()=>{if(historyType===tab[1])return;setHistoryType(tab[1],false);renderHistory(historyRows);refresh();};
+}
 $('source-duplicate-history').onclick=()=>{if(!sourceDuplicateJob)return;focusedJobId=sourceDuplicateJob.job_id;focusPending=true;clearHistoryFilters(false);showSection('control');renderHistory(historyRows);refresh();};
 $('clip-url').oninput=scheduleClipMetadata;
 $('clip-start').oninput=()=>clipInputChanged('start');$('clip-end').oninput=()=>clipInputChanged('end');
@@ -862,7 +881,7 @@ async function poll(){await refresh();if(!$('admin-view').hidden)loadWatches();s
 
 $('mark').onclick=async()=>{pending=true;controls();try{await api('markers',{job_id:active.job_id,note:$('marker-note').value});$('marker-note').value='';await refresh();}catch(e){notice(e.message);}finally{pending=false;controls();}};
 $('filter-q').oninput=applyHistoryFilters;
-for(const id of ['filter-type','filter-source','filter-state','filter-date'])$(id).onchange=applyHistoryFilters;
+for(const id of ['filter-source','filter-state','filter-date'])$(id).onchange=applyHistoryFilters;
 $('filter-reset').onclick=()=>clearHistoryFilters();
 
 function selectedJobs(){return [...$('results').querySelectorAll('.history-select:checked')].map(input=>input.value);}

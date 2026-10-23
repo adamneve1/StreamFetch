@@ -27,6 +27,7 @@ class Element {
     this.children = []; this.append(...nodes);
   }
   setAttribute(name, value) { this.attributes[name] = String(value); }
+  getAttribute(name) { return this.attributes[name]; }
   removeAttribute(name) { delete this.attributes[name]; if (name === 'value') this.value = ''; if(name==='src')delete this.src; }
   addEventListener(name, callback) { this.listeners[name] = callback; }
   focus() { this.focused = true; this.focusCount++; if(this.ownerDocument)this.ownerDocument.activeElement=this; }
@@ -96,7 +97,7 @@ test('one transcript CTA follows all lifecycle states without provider details',
 });
 test('Transcript Only History reuses the Reader without inventing a media download',()=>{
  const f=fixture();
- f.run(`renderHistory([{job_id:'subtitle',source:'youtube',source_id:'abcdefghijk',state:'ready',transcript_only:true,source_metadata:{title:'Dialog Batam'},transcript:{status:'completed',source:'manual',language:'id'}}])`);
+ f.run(`setHistoryType('transcript',false);renderHistory([{job_id:'subtitle',source:'youtube',source_id:'abcdefghijk',state:'ready',transcript_only:true,source_metadata:{title:'Dialog Batam'},transcript:{status:'completed',source:'manual',language:'id'}}])`);
  const row=f.get('results').children[0];
  assert.equal(row.querySelector('.recording-heading').querySelector('strong').textContent,'Dialog Batam');
  assert.equal(row.querySelector('.preset-badge').textContent,'Transcript Only');
@@ -1336,12 +1337,17 @@ test('History status/source filters combine and Transcribing includes queued wor
  f.get('filter-reset').onclick();f.run('isAdmin=false;renderHistory(historyRows)');assert.equal(f.get('results').querySelector('.download-stat'),null);
  f.get('filter-state').value='recording';f.get('filter-state').onchange();assert.equal(f.get('results').children[0].dataset.jobId,'five');
 });
-test('History type filter separates downloads and Transcript Only without hiding either by default',()=>{
- const f=fixture();f.context.rows=[...polishRows,{job_id:'transcript',source:'youtube',state:'ready',transcript_only:true}];f.run('renderHistory(rows)');
- assert.equal(f.get('results').children.length,6);
- f.get('filter-type').value='transcript';f.get('filter-type').onchange();assert.deepEqual(f.get('results').children.map(row=>row.dataset.jobId),['transcript']);
- f.get('filter-type').value='download';f.get('filter-type').onchange();assert.equal(f.get('results').children.length,5);
- f.get('filter-reset').onclick();assert.equal(f.get('results').children.length,6);
+test('History tabs keep video and Transcript Only views permanently separated',()=>{
+ const f=fixture();f.context.rows=[...polishRows,{job_id:'transcript',source:'youtube',state:'ready',transcript_only:true}];f.run('setHistoryType("download",false);renderHistory(rows)');
+ assert.equal(f.get('type-video').getAttribute('aria-pressed'),'true');
+ assert.equal(f.get('results').children.length,5);
+ f.get('type-transcript').onclick();
+ assert.deepEqual(f.get('results').children.map(row=>row.dataset.jobId),['transcript']);
+ assert.equal(f.get('type-transcript').getAttribute('aria-pressed'),'true');
+ assert.equal(f.get('type-video').getAttribute('aria-pressed'),'false');
+ f.get('type-video').onclick();
+ assert.equal(f.get('results').children.length,5);
+ assert.equal(f.get('filter-reset').disabled,true);
 });
 test('empty filtered History explains how to recover and remains distinct from no recordings',()=>{
  const f=fixture();f.context.rows=polishRows;f.run('renderHistory(rows)');f.get('filter-q').value='missing';f.get('filter-q').oninput();
