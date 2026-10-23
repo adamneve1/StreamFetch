@@ -58,7 +58,7 @@ function fixture(motion, href = 'https://streamfetch.example/') {
   const head = new Element('head'); head.root = true;
   const ids = new Map([...html.matchAll(/id="([^"]+)"/g)].map(match => [match[1], new Element()]));
   body.append(...ids.values());
-  ids.get('empty').append(new Element('strong'), new Element('p'));
+  ids.get('empty').append(new Element('strong'), new Element('p'));ids.get('transcript-empty').append(new Element('strong'), new Element('p'));
   ids.get('quality').value = 'best'; ids.get('compression').value = 'balanced';
   ids.get('media-format').value = 'mp4'; ids.get('storage-target').value = 'local';
   ids.get('clip-start').value = '00:00'; ids.get('clip-format').value = 'mp4';
@@ -97,8 +97,8 @@ test('one transcript CTA follows all lifecycle states without provider details',
 });
 test('Transcript Only History reuses the Reader without inventing a media download',()=>{
  const f=fixture();
- f.run(`setHistoryType('transcript',false);renderHistory([{job_id:'subtitle',source:'youtube',source_id:'abcdefghijk',state:'ready',transcript_only:true,source_metadata:{title:'Dialog Batam'},transcript:{status:'completed',source:'manual',language:'id'}}])`);
- const row=f.get('results').children[0];
+ f.run(`renderHistory([{job_id:'subtitle',source:'youtube',source_id:'abcdefghijk',state:'ready',transcript_only:true,source_metadata:{title:'Dialog Batam'},transcript:{status:'completed',source:'manual',language:'id'}}],'transcript')`);
+ const row=f.get('transcript-results').children[0];
  assert.equal(row.querySelector('.recording-heading').querySelector('strong').textContent,'Dialog Batam');
  assert.equal(row.querySelector('.preset-badge').textContent,'Transcript Only');
  assert.equal(row.querySelector('.transcript-cta').textContent,'View Transcript');
@@ -1337,17 +1337,18 @@ test('History status/source filters combine and Transcribing includes queued wor
  f.get('filter-reset').onclick();f.run('isAdmin=false;renderHistory(historyRows)');assert.equal(f.get('results').querySelector('.download-stat'),null);
  f.get('filter-state').value='recording';f.get('filter-state').onchange();assert.equal(f.get('results').children[0].dataset.jobId,'five');
 });
-test('History tabs keep video and Transcript Only views permanently separated',()=>{
- const f=fixture();f.context.rows=[...polishRows,{job_id:'transcript',source:'youtube',state:'ready',transcript_only:true}];f.run('setHistoryType("download",false);renderHistory(rows)');
- assert.equal(f.get('type-video').getAttribute('aria-pressed'),'true');
+test('Workspace History holds video jobs while Transcript Only keeps its own list',()=>{
+ const f=fixture();f.context.rows=[...polishRows,{job_id:'transcript',source:'youtube',state:'ready',transcript_only:true}];
+ f.run('renderHistory(rows)');
  assert.equal(f.get('results').children.length,5);
- f.get('type-transcript').onclick();
- assert.deepEqual(f.get('results').children.map(row=>row.dataset.jobId),['transcript']);
- assert.equal(f.get('type-transcript').getAttribute('aria-pressed'),'true');
- assert.equal(f.get('type-video').getAttribute('aria-pressed'),'false');
- f.get('type-video').onclick();
- assert.equal(f.get('results').children.length,5);
- assert.equal(f.get('filter-reset').disabled,true);
+ f.run("renderHistory(rows,'transcript')");
+ assert.deepEqual(f.get('transcript-results').children.map(row=>row.dataset.jobId),['transcript']);
+ assert.equal(f.get('transcript-results').children[0].querySelector('.history-select'),null);
+ f.get('transcript-filter-q').value='YouTube';f.run("renderHistory(rows,'transcript')");
+ assert.deepEqual(f.get('transcript-results').children.map(row=>row.dataset.jobId),['transcript']);
+ f.get('transcript-filter-q').value='missing';f.run("renderHistory(rows,'transcript')");
+ assert.equal(f.get('transcript-results').children.length,0);
+ assert.equal(f.get('transcript-empty').hidden,false);
 });
 test('empty filtered History explains how to recover and remains distinct from no recordings',()=>{
  const f=fixture();f.context.rows=polishRows;f.run('renderHistory(rows)');f.get('filter-q').value='missing';f.get('filter-q').oninput();
