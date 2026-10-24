@@ -280,7 +280,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sender.send_message.await_count, 3)
         buttons = self.sender.send_message.call_args.kwargs['reply_markup'].inline_keyboard[0]
         self.assertEqual([button.callback_data for button in buttons],
-                         ['transcriptsend:video-job'])
+                         ['transcripttext:video-job', 'transcriptsend:video-job'])
         await tc.Controls(self.redis).notify_jobs(self.sender)
         self.assertEqual(self.sender.send_message.await_count, 3)
 
@@ -618,6 +618,26 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent['content'], b'Halo dari transkrip')
         self.assertIn('Dialog Pagi', sent['caption'])
 
+    async def test_completed_transcript_can_be_sent_as_copyable_chat_text(self):
+        storage.save_recording(dict(job_id='text-job', source='youtube',
+                                    owner_type='telegram', owner_id='7'), 'ready')
+        storage.save_transcription_state('text-job', 'completed', txt_filename='copy.txt')
+        transcript = ('Bagian pertama yang bisa dicopy.\n\n' * 160) + 'Bagian terakhir.'
+        Path(self.tmp.name, 'copy.txt').write_text(transcript, encoding='utf-8')
+        sender = SimpleNamespace(send_message=AsyncMock())
+        context = SimpleNamespace(args=[], user_data={}, bot=sender)
+        update = self.update(callback='transcripttext:text-job')
+
+        with patch.object(tc.asyncio, 'sleep', AsyncMock()) as sleep:
+            await self.controls.transcript_text_callback(update, context)
+
+        self.assertGreater(sender.send_message.await_count, 1)
+        self.assertEqual(sleep.await_count, sender.send_message.await_count - 1)
+        messages = [call.kwargs['text'] for call in sender.send_message.call_args_list]
+        self.assertTrue(all(len(message) <= 3900 for message in messages))
+        self.assertIn('Bagian pertama yang bisa dicopy.', messages[0])
+        self.assertTrue(messages[-1].endswith('Bagian terakhir.'))
+
     async def test_direct_transcript_delivery_checks_owner_and_safe_sidecar(self):
         storage.save_recording(dict(job_id='private-job', source='youtube',
                                     owner_type='telegram', owner_id='8'), 'ready')
@@ -642,8 +662,8 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
     def test_transcript_actions_still_work_without_public_reader_url(self):
         with patch.dict(os.environ, STREAMFETCH_PUBLIC_URL=''):
             buttons = self.controls.transcript_actions('video-job').inline_keyboard[0]
-        self.assertEqual(len(buttons), 1)
-        self.assertEqual(buttons[0].callback_data, 'transcriptsend:video-job')
+        self.assertEqual([button.callback_data for button in buttons],
+                         ['transcripttext:video-job', 'transcriptsend:video-job'])
 
     async def test_transcript_only_publishes_subtitles_without_media_or_ai(self):
         metadata = {'id': 'abcdefghijk', 'title': 'Dialog', 'language': 'id',

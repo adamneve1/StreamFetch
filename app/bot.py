@@ -257,6 +257,7 @@ def main():
     app.add_handler(CallbackQueryHandler(controls.mode_callback, pattern=r'^(?:workspace|mode):'))
     app.add_handler(CallbackQueryHandler(controls.transcript_ai_callback, pattern=r'^transcriptai:'))
     app.add_handler(CallbackQueryHandler(controls.transcript_cancel_callback, pattern=r'^transcriptcancel:'))
+    app.add_handler(CallbackQueryHandler(controls.transcript_text_callback, pattern=r'^transcripttext:'))
     app.add_handler(CallbackQueryHandler(controls.transcript_send_callback, pattern=r'^transcriptsend:'))
     app.add_handler(CallbackQueryHandler(controls.upload_ai_callback, pattern=r'^uploadai:'))
     app.add_handler(CallbackQueryHandler(controls.upload_cancel_callback, pattern=r'^uploadcancel:'))

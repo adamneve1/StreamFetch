@@ -228,6 +228,29 @@ def transcript_output(row):
     return None
 
 
+def telegram_text_chunks(value, limit=3900):
+    """Split plain transcript text on readable boundaries below Telegram's limit."""
+    remaining = str(value or '').replace('\r\n', '\n').strip()
+    chunks = []
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        window = remaining[:limit + 1]
+        cut = window.rfind('\n\n')
+        if cut < limit // 2:
+            cut = window.rfind('\n')
+        if cut < limit // 2:
+            cut = window.rfind(' ')
+        if cut < limit // 2:
+            cut = limit
+        chunk = remaining[:cut].rstrip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[cut:].lstrip()
+    return chunks
+
+
 def safe_notice(value):
     # Use the capture worker's existing credential/URL sanitizer.
     try:
@@ -877,15 +900,40 @@ class Controls:
 
     @staticmethod
     def transcript_actions(job_id):
-        """Offer web reading when configured and direct Telegram delivery always."""
-        buttons = []
+        """Offer copyable chat text, a file, and web reading when configured."""
+        rows = []
         try:
-            buttons.append(InlineKeyboardButton('View Transcript', url=reader_url(job_id)))
+            rows.append([InlineKeyboardButton('View Transcript', url=reader_url(job_id))])
         except ValueError:
             pass
-        buttons.append(InlineKeyboardButton(
-            '📄 Kirim ke Telegram', callback_data='transcriptsend:' + job_id))
-        return InlineKeyboardMarkup([buttons])
+        rows.append([
+            InlineKeyboardButton('📝 Kirim teks', callback_data='transcripttext:' + job_id),
+            InlineKeyboardButton('📄 Kirim file', callback_data='transcriptsend:' + job_id),
+        ])
+        return InlineKeyboardMarkup(rows)
+
+    @authorized
+    async def transcript_text_callback(self, update, context):
+        query = update.callback_query
+        await query.answer()
+        match = re.fullmatch(r'transcripttext:([A-Za-z0-9_-]{1,40})', query.data or '')
+        row = storage.recording(match[1]) if match else None
+        if (not row or not telegram_transcript_accessible(
+                row, update.effective_user.id, update.effective_chat.id)):
+            await query.message.reply_text('Transkrip tidak ditemukan atau tidak dapat diakses.')
+            return
+        path = transcript_output(row)
+        if not path:
+            await query.message.reply_text('Teks transkrip belum tersedia. Coba lagi nanti.')
+            return
+        chunks = telegram_text_chunks(path.read_text(encoding='utf-8-sig', errors='replace'))
+        if not chunks:
+            await query.message.reply_text('Teks transkrip kosong.')
+            return
+        for index, chunk in enumerate(chunks):
+            if index:
+                await asyncio.sleep(1)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk)
 
     @authorized
     async def transcript_send_callback(self, update, context):
