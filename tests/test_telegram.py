@@ -600,8 +600,12 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
                                     owner_type='telegram', owner_id='7',
                                     source_metadata={'title': 'Dialog Pagi'}), 'ready')
         storage.save_transcription_state('direct-job', 'completed', source='manual',
-                                         txt_filename='direct.txt')
-        Path(self.tmp.name, 'direct.txt').write_text('Halo dari transkrip', encoding='utf-8')
+                                         txt_filename='direct.txt', srt_filename='direct.srt')
+        Path(self.tmp.name, 'direct.txt').write_text(
+            'Halo dari transkrip\nKabar berikutnya\n', encoding='utf-8')
+        Path(self.tmp.name, 'direct.srt').write_text(
+            '1\n00:00:01,250 --> 00:00:02,500\nHalo dari transkrip\n\n'
+            '2\n01:01:02,900 --> 01:01:05,000\nKabar berikutnya\n', encoding='utf-8')
         sent = {}
 
         async def send_document(**kwargs):
@@ -615,8 +619,63 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(sent['chat_id'], 77)
         self.assertEqual(sent['filename'], 'direct.txt')
-        self.assertEqual(sent['content'], b'Halo dari transkrip')
+        expected = ('[00:00:01] Halo dari transkrip\n\n'
+                    '[01:01:02] Kabar berikutnya')
+        self.assertEqual(sent['content'].decode(), expected)
         self.assertIn('Dialog Pagi', sent['caption'])
+
+        text_sender = SimpleNamespace(send_message=AsyncMock())
+        text_context = SimpleNamespace(args=[], user_data={}, bot=text_sender)
+        await self.controls.transcript_text_callback(
+            self.update(callback='transcripttext:direct-job'), text_context)
+        self.assertEqual(text_sender.send_message.call_args.kwargs['text'], expected)
+
+    def test_telegram_timestamp_formatting_uses_backend_segments_for_all_sources(self):
+        for index, source in enumerate(('youtube', 'tiktok', 'instagram')):
+            job_id = source + '-timestamps'
+            txt_name, srt_name = f'{source}.txt', f'{source}.srt'
+            storage.save_recording(dict(job_id=job_id, source=source,
+                                        source_id=str(index + 1), transcript_only=True,
+                                        owner_type='telegram', owner_id='7'), 'ready')
+            storage.save_transcription_state(job_id, 'completed',
+                                             txt_filename=txt_name, srt_filename=srt_name)
+            Path(self.tmp.name, txt_name).write_text('Awal\nLanjut\n', encoding='utf-8')
+            Path(self.tmp.name, srt_name).write_text(
+                '1\n00:00:00,999 --> 00:00:02,000\nAwal\n\n'
+                '2\n02:03:04,100 --> 02:03:05,000\nLanjut\n', encoding='utf-8')
+            segments, body = tc.telegram_transcript(storage.recording(job_id))
+            self.assertEqual(segments, ['[00:00:00] Awal', '[02:03:04] Lanjut'])
+            self.assertEqual(body, '[00:00:00] Awal\n\n[02:03:04] Lanjut')
+
+        self.assertEqual(tc.transcript_timestamp(3661.9996), '01:01:02')
+        self.assertEqual(tc.transcript_timestamp(-3), '00:00:00')
+        self.assertEqual(tc.transcript_timestamp(None), '')
+        self.assertEqual(tc.transcript_timestamp(float('nan')), '')
+
+    def test_telegram_chunking_preserves_complete_segments_and_timestamps(self):
+        segments = [f'[00:00:0{index}] ' + (str(index) * 1900) for index in range(1, 4)]
+        chunks = tc.telegram_text_chunks(segments)
+        self.assertEqual(len(chunks), 2)
+        self.assertIn(segments[0], chunks[0])
+        self.assertIn(segments[1], chunks[0])
+        self.assertEqual(chunks[1], segments[2])
+        self.assertTrue(all(len(chunk) <= 4096 for chunk in chunks))
+
+        oversized = '[00:10:00] ' + ('kata ' * 1200)
+        split = tc.telegram_text_chunks([oversized])
+        self.assertGreater(len(split), 1)
+        self.assertTrue(all(chunk.startswith('[00:10:00] ') for chunk in split))
+        self.assertTrue(all(len(chunk) <= 4096 for chunk in split))
+
+    def test_telegram_transcript_falls_back_to_plain_text_without_timestamps(self):
+        storage.save_recording(dict(job_id='legacy-text', source='youtube',
+                                    owner_type='telegram', owner_id='7'), 'ready')
+        storage.save_transcription_state('legacy-text', 'completed',
+                                         txt_filename='legacy.txt')
+        Path(self.tmp.name, 'legacy.txt').write_text('Baris lama\nTanpa waktu\n', encoding='utf-8')
+        segments, body = tc.telegram_transcript(storage.recording('legacy-text'))
+        self.assertEqual(segments, ['Baris lama', 'Tanpa waktu'])
+        self.assertEqual(body, 'Baris lama\n\nTanpa waktu')
 
     async def test_completed_transcript_can_be_sent_as_copyable_chat_text(self):
         storage.save_recording(dict(job_id='text-job', source='youtube',
@@ -634,7 +693,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(sender.send_message.await_count, 1)
         self.assertEqual(sleep.await_count, sender.send_message.await_count - 1)
         messages = [call.kwargs['text'] for call in sender.send_message.call_args_list]
-        self.assertTrue(all(len(message) <= 3900 for message in messages))
+        self.assertTrue(all(len(message) <= 4096 for message in messages))
         self.assertIn('Bagian pertama yang bisa dicopy.', messages[0])
         self.assertTrue(messages[-1].endswith('Bagian terakhir.'))
 

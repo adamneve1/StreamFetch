@@ -1,8 +1,10 @@
 """Telegram watch discovery and notifications around the existing workers."""
 import asyncio
 import hashlib
+import io
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -15,11 +17,12 @@ from urllib.parse import urlsplit
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 try:
-    from . import media_upload, storage, telegram_store, transcription_queue, watch_service, youtube_transcript
+    from . import media_upload, storage, telegram_store, transcript_reader, transcription_queue, watch_service, youtube_transcript
 except ImportError:
     import media_upload
     import storage
     import telegram_store
+    import transcript_reader
     import transcription_queue
     import watch_service
     import youtube_transcript
@@ -228,26 +231,76 @@ def transcript_output(row):
     return None
 
 
-def telegram_text_chunks(value, limit=3900):
-    """Split plain transcript text on readable boundaries below Telegram's limit."""
-    remaining = str(value or '').replace('\r\n', '\n').strip()
-    chunks = []
+def transcript_timestamp(value):
+    """Format an original segment start as the Telegram HH:MM:SS label."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return ''
+    if not math.isfinite(seconds):
+        return ''
+    total = max(0, round(seconds * 1000)) // 1000
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
+
+
+def telegram_transcript(row):
+    """Build one canonical timestamped TXT body from persisted backend segments."""
+    if not transcript_output(row):
+        return None
+    data = transcript_reader.reader_data(row, os.getenv('DOWNLOAD_DIR', '/downloads'))
+    formatted = []
+    for segment in data.get('segments') or []:
+        text = str(segment.get('text') or '').strip()
+        if not text:
+            continue
+        timestamp = transcript_timestamp(segment.get('start'))
+        formatted.append((f'[{timestamp}] ' if timestamp else '') + text)
+    if not formatted:
+        return None
+    return formatted, '\n\n'.join(formatted)
+
+
+def _split_telegram_segment(value, limit):
+    """Split one oversized segment and repeat its timestamp on every piece."""
+    match = re.match(r'^(\[\d{2,}:\d{2}:\d{2}\] )', value)
+    prefix = match.group(1) if match else ''
+    remaining = value[len(prefix):]
+    body_limit = max(1, limit - len(prefix))
+    pieces = []
     while remaining:
-        if len(remaining) <= limit:
-            chunks.append(remaining)
+        if len(remaining) <= body_limit:
+            pieces.append(prefix + remaining)
             break
-        window = remaining[:limit + 1]
-        cut = window.rfind('\n\n')
-        if cut < limit // 2:
-            cut = window.rfind('\n')
-        if cut < limit // 2:
+        window = remaining[:body_limit + 1]
+        cut = window.rfind('\n')
+        if cut < body_limit // 2:
             cut = window.rfind(' ')
-        if cut < limit // 2:
-            cut = limit
-        chunk = remaining[:cut].rstrip()
-        if chunk:
-            chunks.append(chunk)
+        if cut < body_limit // 2:
+            cut = body_limit
+        pieces.append(prefix + remaining[:cut].rstrip())
         remaining = remaining[cut:].lstrip()
+    return pieces
+
+
+def telegram_text_chunks(segments, limit=4096):
+    """Pack complete timestamped segments into Telegram-sized messages."""
+    chunks = []
+    current = ''
+    for segment in segments:
+        pieces = ([segment] if len(segment) <= limit
+                  else _split_telegram_segment(segment, limit))
+        for piece in pieces:
+            candidate = current + ('\n\n' if current else '') + piece
+            if len(candidate) <= limit:
+                current = candidate
+                continue
+            if current:
+                chunks.append(current)
+            current = piece
+    if current:
+        chunks.append(current)
     return chunks
 
 
@@ -922,14 +975,12 @@ class Controls:
                 row, update.effective_user.id, update.effective_chat.id)):
             await query.message.reply_text('Transkrip tidak ditemukan atau tidak dapat diakses.')
             return
-        path = transcript_output(row)
-        if not path:
+        delivery = telegram_transcript(row)
+        if not delivery:
             await query.message.reply_text('Teks transkrip belum tersedia. Coba lagi nanti.')
             return
-        chunks = telegram_text_chunks(path.read_text(encoding='utf-8-sig', errors='replace'))
-        if not chunks:
-            await query.message.reply_text('Teks transkrip kosong.')
-            return
+        segments, _body = delivery
+        chunks = telegram_text_chunks(segments)
         for index, chunk in enumerate(chunks):
             if index:
                 await asyncio.sleep(1)
@@ -945,20 +996,26 @@ class Controls:
                 row, update.effective_user.id, update.effective_chat.id)):
             await query.message.reply_text('Transkrip tidak ditemukan atau tidak dapat diakses.')
             return
-        path = transcript_output(row)
-        if not path:
+        delivery = telegram_transcript(row)
+        if not delivery:
             await query.message.reply_text('File transkrip belum tersedia. Coba lagi nanti.')
             return
+        _segments, body = delivery
         metadata = row.get('source_metadata') or {}
         title = ((metadata.get('title') if isinstance(metadata, dict) else None)
                  or row.get('upload_name') or row.get('filename') or 'Transcript')
-        with path.open('rb') as document:
-            await context.bot.send_document(
-                chat_id=update.effective_chat.id,
-                document=document,
-                filename=path.name,
-                caption='Transkrip · ' + safe_notice(title),
-            )
+        stored_name = (row.get('transcript') or {}).get('txt_filename')
+        filename = (stored_name if isinstance(stored_name, str)
+                    and Path(stored_name).name == stored_name
+                    and stored_name.lower().endswith('.txt')
+                    else 'transcript-' + row['job_id'] + '.txt')
+        document = io.BytesIO(body.encode('utf-8'))
+        await context.bot.send_document(
+            chat_id=update.effective_chat.id,
+            document=document,
+            filename=filename,
+            caption='Transkrip · ' + safe_notice(title),
+        )
 
     async def dispatch(self, bot):
         # A failed Telegram chat must not block other watches or subscriptions.

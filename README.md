@@ -121,6 +121,8 @@ tanpa menyimpan video. Ketika hasil siap, tombol **Kirim teks** menaruh isi
 transkrip langsung di chat agar bisa disalin; teks panjang otomatis dipecah ke
 beberapa pesan. **Kirim file** tetap tersedia sebagai alternatif, sedangkan
 **View Transcript** muncul jika `STREAMFETCH_PUBLIC_URL` dikonfigurasi.
+Kedua bentuk pengiriman Telegram memakai format `[HH:MM:SS] teks` dari timestamp
+segmen backend. Transkrip lama tanpa timestamp tetap dikirim sebagai teks biasa.
 
 Perintah utama:
 
