@@ -10,6 +10,7 @@ import time
 import uuid
 from datetime import datetime
 from functools import wraps
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -208,6 +209,23 @@ def telegram_transcript_accessible(row, user_id, chat_id):
 def transcript_source_label(source):
     return {'manual': 'subtitle manual', 'auto': 'subtitle otomatis',
             'ai': 'AI'}.get(source, source or 'tidak diketahui')
+
+
+def transcript_output(row):
+    """Return one safe, completed transcript sidecar for Telegram delivery."""
+    transcript = row.get('transcript') or {}
+    if transcript.get('status') != 'completed':
+        return None
+    root = Path(os.getenv('DOWNLOAD_DIR', '/downloads')).resolve()
+    for kind in ('txt', 'srt', 'vtt'):
+        filename = transcript.get(kind + '_filename')
+        if not isinstance(filename, str) or Path(filename).name != filename:
+            continue
+        path = root / filename
+        if (path.parent.resolve() == root and not path.is_symlink()
+                and path.is_file()):
+            return path
+    return None
 
 
 def safe_notice(value):
@@ -522,7 +540,7 @@ class Controls:
         if cached:
             source = transcript_source_label((cached.get('transcript') or {}).get('source'))
             await message.reply_text(f'Transkrip sudah tersedia · sumber: {source}.',
-                                     reply_markup=self.view_button(cached['job_id']))
+                                     reply_markup=self.transcript_actions(cached['job_id']))
             return
         key = transcript_task_key(source_id, user_id, chat_id, source)
         digest = key.rsplit(':', 1)[-1]
@@ -538,7 +556,7 @@ class Controls:
             if transcript.get('status') == 'completed':
                 telegram_store.delete_task_if(key, current.get('job_id'))
                 await message.reply_text('Transkrip sudah tersedia.',
-                                         reply_markup=self.view_button(row['job_id']))
+                                         reply_markup=self.transcript_actions(row['job_id']))
             elif (current.get('state') == 'awaiting_consent'
                   and telegram_store.workspace_matches(chat_id, user_id, {
                       'workspace': 'transcript',
@@ -556,7 +574,7 @@ class Controls:
             await message.reply_text(
                 f'Transkrip siap · sumber: {transcript_source_label(transcript.get("source"))} '
                 f'({transcript.get("language") or "—"}).',
-                reply_markup=self.view_button(row['job_id']))
+                reply_markup=self.transcript_actions(row['job_id']))
             return
         except Exception as exc:
             log.warning('transcript subtitle ingestion unavailable source=%s id=%s error_type=%s',
@@ -614,7 +632,7 @@ class Controls:
             transcript = (row or {}).get('transcript') or {}
             if transcript.get('status') == 'completed':
                 await message.reply_text('Transkrip file ini sudah tersedia.',
-                                         reply_markup=self.view_button(row['job_id']))
+                                         reply_markup=self.transcript_actions(row['job_id']))
             elif current.get('state') == 'awaiting_consent':
                 await message.reply_text(
                     f'File: {current.get("upload_name", name)}\n'
@@ -651,7 +669,7 @@ class Controls:
             transcript = existing.get('transcript') or {}
             if transcript.get('status') == 'completed':
                 await query.message.reply_text('Transkrip file ini sudah tersedia.',
-                                               reply_markup=self.view_button(existing['job_id']))
+                                               reply_markup=self.transcript_actions(existing['job_id']))
             else:
                 try:
                     telegram_store.subscribe(existing['job_id'], task['chat_id'], task['user_id'],
@@ -759,7 +777,7 @@ class Controls:
             if transcript.get('status') == 'completed':
                 telegram_store.delete_task_if(key, task['job_id'])
                 await query.message.reply_text('Transkrip sudah tersedia.',
-                                               reply_markup=self.view_button(row['job_id']))
+                                               reply_markup=self.transcript_actions(row['job_id']))
                 return
             if transcript.get('status') in {'queued', 'transcribing'}:
                 await query.message.reply_text('Transkripsi AI sedang diproses.')
@@ -768,7 +786,7 @@ class Controls:
             if result.status == 'completed':
                 telegram_store.delete_task_if(key, task['job_id'])
                 await query.message.reply_text('Transkrip sudah tersedia.',
-                                               reply_markup=self.view_button(task['job_id']))
+                                               reply_markup=self.transcript_actions(task['job_id']))
                 return
             telegram_store.subscribe(task['job_id'], task['chat_id'], task['user_id'],
                                      owner_type='telegram', owner_id=str(task['user_id']),
@@ -833,7 +851,6 @@ class Controls:
             return
         job_id = match[1]
         try:
-            reader_url(job_id)
             row = storage.recording(job_id)
             if not row or row.get('state') != 'ready' or not str(row.get('filename') or '').lower().endswith('.mp4'):
                 raise ValueError('Rekaman tidak ditemukan atau belum siap.')
@@ -841,7 +858,8 @@ class Controls:
                                      monitor_transcript=True)
             status, created = transcription_queue.enqueue(self.client, job_id)
             if status == 'completed':
-                await query.message.reply_text('Transkrip sudah tersedia.', reply_markup=self.view_button(job_id))
+                await query.message.reply_text('Transkrip sudah tersedia.',
+                                               reply_markup=self.transcript_actions(job_id))
                 telegram_store.subscribe(job_id, update.effective_chat.id, update.effective_user.id,
                                          transcript_notice='completed',
                                          transcript_request_notice=(row.get('transcript') or {}).get('request_id'))
@@ -856,6 +874,43 @@ class Controls:
     @staticmethod
     def view_button(job_id):
         return InlineKeyboardMarkup([[InlineKeyboardButton('View Transcript', url=reader_url(job_id))]])
+
+    @staticmethod
+    def transcript_actions(job_id):
+        """Offer web reading when configured and direct Telegram delivery always."""
+        buttons = []
+        try:
+            buttons.append(InlineKeyboardButton('View Transcript', url=reader_url(job_id)))
+        except ValueError:
+            pass
+        buttons.append(InlineKeyboardButton(
+            '📄 Kirim ke Telegram', callback_data='transcriptsend:' + job_id))
+        return InlineKeyboardMarkup([buttons])
+
+    @authorized
+    async def transcript_send_callback(self, update, context):
+        query = update.callback_query
+        await query.answer()
+        match = re.fullmatch(r'transcriptsend:([A-Za-z0-9_-]{1,40})', query.data or '')
+        row = storage.recording(match[1]) if match else None
+        if (not row or not telegram_transcript_accessible(
+                row, update.effective_user.id, update.effective_chat.id)):
+            await query.message.reply_text('Transkrip tidak ditemukan atau tidak dapat diakses.')
+            return
+        path = transcript_output(row)
+        if not path:
+            await query.message.reply_text('File transkrip belum tersedia. Coba lagi nanti.')
+            return
+        metadata = row.get('source_metadata') or {}
+        title = ((metadata.get('title') if isinstance(metadata, dict) else None)
+                 or row.get('upload_name') or row.get('filename') or 'Transcript')
+        with path.open('rb') as document:
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
+                document=document,
+                filename=path.name,
+                caption='Transkrip · ' + safe_notice(title),
+            )
 
     async def dispatch(self, bot):
         # A failed Telegram chat must not block other watches or subscriptions.
@@ -1040,10 +1095,7 @@ class Controls:
                 and status in {'completed', 'failed', 'cancelled'}
                 and (status != task.get('transcript_notice') or request_id != task.get('transcript_request_notice'))):
             if status == 'completed':
-                try:
-                    button = self.view_button(row['job_id'])
-                except ValueError:
-                    button = None
+                button = self.transcript_actions(row['job_id'])
                 source = transcript_source_label(transcript.get('source'))
                 await bot.send_message(task['chat_id'],
                                        ('Transkripsi selesai · sumber: ' + source + '.'

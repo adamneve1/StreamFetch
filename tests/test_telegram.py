@@ -278,7 +278,9 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, STREAMFETCH_PUBLIC_URL=''):
             await self.controls.notify_jobs(self.sender)
         self.assertEqual(self.sender.send_message.await_count, 3)
-        self.assertIsNone(self.sender.send_message.call_args.kwargs['reply_markup'])
+        buttons = self.sender.send_message.call_args.kwargs['reply_markup'].inline_keyboard[0]
+        self.assertEqual([button.callback_data for button in buttons],
+                         ['transcriptsend:video-job'])
         await tc.Controls(self.redis).notify_jobs(self.sender)
         self.assertEqual(self.sender.send_message.await_count, 3)
 
@@ -592,6 +594,56 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('sudah tersedia', update.message.reply_text.call_args.args[0])
         self.assertEqual(update.message.reply_text.call_args.kwargs['reply_markup'].inline_keyboard[0][0].url,
                          'https://stream.example/api/recordings/cached/transcript/view')
+
+    async def test_completed_transcript_can_be_sent_directly_to_telegram(self):
+        storage.save_recording(dict(job_id='direct-job', source='youtube',
+                                    owner_type='telegram', owner_id='7',
+                                    source_metadata={'title': 'Dialog Pagi'}), 'ready')
+        storage.save_transcription_state('direct-job', 'completed', source='manual',
+                                         txt_filename='direct.txt')
+        Path(self.tmp.name, 'direct.txt').write_text('Halo dari transkrip', encoding='utf-8')
+        sent = {}
+
+        async def send_document(**kwargs):
+            sent.update(kwargs)
+            sent['content'] = kwargs['document'].read()
+
+        context = SimpleNamespace(args=[], user_data={},
+                                  bot=SimpleNamespace(send_document=AsyncMock(side_effect=send_document)))
+        update = self.update(callback='transcriptsend:direct-job')
+        await self.controls.transcript_send_callback(update, context)
+
+        self.assertEqual(sent['chat_id'], 77)
+        self.assertEqual(sent['filename'], 'direct.txt')
+        self.assertEqual(sent['content'], b'Halo dari transkrip')
+        self.assertIn('Dialog Pagi', sent['caption'])
+
+    async def test_direct_transcript_delivery_checks_owner_and_safe_sidecar(self):
+        storage.save_recording(dict(job_id='private-job', source='youtube',
+                                    owner_type='telegram', owner_id='8'), 'ready')
+        storage.save_transcription_state('private-job', 'completed',
+                                         txt_filename='../private.txt')
+        context = SimpleNamespace(args=[], user_data={},
+                                  bot=SimpleNamespace(send_document=AsyncMock()))
+        foreign = self.update(callback='transcriptsend:private-job')
+        await self.controls.transcript_send_callback(foreign, context)
+        context.bot.send_document.assert_not_awaited()
+        self.assertIn('tidak dapat diakses', foreign.message.reply_text.call_args.args[0])
+
+        storage.save_recording(dict(job_id='unsafe-job', source='youtube',
+                                    owner_type='telegram', owner_id='7'), 'ready')
+        storage.save_transcription_state('unsafe-job', 'completed',
+                                         txt_filename='../private.txt')
+        unsafe = self.update(callback='transcriptsend:unsafe-job')
+        await self.controls.transcript_send_callback(unsafe, context)
+        context.bot.send_document.assert_not_awaited()
+        self.assertIn('belum tersedia', unsafe.message.reply_text.call_args.args[0])
+
+    def test_transcript_actions_still_work_without_public_reader_url(self):
+        with patch.dict(os.environ, STREAMFETCH_PUBLIC_URL=''):
+            buttons = self.controls.transcript_actions('video-job').inline_keyboard[0]
+        self.assertEqual(len(buttons), 1)
+        self.assertEqual(buttons[0].callback_data, 'transcriptsend:video-job')
 
     async def test_transcript_only_publishes_subtitles_without_media_or_ai(self):
         metadata = {'id': 'abcdefghijk', 'title': 'Dialog', 'language': 'id',

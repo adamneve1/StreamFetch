@@ -115,7 +115,11 @@ YouTube → StreamFetch → yt-dlp → MP4 / MP3
 
 ### Telegram
 
-Telegram merupakan interface opsional.
+Telegram merupakan interface opsional. Gunakan `/transcript`, lalu kirim URL
+YouTube/Shorts, TikTok video, atau Instagram Reels untuk memproses transkrip saja
+tanpa menyimpan video. Ketika hasil siap, tombol **Kirim ke Telegram** mengirim
+sidecar transkrip langsung sebagai file (TXT diutamakan); **View Transcript**
+tetap tersedia jika `STREAMFETCH_PUBLIC_URL` dikonfigurasi.
 
 Perintah utama:
 
@@ -126,6 +130,8 @@ Perintah utama:
 /watchlist
 /cancelwatch ID
 /transcribe
+/transcript
+/download
 ```
 
 URL YouTube juga dapat dikirim langsung ke bot untuk dimasukkan ke antrean.
@@ -194,9 +200,9 @@ dijadwalkan. `/cancelwatch` tanpa ID membatalkan wizard yang sedang diisi.
 `/transcribe` menampilkan rekaman MP4 siap terbaru, mengutamakan yang belum punya
 transkrip. Tombol Transcribe juga dikirim setelah capture selesai. Callback memakai
 admission transkripsi bersama web; transkrip yang sudah selesai langsung menyediakan
-View Transcript, dan yang gagal bisa diretry. Auto-transcribe watch dimasukkan setelah
-capture berstatus ready. Bot memberi notifikasi status capture/transkripsi dan link
-reader, bukan mengirim seluruh teks. Notifikasi diperiksa ulang setelah restart;
+View Transcript dan Kirim ke Telegram, dan yang gagal bisa diretry. Auto-transcribe watch dimasukkan setelah
+capture berstatus ready. Bot memberi notifikasi status capture/transkripsi, link
+reader, dan file transkrip langsung saat tombolnya dipilih. Notifikasi diperiksa ulang setelah restart;
 kegagalan pengiriman dicoba lagi, sehingga notifikasi dapat terulang pada crash
 tepat setelah Telegram menerima pesan. Batasi izin akses grup tempat bot dipakai.
 
